@@ -2,7 +2,7 @@ import requests
 import logging
 from django.conf import settings
 from typing import Optional
-
+import hashlib
 
 class BimsApi:
     def __init__(self) -> None:
@@ -13,7 +13,7 @@ class BimsApi:
         url = f"{self.base_url}/users/login/"
         body = {
             "user": settings.BIMS_USER,
-            "password": settings.BIMS_PASSWORD,
+            "password": hashlib.md5(settings.BIMS_PASSWORD.encode()).hexdigest(),
             "tenant": settings.BIMS_TENANT,
         }
 
@@ -61,7 +61,7 @@ class BimsApi:
             logging.error(str(e))
             raise e
 
-    def create_sale(self, contact_id, product_id, price, notes):
+    def create_sale(self, contact_id, sale_products):
         url = f"{self.base_url}/sales/"
         body = {
             "Sale": {
@@ -69,14 +69,7 @@ class BimsApi:
                 "contact_id": contact_id,
                 "company_id": 1,
             },
-            "SalesProduct": [
-                {
-                    "product_id": product_id,
-                    "quantity": 1.00,
-                    "price": str(price),
-                    "notes": notes,
-                }
-            ],
+            "SalesProduct": sale_products,
         }
         params = {"sid": self.sid}
         try:

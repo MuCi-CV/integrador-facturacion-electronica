@@ -1,7 +1,7 @@
 {
     "_meta": {
         "hash": {
-            "sha256": "1140bfc08b023d0dfefb82b2c8afca57609f510819cee6085381b1ceeb7c58bc"
+            "sha256": "5eb1a2be404a9cdfeb73d8ffa393cbe1a613f6f36f2a9e451e46abc38925f1ae"
         },
         "pipfile-spec": 6,
         "requires": {},
@@ -136,11 +136,11 @@
         },
         "django": {
             "hashes": [
-                "sha256:5dd5b787c3ba39637610fe700f54bf158e33560ea0dba600c19921e7ff926ec5",
-                "sha256:aaee9fb0fb4ebd4311520887ad2e33313d368846607f82a9a0ed461cd4c35b18"
+                "sha256:7ca38a78654aee72378594d63e51636c04b8e28574f5505dff630895b5472777",
+                "sha256:a52ea7fcf280b16f7b739cec38fa6d3f8953a5456986944c3ca97e79882b4e38"
             ],
             "index": "pypi",
-            "version": "==3.2.24"
+            "version": "==3.2.25"
         },
         "django-cors-headers": {
             "hashes": [
@@ -486,6 +486,14 @@
             ],
             "markers": "python_version >= '3.8'",
             "version": "==2.2.1"
+        },
+        "woocommerce": {
+            "hashes": [
+                "sha256:be054cf47fbe1ce9e88f380c546835b2e725716cfd91fb8188659b2cb282fe77",
+                "sha256:fcb7498e01dcdf618051fca86168bd198c14ff6dc5d02a41d27805832ad79d35"
+            ],
+            "index": "pypi",
+            "version": "==3.0.0"
         }
     },
     "develop": {}
