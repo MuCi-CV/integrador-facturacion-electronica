@@ -43,4 +43,9 @@ class WooCommerceAPI:
             return res.json()
         raise self.ServerException(res.text)
 
+    def get_order(self, id, **kwargs):
+        res = self.wcapi.get(f"orders/{id}", params=kwargs)
+        if res.status_code == 200:
+            return res.json()
+        raise self.ServerException(res.text)
 wcAPI = WooCommerceAPI()
