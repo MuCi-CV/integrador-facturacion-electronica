@@ -48,4 +48,4 @@ class WooCommerceAPI:
         if res.status_code == 200:
             return res.json()
         raise self.ServerException(res.text)
-wcAPI = WooCommerceAPI()
+wc_api = WooCommerceAPI()

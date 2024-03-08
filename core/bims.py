@@ -4,6 +4,7 @@ from django.conf import settings
 from typing import Optional
 import hashlib
 
+
 class BimsApi:
     def __init__(self) -> None:
         self.base_url = settings.BIMS_URL
@@ -61,13 +62,14 @@ class BimsApi:
             logging.error(str(e))
             raise e
 
-    def create_sale(self, contact_id, sale_products):
+    def create_sale(self, contact_id, sale_products, posale_id):
         url = f"{self.base_url}/sales/"
         body = {
             "Sale": {
                 "invoice_number": "auto",
                 "contact_id": contact_id,
                 "company_id": 1,
+                "posale_id": posale_id,
             },
             "SalesProduct": sale_products,
         }
@@ -94,5 +96,6 @@ class BimsApi:
             logging.error("BIMS send invoice error.")
             logging.error(str(e))
             raise e
+
 
 bims = BimsApi()
