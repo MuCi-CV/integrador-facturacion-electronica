@@ -63,14 +63,17 @@ class SalesView(APIView):
             name = f"{first_name} {last_name}"
 
         try:
-            contact_id = bims.create_contact(
-                name=name,
-                address="",
-                document_type=document_type,
-                document_id=document_id,
-                emails=email,
-                phones=phone,
-            )
+            if first_name == "" and last_name == "" and social_reason == None:
+                contact_id = None
+            else:
+                contact_id = bims.create_contact(
+                    name=name,
+                    address="",
+                    document_type=document_type,
+                    document_id=document_id,
+                    emails=email,
+                    phones=phone,
+                )
         except Exception:
             return Response(
                 data={"status": "fail", "error": "Error al crear el contacto en BIMS."},
@@ -106,19 +109,16 @@ class SalesView(APIView):
 
         sale_products = []
         for item in line_items:
-            product = wc_api.get_product(item.get("product_id"))
-            bims_id = next(
-                (
-                    element
-                    for element in product.get("meta_data")
-                    if element["key"] == "bims_id"
-                ),
-                None,
-            )
-            if bims_id != None:
+            if "variation_id" in item:
+                search = item.get("variation_id")
+            else:
+                search = item.get("product_id")
+            product = wc_api.get_product(search)
+            bims_id = int(product.get("sku", 0))
+            if bims_id != 0:
                 sale_products.append(
                     {
-                        "product_id": int(bims_id.get("value")),
+                        "product_id": bims_id,
                         "quantity": item.get("quantity"),
                     }
                 )
