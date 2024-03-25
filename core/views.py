@@ -27,26 +27,56 @@ class SalesView(APIView):
         email = order.get("billing").get("email")
         phone = order.get("billing").get("phone")
 
-        ruc = next(
-            (element for element in meta_data if element["key"] == "_billing_ruc"), None
-        )
-        gov_id = next(
-            (
-                element
-                for element in meta_data
-                if element["key"] == "_billing_documento"
-            ),
-            None,
-        )
-        social_reason = next(
-            (
-                element
-                for element in meta_data
-                if element["key"] == "_billing_razon_social"
-            ),
-            None,
-        )
+        # Verificamos si es una compra a través de la web o boletería para asignar el punto de
+        # venta correspontiente en BIMS
 
+        user_id = next(
+            (
+                element
+                for element in meta_data
+                if element["key"] == "_fooeventspos_user_id"
+            ),
+            None,
+        )
+        # CAJA WEB ->            ID_BIMS: 6          ID_WC: no existe
+        # CAJA SAN COSMOS ->     ID_BIMS: 4          ID_WC: 729
+        # CAJA TATAKUALAB ->     ID_BIMS: 1          ID_WC: 3
+        if not user_id:
+            posale_id = 6
+        else:
+            value = int(user_id.get("value"))
+            if value == 729:
+                posale_id = 4
+            elif value == 3:
+                posale_id = 1
+            else:
+                posale_id = 7
+
+        if not user_id:
+            ruc = next(
+                (element for element in meta_data if element["key"] == "_billing_ruc"),
+                None,
+            )
+            gov_id = next(
+                (
+                    element
+                    for element in meta_data
+                    if element["key"] == "_billing_documento"
+                ),
+                None,
+            )
+            social_reason = next(
+                (
+                    element
+                    for element in meta_data
+                    if element["key"] == "_billing_razon_social"
+                ),
+                None,
+            )
+        else:
+            ruc = order.get("billing").get("company", None)
+            social_reason = order.get("billing").get("last_name", None)
+            gov_id = None
         document_type = "ci"
         document_id = ""
         if ruc or gov_id:
@@ -79,31 +109,6 @@ class SalesView(APIView):
                 data={"status": "fail", "error": "Error al crear el contacto en BIMS."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-
-        # Verificamos si es una compra a través de la web o boletería para asignar el punto de
-        # venta correspontiente en BIMS
-
-        user_id = next(
-            (
-                element
-                for element in meta_data
-                if element["key"] == "_fooeventspos_user_id"
-            ),
-            None,
-        )
-        # CAJA WEB ->            ID_BIMS: 6          ID_WC: no existe
-        # CAJA SAN COSMOS ->     ID_BIMS: 4          ID_WC: 729
-        # CAJA TATAKUALAB ->     ID_BIMS: 1          ID_WC: 3
-        if not user_id:
-            posale_id = 6
-        else:
-            value = int(user_id.get("value"))
-            if value == 729:
-                posale_id = 4
-            elif value == 3:
-                posale_id = 1
-            else:
-                posale_id = 7
 
         line_items = order.get("line_items")
 
