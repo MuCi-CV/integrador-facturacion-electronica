@@ -74,12 +74,12 @@ class SalesView(APIView):
                 None,
             )
         else:
-            ruc = order.get("billing").get("company", None)
-            social_reason = order.get("billing").get("last_name", None)
+            ruc = re.sub(regex, subst, order.get("shipping").get("company"), 0)
+            social_reason = order.get("shipping").get("last_name", None)
             gov_id = None
         document_type = "ci"
         document_id = ""
-        if ruc or gov_id:
+        if (ruc or gov_id) and not user_id:
             if not ruc:
                 document_type = "ci"
                 document_id = gov_id.get("value")
@@ -87,10 +87,12 @@ class SalesView(APIView):
                 document_type = "ruc"
                 document_id = ruc.get("value")
 
-        if social_reason:
+        if social_reason and not user_id:
             name = re.sub(regex, subst, social_reason.get("value"), 0)
         else:
-            name = f"{first_name} {last_name}"
+            name = social_reason
+            document_type = "ruc"
+            document_id = ruc
 
         try:
             if first_name == "" and last_name == "" and social_reason == None:
