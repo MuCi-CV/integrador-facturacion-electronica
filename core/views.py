@@ -95,7 +95,11 @@ class SalesView(APIView):
             document_id = ruc
 
         try:
-            if first_name == "" and last_name == "" and social_reason == None:
+            if (
+                first_name == ""
+                and last_name == ""
+                and (social_reason == None or social_reason == "")
+            ):
                 contact_id = None
             else:
                 contact_id = bims.create_contact(
