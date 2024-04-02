@@ -124,6 +124,8 @@ class SalesView(APIView):
                 search = item.get("variation_id")
             else:
                 search = item.get("product_id")
+            if search == 0:
+                search = item.get("product_id")
             product = wc_api.get_product(search)
             bims_id = int(product.get("sku", 0))
             if bims_id != 0:
