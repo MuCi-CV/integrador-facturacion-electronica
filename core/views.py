@@ -80,7 +80,7 @@ class SalesView(APIView):
         document_type = "ci"
         document_id = ""
         if (ruc or gov_id) and not user_id:
-            if not ruc:
+            if not ruc or ruc.get("value", "") == "":
                 document_type = "ci"
                 document_id = gov_id.get("value")
             else:
@@ -88,7 +88,10 @@ class SalesView(APIView):
                 document_id = ruc.get("value")
 
         if social_reason and not user_id:
-            name = re.sub(regex, subst, social_reason.get("value"), 0)
+            if social_reason.get("value") != "":
+                name = re.sub(regex, subst, social_reason.get("value"), 0)
+            else:
+                name = f"{first_name} {last_name}"
         else:
             name = social_reason
             document_type = "ruc"
