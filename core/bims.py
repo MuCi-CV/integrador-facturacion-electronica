@@ -62,7 +62,9 @@ class BimsApi:
             logging.error(str(e))
             raise e
 
-    def create_sale(self, contact_id, sale_products, posale_id):
+    def create_sale(
+        self, contact_id, sale_products, posale_id, payment_method_id, amount
+    ):
         url = f"{self.base_url}/sales/"
         body = {
             "Sale": {
@@ -72,6 +74,9 @@ class BimsApi:
                 "posale_id": posale_id,
             },
             "SalesProduct": sale_products,
+            "SalesPaymentMethod": [
+                {"payment_method_id": payment_method_id, "amount": amount}
+            ],
         }
         params = {"sid": self.sid}
         try:

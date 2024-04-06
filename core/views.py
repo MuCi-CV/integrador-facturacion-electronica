@@ -38,11 +38,18 @@ class SalesView(APIView):
             ),
             None,
         )
+        # MÉTODOS DE PAGO EN BIMS
+        # Efectivo -> 21
+        # Transferencia -> 26
+        # Bancard -> 27
+        # En línea -> 28
+
         # CAJA WEB ->            ID_BIMS: 6          ID_WC: no existe
         # CAJA SAN COSMOS ->     ID_BIMS: 4          ID_WC: 729
         # CAJA TATAKUALAB ->     ID_BIMS: 1          ID_WC: 3
         if not user_id:
             posale_id = 6
+            payment_method_id = 28
         else:
             value = int(user_id.get("value"))
             if value == 729:
@@ -51,6 +58,12 @@ class SalesView(APIView):
                 posale_id = 1
             else:
                 posale_id = 7
+            if order.get("payment_method_title") == "Efectivo":
+                payment_method_id = 21
+            elif order.get("payment_method_title") == "Bancard":
+                payment_method_id = 27
+            elif order.get("payment_method_title") == "TransferenciaBancariadirecta":
+                payment_method_id = 26
 
         if not user_id:
             ruc = next(
@@ -140,7 +153,11 @@ class SalesView(APIView):
                 )
         try:
             sale_id = bims.create_sale(
-                contact_id=contact_id, sale_products=sale_products, posale_id=posale_id
+                contact_id=contact_id,
+                sale_products=sale_products,
+                posale_id=posale_id,
+                payment_method_id=payment_method_id,
+                amount=order.get("total"),
             )
         except Exception:
             return Response(
