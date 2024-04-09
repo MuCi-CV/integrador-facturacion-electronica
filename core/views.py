@@ -64,6 +64,8 @@ class SalesView(APIView):
                 payment_method_id = 27
             elif order.get("payment_method_title") == "TransferenciaBancariadirecta":
                 payment_method_id = 26
+            elif order.get("payment_method_title") == "Cortesía":
+                return Response(data={"status": "Cortesía"})
 
         if not user_id:
             ruc = next(
