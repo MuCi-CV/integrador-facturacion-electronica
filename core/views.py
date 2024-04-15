@@ -154,14 +154,26 @@ class SalesView(APIView):
                     or search == 8421
                     or search == 3681
                     or search == 24482
+                    or search == 10648
+                    or search == 14369
                 ):
-                    sale_products.append(
-                        {
-                            "product_id": bims_id,
-                            "quantity": 1.00,
-                            "price": float(item.get("total")),
-                        }
-                    )
+                    if search == 10648 or search == 14369:
+                        sale_products.append(
+                            {
+                                "product_id": bims_id,
+                                "quantity": item.get("quantity"),
+                                "price": int(item.get("total"))
+                                / int(item.get("quantity")),
+                            }
+                        )
+                    else:
+                        sale_products.append(
+                            {
+                                "product_id": bims_id,
+                                "quantity": 1.00,
+                                "price": float(item.get("total")),
+                            }
+                        )
                 else:
                     sale_products.append(
                         {
