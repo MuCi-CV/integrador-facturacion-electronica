@@ -153,6 +153,7 @@ class SalesView(APIView):
                     or search == 14372
                     or search == 8421
                     or search == 3681
+                    or search == 24482
                 ):
                     sale_products.append(
                         {
