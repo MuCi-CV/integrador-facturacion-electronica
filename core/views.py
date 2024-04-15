@@ -148,7 +148,12 @@ class SalesView(APIView):
             bims_id = int(product.get("sku", 0))
             if bims_id != 0:
                 # caso especial de algunos productos en donde el precio es abierto y debe leerse desde la compra
-                if search == 19657 or search == 14372 or search == 8421:
+                if (
+                    search == 19657
+                    or search == 14372
+                    or search == 8421
+                    or search == 3681
+                ):
                     sale_products.append(
                         {
                             "product_id": bims_id,
