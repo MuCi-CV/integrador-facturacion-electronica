@@ -179,6 +179,7 @@ class SalesView(APIView):
                         {
                             "product_id": bims_id,
                             "quantity": item.get("quantity"),
+                            "price": product.get("price"),
                         }
                     )
         try:
