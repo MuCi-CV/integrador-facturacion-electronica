@@ -16,6 +16,14 @@ class SalesView(APIView):
         order = wc_api.get_order(order_id)
         meta_data = order.get("meta_data")
 
+        # Verificamos si no tiene un descuento del 100%
+
+        total = int(order.get("total"))
+        discount = int(order.get("discount_total"))
+
+        if total == 0 and discount > 0:
+            return Response(data={"status": "Descuento 100%"})
+
         # Creamos el contacto en BIMS
 
         # Los nombres y apellidos llegan en camel case así que hacemos la transformación para que
