@@ -155,33 +155,31 @@ class SalesView(APIView):
             product = wc_api.get_product(search)
             bims_id = int(product.get("sku", 0))
             if bims_id != 0:
-                # caso especial de algunos productos en donde el precio es abierto y debe leerse desde la compra
-                if (
-                    search == 19657
-                    or search == 14372
-                    or search == 8421
-                    or search == 3681
-                    or search == 24482
-                    or search == 10648
-                    or search == 14369
+
+                # verificamos si hay descuentos por cupon o descuentos de entradas online
+
+                if discount > 0 or search == 10648 or search == 14369:
+                    sale_products.append(
+                        {
+                            "product_id": bims_id,
+                            "quantity": item.get("quantity"),
+                            "price": int(item.get("total")) / int(item.get("quantity")),
+                        }
+                    )
+                elif (
+                    search == 19657  # entrada grupal sc
+                    or search == 14372  # entrada grupal ttklab
+                    or search == 8421  # donación en caja
+                    or search == 3681  # paquete de cumple
+                    or search == 24482  # entrada online sc
                 ):
-                    if search == 10648 or search == 14369:
-                        sale_products.append(
-                            {
-                                "product_id": bims_id,
-                                "quantity": item.get("quantity"),
-                                "price": int(item.get("total"))
-                                / int(item.get("quantity")),
-                            }
-                        )
-                    else:
-                        sale_products.append(
-                            {
-                                "product_id": bims_id,
-                                "quantity": 1.00,
-                                "price": float(item.get("total")),
-                            }
-                        )
+                    sale_products.append(
+                        {
+                            "product_id": bims_id,
+                            "quantity": 1.00,
+                            "price": float(item.get("total")),
+                        }
+                    )
                 else:
                     sale_products.append(
                         {
@@ -190,6 +188,7 @@ class SalesView(APIView):
                             "price": product.get("price"),
                         }
                     )
+
         try:
             sale_id = bims.create_sale(
                 contact_id=contact_id,
