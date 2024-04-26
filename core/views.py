@@ -107,7 +107,7 @@ class SalesView(APIView):
                 document_type = "ci"
                 document_id = gov_id.get("value")
             else:
-                document_type = "ruc"
+                document_type = "RUC_SIN_DV"
                 document_id = ruc.get("value")
 
         if social_reason and not user_id:
@@ -117,7 +117,7 @@ class SalesView(APIView):
                 name = f"{first_name} {last_name}"
         else:
             name = social_reason
-            document_type = "ruc"
+            document_type = "RUC_SIN_DV"
             document_id = ruc
 
         try:
@@ -132,7 +132,7 @@ class SalesView(APIView):
                     name=name,
                     address="",
                     document_type=document_type,
-                    document_id=document_id,
+                    document_id=re.sub(r"\D", "", document_id.split("-")[0]),
                     emails=email,
                     phones=phone,
                 )
