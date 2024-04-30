@@ -188,7 +188,16 @@ class SalesView(APIView):
                             "price": product.get("price"),
                         }
                     )
-
+        fee_lines = order.get("fee_lines")
+        for fee in fee_lines:
+            if fee.get("name") == "Tip":
+                sale_products.append(
+                    {
+                        "product_id": 100,
+                        "quantity": 1.00,
+                        "price": float(fee.get("total")),
+                    }
+                )
         try:
             sale_id = bims.create_sale(
                 contact_id=contact_id,
