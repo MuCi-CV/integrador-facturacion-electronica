@@ -1,6 +1,18 @@
 import json
 from pathlib import Path
 from dotenv import dotenv_values
+import sentry_sdk
+
+sentry_sdk.init(
+    dsn="https://d4bb11945a6f075bc0d9371375cefab7@o4505665337294848.ingest.us.sentry.io/4507267019964416",
+    # Set traces_sample_rate to 1.0 to capture 100%
+    # of transactions for performance monitoring.
+    traces_sample_rate=1.0,
+    # Set profiles_sample_rate to 1.0 to profile 100%
+    # of sampled transactions.
+    # We recommend adjusting this value in production.
+    profiles_sample_rate=1.0,
+)
 
 config = dotenv_values(".env")
 
@@ -24,7 +36,7 @@ INSTALLED_APPS = [
     "drf_yasg",
     "corsheaders",
     "rest_framework",
-    "core"
+    "core",
 ]
 
 MIDDLEWARE = [
@@ -85,7 +97,6 @@ DATABASES = {
 }
 
 
-
 LANGUAGE_CODE = "es-PY"
 
 TIME_ZONE = "America/Asuncion"
@@ -122,13 +133,12 @@ REST_FRAMEWORK = {
         "rest_framework.filters.OrderingFilter",
         "rest_framework.filters.SearchFilter",
     ),
-    
 }
 
 WOOCOMMERCE_URL = config["WOOCOMMERCE_URL"]
 WOOCOMMERCE_KEY = config["WOOCOMMERCE_KEY"]
 WOOCOMMERCE_SECRET = config["WOOCOMMERCE_SECRET"]
 BIMS_URL = config.get("BIMS_URL")
-BIMS_USER= config.get("BIMS_USER")
-BIMS_PASSWORD= config.get("BIMS_PASSWORD")
-BIMS_TENANT= config.get("BIMS_TENANT")
+BIMS_USER = config.get("BIMS_USER")
+BIMS_PASSWORD = config.get("BIMS_PASSWORD")
+BIMS_TENANT = config.get("BIMS_TENANT")
