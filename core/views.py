@@ -140,7 +140,6 @@ class SalesView(APIView):
                     document_id=re.sub(r"\D", "", document_id.split("-")[0]),
                     emails=email,
                     phones=phone,
-                    contact_emails=contact_emails,
                 )
         except Exception:
             return Response(
@@ -211,6 +210,7 @@ class SalesView(APIView):
                 posale_id=posale_id,
                 payment_method_id=payment_method_id,
                 amount=order.get("total"),
+                contact_emails=contact_emails,
             )
         except Exception:
             return Response(
