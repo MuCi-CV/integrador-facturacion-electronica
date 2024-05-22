@@ -125,6 +125,7 @@ class SalesView(APIView):
                 first_name == ""
                 and last_name == ""
                 and (social_reason == None or social_reason == "")
+                or document_id == ""
             ):
                 contact_id = None
             else:
