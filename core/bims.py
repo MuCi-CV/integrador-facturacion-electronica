@@ -63,7 +63,13 @@ class BimsApi:
             raise e
 
     def create_sale(
-        self, contact_id, sale_products, posale_id, payment_method_id, amount
+        self,
+        contact_id,
+        sale_products,
+        posale_id,
+        payment_method_id,
+        amount,
+        contact_emails,
     ):
         url = f"{self.base_url}/sales/"
         body = {
@@ -72,6 +78,7 @@ class BimsApi:
                 "contact_id": contact_id,
                 "company_id": 1,
                 "posale_id": posale_id,
+                "contact_emails": contact_emails,
             },
             "SalesProduct": sale_products,
             "SalesPaymentMethod": [
