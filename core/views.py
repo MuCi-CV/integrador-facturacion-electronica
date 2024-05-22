@@ -120,6 +120,7 @@ class SalesView(APIView):
             document_type = "RUC_SIN_DV"
             document_id = ruc
 
+        contact_emails = None
         try:
             if (
                 first_name == ""
@@ -128,6 +129,9 @@ class SalesView(APIView):
                 or document_id == ""
             ):
                 contact_id = None
+                if email != "":
+                    contact_emails = email
+
             else:
                 contact_id = bims.create_contact(
                     name=name,
@@ -136,6 +140,7 @@ class SalesView(APIView):
                     document_id=re.sub(r"\D", "", document_id.split("-")[0]),
                     emails=email,
                     phones=phone,
+                    contact_emails=contact_emails,
                 )
         except Exception:
             return Response(
