@@ -211,6 +211,7 @@ class SalesView(APIView):
                 payment_method_id=payment_method_id,
                 amount=order.get("total"),
                 contact_emails=contact_emails,
+                order=order_id,
             )
         except Exception:
             return Response(
