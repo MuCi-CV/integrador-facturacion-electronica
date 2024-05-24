@@ -28,6 +28,24 @@ class BimsApi:
             logging.error(str(e))
             raise e
 
+    def list_contacts(self, document_id: str, document_type: str):
+        url = f"{self.base_url}/contacts/"
+        params = {
+            "sid": self.sid,
+            "document_id": document_id,
+            "document_type": document_type,
+        }
+        try:
+            res = requests.get(url=url, params=params)
+            response_data = res.json()
+            if int(response_data.get("count")) > 0:
+                return int(response_data.get("data")[0].get("Contact").get("id"))
+            return None
+        except requests.RequestException as e:
+            logging.error("BIMS get contact error.")
+            logging.error(str(e))
+            raise e
+
     def create_contact(
         self,
         name: str,

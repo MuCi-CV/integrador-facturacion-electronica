@@ -131,16 +131,21 @@ class SalesView(APIView):
                 contact_id = None
                 if email != "":
                     contact_emails = email
-
             else:
-                contact_id = bims.create_contact(
-                    name=name,
-                    address="",
-                    document_type=document_type,
-                    document_id=re.sub(r"\D", "", document_id.split("-")[0]),
-                    emails=email,
-                    phones=phone,
+                contact = bims.list_contacts(
+                    document_id=document_id, document_type=document_type
                 )
+                if contact != None:
+                    contact_id = contact
+                else:
+                    contact_id = bims.create_contact(
+                        name=name,
+                        address="",
+                        document_type=document_type,
+                        document_id=re.sub(r"\D", "", document_id.split("-")[0]),
+                        emails=email,
+                        phones=phone,
+                    )
         except Exception:
             return Response(
                 data={"status": "fail", "error": "Error al crear el contacto en BIMS."},
