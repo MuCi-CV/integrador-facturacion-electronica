@@ -3,6 +3,7 @@ import logging
 from django.conf import settings
 from typing import Optional
 import hashlib
+from typing import Any
 
 
 class BimsApi:
@@ -48,7 +49,7 @@ class BimsApi:
 
     def create_contact(
         self,
-        id: int | None,
+        id: Any,
         name: str,
         document_id: str,
         document_type: str,
