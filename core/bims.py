@@ -48,6 +48,7 @@ class BimsApi:
 
     def create_contact(
         self,
+        id: int | None,
         name: str,
         document_id: str,
         document_type: str,
@@ -58,6 +59,7 @@ class BimsApi:
         url = f"{self.base_url}/contacts/"
         body = {
             "Contact": {
+                "id": id,
                 "name": name,
                 "document_id": document_id,
                 "document_type": document_type,
