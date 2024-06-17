@@ -208,7 +208,6 @@ class SalesView(APIView):
                     }
                 )
         try:
-            print("a")
             sale_id = bims.create_sale(
                 contact_id=contact_id,
                 sale_products=sale_products,
