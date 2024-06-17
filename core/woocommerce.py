@@ -4,6 +4,7 @@ from woocommerce import API as WCAPI
 from django.conf import settings
 from typing import Union, List
 
+
 class WooCommerceAPI:
     """
     Provides services to interact with a WooCommerce website
@@ -48,4 +49,8 @@ class WooCommerceAPI:
         if res.status_code == 200:
             return res.json()
         raise self.ServerException(res.text)
+
+    # def refund_order(self, id, **kwargs):
+
+
 wc_api = WooCommerceAPI()

@@ -208,6 +208,7 @@ class SalesView(APIView):
                     }
                 )
         try:
+            print("a")
             sale_id = bims.create_sale(
                 contact_id=contact_id,
                 sale_products=sale_products,
@@ -225,3 +226,8 @@ class SalesView(APIView):
         # Thread(target=bims.send_invoice, args=[sale_id]).start()
 
         return Response(data={"status": "ok"})
+
+
+class RefundView(APIView):
+    def post(self, request):
+        print(request.data)
