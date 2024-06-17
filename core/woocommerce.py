@@ -50,7 +50,11 @@ class WooCommerceAPI:
             return res.json()
         raise self.ServerException(res.text)
 
-    # def refund_order(self, id, **kwargs):
+    def refund_order(self, id, data, **kwargs):
+        res = self.wcapi.post(f"orders/{id}/refunds", data={"data": data})
+        if res.status_code == 200:
+            return res.json()
+        raise self.ServerException(res.text)
 
 
 wc_api = WooCommerceAPI()

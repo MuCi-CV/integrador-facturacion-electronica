@@ -230,4 +230,22 @@ class SalesView(APIView):
 
 class RefundView(APIView):
     def post(self, request):
-        print(request.data)
+        # Traemos la información del pedido con la api de WC
+        order_id = request.data.get("arg")
+        order = wc_api.get_order(order_id)
+
+        line_items = order.get("line_items")
+
+        products = []
+        for item in line_items:
+            products.append(
+                {
+                    "product_id": item.get("product_id"),
+                    "variation_id": item.get("variation_id"),
+                    "quantity": item.get("quantity"),
+                }
+            )
+
+        data = {"api_refund": False, "api_restock": True, "line_items": products}
+        wc_api.refund_order(id=order_id, data=data)
+        return Response(data={"status": "ok"})
