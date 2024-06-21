@@ -60,7 +60,13 @@ class SalesView(APIView):
             payment_method_id = 28
         else:
             value = int(user_id.get("value"))
-            if value == 729:
+            if value == 2:
+                return Response(
+                    data={
+                        "status": "No procesado por ser realizado desde la cuenta de administrador."
+                    }
+                )
+            elif value == 729:
                 posale_id = 4
             elif value == 3:
                 posale_id = 1
