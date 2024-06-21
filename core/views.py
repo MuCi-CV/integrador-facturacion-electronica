@@ -178,7 +178,10 @@ class SalesView(APIView):
                         {
                             "product_id": bims_id,
                             "quantity": item.get("quantity"),
-                            "price": int(item.get("total")) / int(item.get("quantity")),
+                            "price": (
+                                int(item.get("total")) / int(item.get("quantity"))
+                            )
+                            + int(item.get("total_tax")),
                         }
                     )
                 elif (
