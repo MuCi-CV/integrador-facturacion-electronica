@@ -168,6 +168,8 @@ class SalesView(APIView):
             if search == 0:
                 search = item.get("product_id")
             product = wc_api.get_product(search)
+            if product.get("sku") == "":
+                return Response(data={"status": "No procesado por falta de sku."})
             bims_id = int(product.get("sku", 0))
             if bims_id != 0:
 
@@ -217,15 +219,16 @@ class SalesView(APIView):
                     }
                 )
         try:
-            sale_id = bims.create_sale(
-                contact_id=contact_id,
-                sale_products=sale_products,
-                posale_id=posale_id,
-                payment_method_id=payment_method_id,
-                amount=order.get("total"),
-                contact_emails=contact_emails,
-                order=order_id,
-            )
+            print("a")
+            # sale_id = bims.create_sale(
+            #     contact_id=contact_id,
+            #     sale_products=sale_products,
+            #     posale_id=posale_id,
+            #     payment_method_id=payment_method_id,
+            #     amount=order.get("total"),
+            #     contact_emails=contact_emails,
+            #     order=order_id,
+            # )
         except Exception:
             return Response(
                 data={"status": "fail", "error": "Error al crear la venta en BIMS."},
