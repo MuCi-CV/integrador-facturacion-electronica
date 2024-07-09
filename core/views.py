@@ -140,7 +140,8 @@ class SalesView(APIView):
                     contact_emails = email
             else:
                 contact = bims.list_contacts(
-                    document_id=document_id, document_type=document_type
+                    document_id=re.sub(r"\D", "", document_id.split("-")[0]),
+                    document_type=document_type,
                 )
                 contact_id = bims.create_contact(
                     id=contact,
@@ -219,7 +220,6 @@ class SalesView(APIView):
                     }
                 )
         try:
-            # print("a")
             sale_id = bims.create_sale(
                 contact_id=contact_id,
                 sale_products=sale_products,
