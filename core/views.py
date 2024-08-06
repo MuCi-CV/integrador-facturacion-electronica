@@ -220,15 +220,26 @@ class SalesView(APIView):
                     }
                 )
         try:
-            sale_id = bims.create_sale(
-                contact_id=contact_id,
-                sale_products=sale_products,
-                posale_id=posale_id,
-                payment_method_id=payment_method_id,
-                amount=order.get("total"),
-                contact_emails=contact_emails,
-                order=order_id,
-            )
+            if contact_id == None and contact != None:
+                sale_id = bims.create_sale(
+                    contact_id=contact,
+                    sale_products=sale_products,
+                    posale_id=posale_id,
+                    payment_method_id=payment_method_id,
+                    amount=order.get("total"),
+                    contact_emails=contact_emails,
+                    order=order_id,
+                )
+            else:
+                sale_id = bims.create_sale(
+                    contact_id=contact_id,
+                    sale_products=sale_products,
+                    posale_id=posale_id,
+                    payment_method_id=payment_method_id,
+                    amount=order.get("total"),
+                    contact_emails=contact_emails,
+                    order=order_id,
+                )
         except Exception:
             return Response(
                 data={"status": "fail", "error": "Error al crear la venta en BIMS."},
