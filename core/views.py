@@ -20,7 +20,7 @@ class SalesView(APIView):
 
         total = int(order.get("total"))
         discount = int(order.get("discount_total"))
-
+        prices_include_tax = order.get("prices_include_tax", True)
         if total == 0 and discount > 0:
             return Response(data={"status": "Descuento 100%"})
 
@@ -128,12 +128,12 @@ class SalesView(APIView):
                 document_type = "ruc"
 
         contact_emails = None
+        contact = None
         try:
             if (
                 first_name == ""
                 and last_name == ""
-                and (social_reason == None or social_reason == "")
-                or document_id == ""
+                and (social_reason == None or social_reason == "" or document_id == "")
             ):
                 contact_id = None
                 if email != "":
@@ -176,7 +176,9 @@ class SalesView(APIView):
 
                 # verificamos si hay descuentos por cupon o descuentos de entradas online
 
-                if discount > 0 or search == 10648 or search == 14369:
+                if (
+                    discount > 0 or search == 10648 or search == 14369
+                ) and prices_include_tax == False:
                     sale_products.append(
                         {
                             "product_id": bims_id,
@@ -206,7 +208,10 @@ class SalesView(APIView):
                         {
                             "product_id": bims_id,
                             "quantity": item.get("quantity"),
-                            "price": product.get("price"),
+                            "price": (
+                                int(item.get("total")) + int(item.get("total_tax"))
+                            )
+                            / int(item.get("quantity")),
                         }
                     )
         fee_lines = order.get("fee_lines")
