@@ -29,6 +29,26 @@ class BimsApi:
             logging.error(str(e))
             raise e
 
+    def _request_with_relogin(self, method, url, **kwargs):
+        """
+        Hace una solicitud y, si recibe un 401, renueva el sid y vuelve a intentar.
+        """
+        try:
+            res = method(url, **kwargs)
+            if res.status_code == 401:
+                logging.info("Session expired, attempting relogin...")
+                self.sid = self.login()  # Intentar relogin
+                if self.sid:
+                    # Actualizamos los parámetros con el nuevo sid y repetimos la solicitud
+                    kwargs["params"]["sid"] = self.sid
+                    res = method(url, **kwargs)
+            res.raise_for_status()
+            return res.json()
+        except requests.RequestException as e:
+            logging.error(f"Error during {method.__name__.upper()} request to {url}.")
+            logging.error(str(e))
+            raise e
+
     def list_contacts(self, document_id: str, document_type: str):
         url = f"{self.base_url}/contacts/"
         params = {
@@ -37,8 +57,7 @@ class BimsApi:
             "document_type": document_type,
         }
         try:
-            res = requests.get(url=url, params=params)
-            response_data = res.json()
+            response_data = self._request_with_relogin(requests.get, url, params=params)
             if int(response_data.get("count")) > 0:
                 return int(response_data.get("data")[0].get("Contact").get("id"))
             return None
@@ -71,13 +90,11 @@ class BimsApi:
         }
         params = {"sid": self.sid}
         try:
-            res = requests.post(url=url, json=body, params=params)
-            response_data = res.json()
+            response_data = self._request_with_relogin(
+                requests.post, url, json=body, params=params
+            )
             if response_data.get("status") == "ok":
                 return response_data.get("data").get("Contact").get("id")
-            else:
-                logging.error("BIMS create contact error.")
-                logging.error(response_data)
         except requests.RequestException as e:
             logging.error("BIMS create contact error.")
             logging.error(str(e))
@@ -111,7 +128,9 @@ class BimsApi:
         }
         params = {"sid": self.sid}
         try:
-            res = requests.post(url=url, json=body, params=params)
+            res = self._request_with_relogin(
+                requests.post, url, json=body, params=params
+            )
             response_data = res.json()
             if response_data.get("status") == "ok":
                 return response_data.get("data").get("Sale").get("id")
@@ -124,7 +143,7 @@ class BimsApi:
         url = f"{self.base_url}/sales/send/{sale_id}/"
         params = {"sid": self.sid}
         try:
-            res = requests.get(url=url, params=params)
+            res = self._request_with_relogin(requests.get, url, params=params)
             response_data = res.json()
             if response_data.get("status") == "ok":
                 return "ok"
