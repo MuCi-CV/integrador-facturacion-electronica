@@ -131,9 +131,8 @@ class BimsApi:
             res = self._request_with_relogin(
                 requests.post, url, json=body, params=params
             )
-            response_data = res.json()
-            if response_data.get("status") == "ok":
-                return response_data.get("data").get("Sale").get("id")
+            if res.get("status") == "ok":
+                return res.get("data").get("Sale").get("id")
         except requests.RequestException as e:
             logging.error("BIMS create sale error.")
             logging.error(str(e))
