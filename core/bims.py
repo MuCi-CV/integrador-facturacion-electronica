@@ -1,9 +1,15 @@
 import requests
 import logging
 from django.conf import settings
-from typing import Optional
+from typing import Optional, Any
 import hashlib
-from typing import Any
+import time
+
+logging.basicConfig(
+    filename="app.log",
+    level=logging.ERROR,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
 
 
 class BimsApi:
@@ -30,16 +36,12 @@ class BimsApi:
             raise e
 
     def _request_with_relogin(self, method, url, **kwargs):
-        """
-        Hace una solicitud y, si recibe un 401, renueva el sid y vuelve a intentar.
-        """
         try:
             res = method(url, **kwargs)
             if res.status_code == 401:
                 logging.info("Session expired, attempting relogin...")
                 self.sid = self.login()  # Intentar relogin
                 if self.sid:
-                    # Actualizamos los parámetros con el nuevo sid y repetimos la solicitud
                     kwargs["params"]["sid"] = self.sid
                     res = method(url, **kwargs)
             res.raise_for_status()
@@ -49,6 +51,28 @@ class BimsApi:
             logging.error(str(e))
             raise e
 
+    def _retry_request(self, method, url, max_retries=5, retry_delay=2, **kwargs):
+        attempts = 0
+        while attempts < max_retries:
+            try:
+                response_data = self._request_with_relogin(method, url, **kwargs)
+                if response_data.get("status") == "ok":
+                    return response_data
+                else:
+                    attempts += 1
+                    logging.warning(
+                        f"Attempt {attempts} failed: status not 'ok'. Retrying..."
+                    )
+                    time.sleep(retry_delay)
+            except requests.RequestException as e:
+                logging.error(
+                    f"Error in request to {url}. Attempt {attempts + 1} of {max_retries}."
+                )
+                logging.error(str(e))
+                attempts += 1
+                time.sleep(retry_delay)
+        raise Exception(f"Failed request to {url} after {max_retries} attempts.")
+
     def list_contacts(self, document_id: str, document_type: str):
         url = f"{self.base_url}/contacts/"
         params = {
@@ -56,15 +80,10 @@ class BimsApi:
             "document_id": document_id,
             "document_type": document_type,
         }
-        try:
-            response_data = self._request_with_relogin(requests.get, url, params=params)
-            if int(response_data.get("count")) > 0:
-                return int(response_data.get("data")[0].get("Contact").get("id"))
-            return None
-        except requests.RequestException as e:
-            logging.error("BIMS get contact error.")
-            logging.error(str(e))
-            raise e
+        response_data = self._retry_request(requests.get, url, params=params)
+        if int(response_data.get("count")) > 0:
+            return int(response_data.get("data")[0].get("Contact").get("id"))
+        return None
 
     def create_contact(
         self,
@@ -89,16 +108,10 @@ class BimsApi:
             }
         }
         params = {"sid": self.sid}
-        try:
-            response_data = self._request_with_relogin(
-                requests.post, url, json=body, params=params
-            )
-            if response_data.get("status") == "ok":
-                return response_data.get("data").get("Contact").get("id")
-        except requests.RequestException as e:
-            logging.error("BIMS create contact error.")
-            logging.error(str(e))
-            raise e
+        response_data = self._retry_request(
+            requests.post, url, json=body, params=params
+        )
+        return response_data.get("data").get("Contact").get("id")
 
     def create_sale(
         self,
@@ -119,7 +132,7 @@ class BimsApi:
                 "posale_id": posale_id,
                 "contact_emails": contact_emails,
                 "_id": order,
-                # "billed": False,
+                "billed": False,
             },
             "SalesProduct": sale_products,
             "SalesPaymentMethod": [
@@ -127,29 +140,16 @@ class BimsApi:
             ],
         }
         params = {"sid": self.sid}
-        try:
-            res = self._request_with_relogin(
-                requests.post, url, json=body, params=params
-            )
-            if res.get("status") == "ok":
-                return res.get("data").get("Sale").get("id")
-        except requests.RequestException as e:
-            logging.error("BIMS create sale error.")
-            logging.error(str(e))
-            raise e
+        response_data = self._retry_request(
+            requests.post, url, json=body, params=params
+        )
+        return response_data.get("data").get("Sale").get("id")
 
     def send_invoice(self, sale_id):
         url = f"{self.base_url}/sales/send/{sale_id}/"
         params = {"sid": self.sid}
-        try:
-            res = self._request_with_relogin(requests.get, url, params=params)
-            response_data = res.json()
-            if response_data.get("status") == "ok":
-                return "ok"
-        except requests.RequestException as e:
-            logging.error("BIMS send invoice error.")
-            logging.error(str(e))
-            raise e
+        response_data = self._retry_request(requests.get, url, params=params)
+        return "ok" if response_data.get("status") == "ok" else None
 
 
 bims = BimsApi()
