@@ -132,7 +132,6 @@ class BimsApi:
                 "posale_id": posale_id,
                 "contact_emails": contact_emails,
                 "_id": order,
-                "billed": False,
             },
             "SalesProduct": sale_products,
             "SalesPaymentMethod": [
