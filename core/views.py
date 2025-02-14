@@ -1,3 +1,4 @@
+import json
 from threading import Thread
 from django.shortcuts import render
 from rest_framework.views import APIView
@@ -72,14 +73,64 @@ class SalesView(APIView):
                 posale_id = 1
             else:
                 posale_id = 7
-            if order.get("payment_method_title") == "Efectivo":
-                payment_method_id = 21
-            elif order.get("payment_method_title") == "Bancard":
-                payment_method_id = 27
-            elif order.get("payment_method_title") == "Transferencia Bancaria directa":
-                payment_method_id = 26
-            elif order.get("payment_method_title") == "Cortesía":
+
+            if order.get("payment_method_title") == "Cortesía":
                 return Response(data={"status": "Cortesía"})
+
+            # Extraer métodos de pago desde `_fooeventspos_payments`
+            payment_metadata = next(
+                (
+                    element
+                    for element in meta_data
+                    if element["key"] == "_fooeventspos_payments"
+                ),
+                None,
+            )
+
+            # Mapeo de métodos de pago de FooEvents POS a BIMS
+            method_mapping = {
+                "fooeventspos_check_payment": 34,  # Gift Card
+                "fooeventspos_cash": 21,  # Efectivo
+                "fooeventspos_cash_on_delivery": 26,  # Transferencia Bancaria
+                "fooeventspos_other": 27,  # Bancard
+                "fooeventspos_online": 28,  # Pago en línea
+            }
+
+            sales_payment_methods = []  # Lista de métodos de pago para BIMS
+            gift_card_amount = 0  # Inicializar el monto pagado con Gift Card
+
+            if payment_metadata:
+                payments = json.loads(
+                    payment_metadata["value"]
+                )  # Convertir JSON a lista de pagos
+                payments = json.loads(
+                    payment_metadata["value"]
+                )  # Convertir JSON a lista de pagos
+
+                # Si hay solo un método de pago y no tiene "amount", significa que pagó todo el pedido
+                if len(payments) == 1 and "amount" not in payments[0]:
+                    single_payment_method = payments[0]["opmk"]
+                    payment_method_id = method_mapping.get(
+                        single_payment_method, 28
+                    )  # Por defecto: En línea
+                    sales_payment_methods.append(
+                        {
+                            "payment_method_id": payment_method_id,
+                            "amount": total,  # Se pagó el total con este método
+                        }
+                    )
+                else:
+                    # Si hay más de un método de pago, cada uno tendrá "amount"
+                    for payment in payments:
+                        opmk = payment["opmk"]
+                        amount = float(
+                            payment["amount"]
+                        )  # Siempre existirá "amount" en este caso
+                        payment_method_id = method_mapping.get(opmk, 28)
+
+                        sales_payment_methods.append(
+                            {"payment_method_id": payment_method_id, "amount": amount}
+                        )
 
         if not user_id:
             ruc = next(
@@ -230,8 +281,7 @@ class SalesView(APIView):
                     contact_id=contact,
                     sale_products=sale_products,
                     posale_id=posale_id,
-                    payment_method_id=payment_method_id,
-                    amount=order.get("total"),
+                    sales_payment_methods=sales_payment_methods,
                     contact_emails=contact_emails,
                     order=order_id,
                 )
@@ -240,8 +290,7 @@ class SalesView(APIView):
                     contact_id=contact_id,
                     sale_products=sale_products,
                     posale_id=posale_id,
-                    payment_method_id=payment_method_id,
-                    amount=order.get("total"),
+                    sales_payment_methods=sales_payment_methods,
                     contact_emails=contact_emails,
                     order=order_id,
                 )

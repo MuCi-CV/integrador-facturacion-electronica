@@ -118,8 +118,7 @@ class BimsApi:
         contact_id,
         sale_products,
         posale_id,
-        payment_method_id,
-        amount,
+        sales_payment_methods,
         contact_emails,
         order,
     ):
@@ -134,9 +133,7 @@ class BimsApi:
                 "_id": order,
             },
             "SalesProduct": sale_products,
-            "SalesPaymentMethod": [
-                {"payment_method_id": payment_method_id, "amount": amount}
-            ],
+            "SalesPaymentMethod": sales_payment_methods,
         }
         params = {"sid": self.sid}
         response_data = self._retry_request(
