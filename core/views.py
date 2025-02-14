@@ -58,7 +58,12 @@ class SalesView(APIView):
         # CAJA TATAKUALAB ->     ID_BIMS: 1          ID_WC: 3
         if not user_id:
             posale_id = 6
-            payment_method_id = 28
+            sales_payment_methods = [
+                {
+                    "payment_method_id": 28,
+                    "amount": total,
+                }
+            ]
         else:
             value = int(user_id.get("value"))
             if value == 2:
