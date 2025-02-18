@@ -37,6 +37,13 @@ Sisteque que integra woocommerce y BIMS
         FRONTEND_URL = frontenturl
         EMAIL_USE_SSL = true
         EMAIL_USE_TLS = false
+        WOOCOMMERCE_URL = woocommerce_url
+        WOOCOMMERCE_KEY = woocommerce_key
+        WOOCOMMERCE_SECRET = woocommerce_secret
+        BIMS_URL = bims_url
+        BIMS_USER = bims_user
+        BIMS_PASSWORD = bims_password
+        BIMS_TENANT = bims_tenant
 
     ```
 
