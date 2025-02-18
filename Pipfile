@@ -16,6 +16,5 @@ gunicorn = "*"
 requests = "*"
 woocommerce = "*"
 pymysql = "*"
-install = "*"
 cryptography = "*"
 sentry-sdk = {version = "*", extras = ["django"]}
