@@ -1,12 +1,11 @@
+import re
 import json
-from threading import Thread
-from django.shortcuts import render
+from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from core.woocommerce import wc_api
 from core.bims import bims
-from rest_framework import status
-import re
+from core.models import FailedOrder
 
 
 class SalesView(APIView):
@@ -209,6 +208,7 @@ class SalesView(APIView):
                     phones=phone,
                 )
         except Exception:
+            FailedOrder.objects.create(order_id=order_id)
             return Response(
                 data={"status": "fail", "error": "Error al crear el contacto en BIMS."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -300,6 +300,7 @@ class SalesView(APIView):
                     order=order_id,
                 )
         except Exception:
+            FailedOrder.objects.create(order_id=order_id)
             return Response(
                 data={"status": "fail", "error": "Error al crear la venta en BIMS."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
