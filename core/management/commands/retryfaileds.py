@@ -10,7 +10,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         try:
             failed_orders = FailedOrder.objects.filter(status=FailedOrder.FAILED)
-            url = settings.API_BASE_URL + "/sales/" 
+            url = settings.BASE_URL + "/sales/" 
 
             for order in failed_orders:
                 response = requests.post(url, json={"arg": order.order_id})
