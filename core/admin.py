@@ -1,5 +1,10 @@
-from django.contrib import admin
+import requests
+from datetime import datetime
+from django.contrib import admin, messages
 from django.utils.html import format_html
+from django.conf import settings
+from django.urls import path
+from django.http import HttpResponseRedirect
 from core.models import FailedOrder
 
 
@@ -21,3 +26,55 @@ class FailedOrderAdmin(admin.ModelAdmin):
 
     colored_status.admin_order_field = "status"
     colored_status.short_description = "Estado"
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom_urls = [
+            path(
+                "retry_failed_orders/",
+                self.admin_site.admin_view(self.retry_failed_orders_button),
+                name="retry_failed_orders",
+            ),
+        ]
+        return custom_urls + urls
+
+    def retry_failed_orders_button(self, request):
+        """Vista que procesa las órdenes fallidas."""
+        try:
+            failed_orders = FailedOrder.objects.filter(status=FailedOrder.FAILED)
+            url = settings.BASE_URL + "/sales/"
+
+            for order in failed_orders:
+                try:
+                    response = requests.post(
+                        url, json={"arg": order.order_id}, verify=True
+                    )
+
+                    if (
+                        response.status_code == 200
+                        and response.json().get("status") == "ok"
+                    ):
+                        order.status = FailedOrder.COMPLETED
+                        order.message = "Procesado con éxito."
+                        order.save()
+
+                except Exception as e:
+                    current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
+                    order.message = (
+                        f"{current_time} | Error processing order {order.order_id}: {e}"
+                    )
+                    order.save()
+
+            self.message_user(
+                request,
+                "Las órdenes fallidas han sido procesadas correctamente.",
+                level=messages.SUCCESS,
+            )
+        except Exception as e:
+            self.message_user(
+                request,
+                f"Ocurrió un error inesperado al procesar las órdenes fallidas: {str(e)}",
+                level=messages.ERROR,
+            )
+
+        return HttpResponseRedirect("..")
