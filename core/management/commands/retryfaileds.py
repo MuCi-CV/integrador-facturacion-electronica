@@ -1,7 +1,7 @@
+import requests
+from django.conf import settings
 from django.core.management.base import BaseCommand
-from django.test import RequestFactory
 from core.models import FailedOrder
-from core.views import SalesView
 
 
 class Command(BaseCommand):
@@ -10,11 +10,10 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         try:
             failed_orders = FailedOrder.objects.filter(status=FailedOrder.FAILED)
-            factory = RequestFactory()
+            url = settings.API_BASE_URL + "/sales/" 
 
             for order in failed_orders:
-                request = factory.post("/", {"arg": order.order_id})
-                response = SalesView.as_view()(request).data
+                response = requests.post(url, json={"arg": order.order_id})
 
                 if response.get("status") == "ok":
                     order.status = FailedOrder.COMPLETED
