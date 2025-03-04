@@ -15,6 +15,7 @@ class FailedOrder(models.Model):
     status = models.PositiveSmallIntegerField(
         verbose_name="Estado", choices=STATUS_CHOICES, default=FAILED
     )
+    message = models.TextField(verbose_name="Mensaje", blank=True, null=True)
     created_at = models.DateTimeField(default=now)
     updated_at = models.DateTimeField(auto_now=True)
 

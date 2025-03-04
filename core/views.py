@@ -207,8 +207,12 @@ class SalesView(APIView):
                     emails=email,
                     phones=phone,
                 )
-        except Exception:
-            FailedOrder.objects.create(order_id=order_id)
+        except Exception as e:
+            error_message = str(e)
+            FailedOrder.objects.update_or_create(
+                order_id=order_id,
+                message=f"Error al crear el contacto en BIMS. {error_message}",
+            )
             return Response(
                 data={"status": "fail", "error": "Error al crear el contacto en BIMS."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -299,8 +303,12 @@ class SalesView(APIView):
                     contact_emails=contact_emails,
                     order=order_id,
                 )
-        except Exception:
-            FailedOrder.objects.create(order_id=order_id)
+        except Exception as e:
+            error_message = str(e)
+            FailedOrder.objects.update_or_create(
+                order_id=order_id,
+                message=f"Error al crear la venta en BIMS. {error_message}",
+            )
             return Response(
                 data={"status": "fail", "error": "Error al crear la venta en BIMS."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,

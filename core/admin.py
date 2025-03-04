@@ -5,7 +5,7 @@ from core.models import FailedOrder
 
 @admin.register(FailedOrder)
 class FailedOrderAdmin(admin.ModelAdmin):
-    list_display = ("order_id", "colored_status")
+    list_display = ("order_id", "colored_status", "message")
     list_display_links = ("order_id", "colored_status")
     search_fields = ("order_id",)
     ordering = ("status", "order_id")
