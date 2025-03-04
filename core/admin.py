@@ -15,6 +15,7 @@ class FailedOrderAdmin(admin.ModelAdmin):
     search_fields = ("order_id",)
     ordering = ("status", "order_id")
     list_filter = ("status",)
+    actions = ["retry_selected_orders"]
 
     def colored_status(self, obj):
         colors = {1: "red", 2: "green"}
@@ -39,7 +40,7 @@ class FailedOrderAdmin(admin.ModelAdmin):
         return custom_urls + urls
 
     def retry_failed_orders_button(self, request):
-        """Vista que procesa las órdenes fallidas."""
+        """Processes all failed orders."""
         try:
             failed_orders = FailedOrder.objects.filter(status=FailedOrder.FAILED)
             url = settings.BASE_URL + "/sales/"
@@ -78,3 +79,42 @@ class FailedOrderAdmin(admin.ModelAdmin):
             )
 
         return HttpResponseRedirect("..")
+
+    def retry_selected_orders(self, request, queryset):
+        """Retries processing the selected orders."""
+        try:
+            url = settings.BASE_URL + "/sales/"
+
+            for order in queryset:
+                if order.status == FailedOrder.FAILED:
+                    try:
+                        response = requests.post(
+                            url, json={"arg": order.order_id}, verify=True
+                        )
+
+                        if (
+                            response.status_code == 200
+                            and response.json().get("status") == "ok"
+                        ):
+                            order.status = FailedOrder.COMPLETED
+                            order.message = "Procesado con éxito."
+                            order.save()
+
+                    except Exception as e:
+                        current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
+                        order.message = f"{current_time} | Error processing order {order.order_id}: {e}"
+                        order.save()
+
+            self.message_user(
+                request,
+                "Las órdenes seleccionadas han sido procesadas correctamente.",
+                level=messages.SUCCESS,
+            )
+        except Exception as e:
+            self.message_user(
+                request,
+                f"Ocurrió un error inesperado al procesar las órdenes seleccionadas: {str(e)}",
+                level=messages.ERROR,
+            )
+
+    retry_selected_orders.short_description = "Reintentar órdenes seleccionadas"
