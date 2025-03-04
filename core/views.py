@@ -211,7 +211,9 @@ class SalesView(APIView):
             error_message = str(e)
             FailedOrder.objects.update_or_create(
                 order_id=order_id,
-                message=f"Error al crear el contacto en BIMS. {error_message}",
+                defaults={
+                    "message": f"Error al crear el contacto en BIMS. {error_message}"
+                },
             )
             return Response(
                 data={"status": "fail", "error": "Error al crear el contacto en BIMS."},
@@ -307,7 +309,9 @@ class SalesView(APIView):
             error_message = str(e)
             FailedOrder.objects.update_or_create(
                 order_id=order_id,
-                message=f"Error al crear la venta en BIMS. {error_message}",
+                defaults={
+                    "message": f"Error al crear la venta en BIMS. {error_message}"
+                },
             )
             return Response(
                 data={"status": "fail", "error": "Error al crear la venta en BIMS."},
