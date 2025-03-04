@@ -15,7 +15,7 @@ class Command(BaseCommand):
             for order in failed_orders:
                 response = requests.post(url, json={"arg": order.order_id})
 
-                if response.get("status") == "ok":
+                if response.status_code == 200 and response.json().get("status") == "ok":
                     order.status = FailedOrder.COMPLETED
                     order.save()
 
