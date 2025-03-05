@@ -1,0 +1,38 @@
+{% extends "admin/base_site.html" %}
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Inicio</a> ›
+    <a href="{% url 'admin:core_failedorder_changelist' %}">Órdenes fallidas</a> ›
+    Consultar Orden
+</div>
+{% endblock %}
+
+{% block content %}
+<h2>Consultar Orden</h2>
+<form method="post">
+    {% csrf_token %}
+    <label for="order_id">ID de la Orden:</label>
+    <input type="text" name="order_id" required>
+    <button type="submit">Consultar</button>
+</form>
+
+{% if order_data %}
+    <h3>Resultado:</h3>
+    <button onclick="copyResponse()">Copiar Respuesta</button>
+    <pre id="response">{{ order_data|pprint }}</pre>
+{% elif error %}
+    <p style="color: red;">Error: {{ error }}</p>
+{% endif %}
+
+<p><a href="{% url 'admin:core_failedorder_changelist' %}">← Volver a Órdenes fallidas</a></p>
+
+<script>
+    function copyResponse() {
+        const responseText = document.getElementById("response").innerText;
+        navigator.clipboard.writeText(responseText).then(() => {
+        }).catch(err => {
+            console.error("Error al copiar:", err);
+        });
+    }
+</script>
+{% endblock %}

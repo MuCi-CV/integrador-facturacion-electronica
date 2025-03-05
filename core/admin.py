@@ -5,7 +5,9 @@ from django.utils.html import format_html
 from django.conf import settings
 from django.urls import path
 from django.http import HttpResponseRedirect
+from django.shortcuts import render
 from core.models import FailedOrder
+from core.woocommerce import wc_api
 
 
 @admin.register(FailedOrder)
@@ -35,6 +37,21 @@ class FailedOrderAdmin(admin.ModelAdmin):
                 "retry_failed_orders/",
                 self.admin_site.admin_view(self.retry_failed_orders_button),
                 name="retry_failed_orders",
+            ),
+            path(
+                "retry_failed_orders/",
+                self.admin_site.admin_view(self.retry_failed_orders_button),
+                name="retry_failed_orders",
+            ),
+            path(
+                "search_product/",
+                self.admin_site.admin_view(self.search_product_view),
+                name="search_product",
+            ),
+            path(
+                "search_order/",
+                self.admin_site.admin_view(self.search_order_view),
+                name="search_order",
             ),
         ]
         return custom_urls + urls
@@ -118,3 +135,41 @@ class FailedOrderAdmin(admin.ModelAdmin):
             )
 
     retry_selected_orders.short_description = "Reintentar órdenes seleccionadas"
+
+    def search_product_view(self, request):
+        """View to search for products by ID."""
+        product_data = None
+        error = None
+
+        if request.method == "POST":
+            product_id = request.POST.get("product_id")
+            if product_id:
+                try:
+                    product_data = wc_api.get_product(product_id)
+                except Exception as e:
+                    error = str(e)
+
+        return render(
+            request,
+            "admin/search_product.html",
+            {"product_data": product_data, "error": error},
+        )
+
+    def search_order_view(self, request):
+        """View to search for orders by ID."""
+        order_data = None
+        error = None
+
+        if request.method == "POST":
+            order_id = request.POST.get("order_id")
+            if order_id:
+                try:
+                    order_data = wc_api.get_order(order_id)
+                except Exception as e:
+                    error = str(e)
+
+        return render(
+            request,
+            "admin/search_order.html",
+            {"order_data": order_data, "error": error},
+        )
