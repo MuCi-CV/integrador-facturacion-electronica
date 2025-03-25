@@ -13,7 +13,20 @@ class SalesView(APIView):
 
         # Traemos la información del pedido con la api de WC
         order_id = request.data.get("arg")
-        order = wc_api.get_order(order_id)
+        try:
+            order = wc_api.get_order(order_id)
+        except Exception as e:
+            error_message = str(e)
+            FailedOrder.objects.update_or_create(
+                order_id=order_id,
+                defaults={
+                    "message": f"No se pudo obtener la orden. {error_message}"
+                },
+            )
+            return Response(
+                data={"status": "fail", "error": f"No se pudo obtener la orden. {error_message}"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         meta_data = order.get("meta_data")
 
         # Verificamos si no tiene un descuento del 100%
