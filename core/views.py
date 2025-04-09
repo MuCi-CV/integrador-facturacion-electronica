@@ -28,316 +28,347 @@ class SalesView(APIView):
                 },
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        meta_data = order.get("meta_data")
 
-        # Verificamos si no tiene un descuento del 100%
+        try:
 
-        total = int(order.get("total"))
-        discount = int(order.get("discount_total"))
-        prices_include_tax = order.get("prices_include_tax", True)
-        if total == 0 and discount > 0:
-            return Response(data={"status": "Descuento 100%"})
+            meta_data = order.get("meta_data")
 
-        # Creamos el contacto en BIMS
+            # Verificamos si no tiene un descuento del 100%
 
-        # Los nombres y apellidos llegan en camel case así que hacemos la transformación para que
-        # que estén separados con espacios
-        regex = r"(?<=[a-zA-Z])(?=[A-Z])"
-        subst = " "
-        first_name = re.sub(regex, subst, order.get("billing").get("first_name"), 0)
-        last_name = re.sub(regex, subst, order.get("billing").get("last_name"), 0)
-        email = order.get("billing").get("email")
-        phone = order.get("billing").get("phone")
+            total = int(order.get("total"))
+            discount = int(order.get("discount_total"))
+            prices_include_tax = order.get("prices_include_tax", True)
+            if total == 0 and discount > 0:
+                return Response(data={"status": "Descuento 100%"})
 
-        # Verificamos si es una compra a través de la web o boletería para asignar el punto de
-        # venta correspontiente en BIMS
+            # Creamos el contacto en BIMS
 
-        user_id = next(
-            (
-                element
-                for element in meta_data
-                if element["key"] == "_fooeventspos_user_id"
-            ),
-            None,
-        )
-        # MÉTODOS DE PAGO EN BIMS
-        # Efectivo -> 21
-        # Transferencia -> 26
-        # Bancard -> 27
-        # En línea -> 28
+            # Los nombres y apellidos llegan en camel case así que hacemos la transformación para que
+            # que estén separados con espacios
+            regex = r"(?<=[a-zA-Z])(?=[A-Z])"
+            subst = " "
+            first_name = re.sub(regex, subst, order.get("billing").get("first_name"), 0)
+            last_name = re.sub(regex, subst, order.get("billing").get("last_name"), 0)
+            email = order.get("billing").get("email")
+            phone = order.get("billing").get("phone")
 
-        # CAJA WEB ->            ID_BIMS: 6          ID_WC: no existe
-        # CAJA SAN COSMOS ->     ID_BIMS: 4          ID_WC: 729
-        # CAJA TATAKUALAB ->     ID_BIMS: 1          ID_WC: 3
-        if not user_id:
-            posale_id = 6
-            sales_payment_methods = [
-                {
-                    "payment_method_id": 28,
-                    "amount": total,
-                }
-            ]
-        else:
-            value = int(user_id.get("value"))
-            if value == 2:
-                return Response(
-                    data={
-                        "status": "No procesado por ser realizado desde la cuenta de administrador."
-                    }
-                )
-            elif value == 729:
-                posale_id = 4
-            elif value == 3:
-                posale_id = 1
-            else:
-                posale_id = 7
+            # Verificamos si es una compra a través de la web o boletería para asignar el punto de
+            # venta correspontiente en BIMS
 
-            if order.get("payment_method_title") == "Cortesía":
-                return Response(data={"status": "Cortesía"})
-
-            # Extraer métodos de pago desde `_fooeventspos_payments`
-            payment_metadata = next(
+            user_id = next(
                 (
                     element
                     for element in meta_data
-                    if element["key"] == "_fooeventspos_payments"
+                    if element["key"] == "_fooeventspos_user_id"
                 ),
                 None,
             )
+            # MÉTODOS DE PAGO EN BIMS
+            # Efectivo -> 21
+            # Transferencia -> 26
+            # Bancard -> 27
+            # En línea -> 28
 
-            # Mapeo de métodos de pago de FooEvents POS a BIMS
-            method_mapping = {
-                "fooeventspos_check_payment": 34,  # Gift Card
-                "fooeventspos_cash": 21,  # Efectivo
-                "fooeventspos_cash_on_delivery": 26,  # Transferencia Bancaria
-                "fooeventspos_other": 27,  # Bancard
-                "fooeventspos_online": 28,  # Pago en línea
-            }
-
-            sales_payment_methods = []  # Lista de métodos de pago para BIMS
-            gift_card_amount = 0  # Inicializar el monto pagado con Gift Card
-
-            if payment_metadata:
-                payments = json.loads(
-                    payment_metadata["value"]
-                )  # Convertir JSON a lista de pagos
-                payments = json.loads(
-                    payment_metadata["value"]
-                )  # Convertir JSON a lista de pagos
-
-                # Si hay solo un método de pago y no tiene "amount", significa que pagó todo el pedido
-                if len(payments) == 1 and "amount" not in payments[0]:
-                    single_payment_method = payments[0]["opmk"]
-                    payment_method_id = method_mapping.get(
-                        single_payment_method, 28
-                    )  # Por defecto: En línea
-                    sales_payment_methods.append(
-                        {
-                            "payment_method_id": payment_method_id,
-                            "amount": total,  # Se pagó el total con este método
+            # CAJA WEB ->            ID_BIMS: 6          ID_WC: no existe
+            # CAJA SAN COSMOS ->     ID_BIMS: 4          ID_WC: 729
+            # CAJA TATAKUALAB ->     ID_BIMS: 1          ID_WC: 3
+            if not user_id:
+                posale_id = 6
+                sales_payment_methods = [
+                    {
+                        "payment_method_id": 28,
+                        "amount": total,
+                    }
+                ]
+            else:
+                value = int(user_id.get("value"))
+                if value == 2:
+                    return Response(
+                        data={
+                            "status": "No procesado por ser realizado desde la cuenta de administrador."
                         }
                     )
+                elif value == 729:
+                    posale_id = 4
+                elif value == 3:
+                    posale_id = 1
                 else:
-                    # Si hay más de un método de pago, cada uno tendrá "amount"
-                    for payment in payments:
-                        opmk = payment["opmk"]
-                        amount = float(
-                            payment["amount"]
-                        )  # Siempre existirá "amount" en este caso
-                        payment_method_id = method_mapping.get(opmk, 28)
+                    posale_id = 7
 
+                if order.get("payment_method_title") == "Cortesía":
+                    return Response(data={"status": "Cortesía"})
+
+                # Extraer métodos de pago desde `_fooeventspos_payments`
+                payment_metadata = next(
+                    (
+                        element
+                        for element in meta_data
+                        if element["key"] == "_fooeventspos_payments"
+                    ),
+                    None,
+                )
+
+                # Mapeo de métodos de pago de FooEvents POS a BIMS
+                method_mapping = {
+                    "fooeventspos_check_payment": 34,  # Gift Card
+                    "fooeventspos_cash": 21,  # Efectivo
+                    "fooeventspos_cash_on_delivery": 26,  # Transferencia Bancaria
+                    "fooeventspos_other": 27,  # Bancard
+                    "fooeventspos_online": 28,  # Pago en línea
+                }
+
+                sales_payment_methods = []  # Lista de métodos de pago para BIMS
+                gift_card_amount = 0  # Inicializar el monto pagado con Gift Card
+
+                if payment_metadata:
+                    payments = json.loads(
+                        payment_metadata["value"]
+                    )  # Convertir JSON a lista de pagos
+
+                    # Si hay solo un método de pago y no tiene "amount", significa que pagó todo el pedido
+                    if len(payments) == 1 and "amount" not in payments[0]:
+                        single_payment_method = payments[0]["opmk"]
+                        payment_method_id = method_mapping.get(
+                            single_payment_method, 28
+                        )  # Por defecto: En línea
                         sales_payment_methods.append(
-                            {"payment_method_id": payment_method_id, "amount": amount}
+                            {
+                                "payment_method_id": payment_method_id,
+                                "amount": total,  # Se pagó el total con este método
+                            }
                         )
+                    else:
+                        # Si hay más de un método de pago, cada uno tendrá "amount"
+                        for payment in payments:
+                            opmk = payment["opmk"]
+                            amount = float(
+                                payment["amount"]
+                            )  # Siempre existirá "amount" en este caso
+                            payment_method_id = method_mapping.get(opmk, 28)
 
-        if not user_id:
-            ruc = next(
-                (element for element in meta_data if element["key"] == "_billing_ruc"),
-                None,
-            )
-            gov_id = next(
-                (
-                    element
-                    for element in meta_data
-                    if element["key"] == "_billing_documento"
-                ),
-                None,
-            )
-            social_reason = next(
-                (
-                    element
-                    for element in meta_data
-                    if element["key"] == "_billing_razon_social"
-                ),
-                None,
-            )
-        else:
-            ruc = re.sub(regex, subst, order.get("shipping").get("company"), 0)
-            social_reason = order.get("shipping").get("last_name", None)
-            gov_id = None
-        document_type = "ci"
-        document_id = ""
-        if (ruc or gov_id) and not user_id:
-            if not ruc or ruc.get("value", "") == "":
-                document_type = "ci"
-                document_id = gov_id.get("value")
-            else:
-                document_type = "ruc"
-                document_id = ruc.get("value")
+                            sales_payment_methods.append(
+                                {
+                                    "payment_method_id": payment_method_id,
+                                    "amount": amount,
+                                }
+                            )
 
-        if social_reason and not user_id:
-            if social_reason.get("value") != "":
-                name = re.sub(regex, subst, social_reason.get("value"), 0)
-            else:
-                name = f"{first_name} {last_name}"
-        else:
-            name = social_reason
-            document_id = ruc
-            if "-" in ruc:
-                document_type = "ruc"
-
-        contact_emails = None
-        contact = None
-        try:
-            if (
-                first_name == ""
-                and last_name == ""
-                and (social_reason == None or social_reason == "" or document_id == "")
-            ):
-                contact_id = None
-                if email != "":
-                    contact_emails = email
-            else:
-                contact = bims.list_contacts(
-                    document_id=re.sub(r"\D", "", document_id.split("-")[0]),
-                    document_type=document_type,
+            if not user_id:
+                ruc = next(
+                    (
+                        element
+                        for element in meta_data
+                        if element["key"] == "_billing_ruc"
+                    ),
+                    None,
                 )
-                contact_id = bims.create_contact(
-                    id=contact,
-                    name=name,
-                    address="",
-                    document_type=document_type,
-                    document_id=re.sub(r"\D", "", document_id.split("-")[0]),
-                    emails=email,
-                    phones=phone,
+                gov_id = next(
+                    (
+                        element
+                        for element in meta_data
+                        if element["key"] == "_billing_documento"
+                    ),
+                    None,
                 )
-        except Exception as e:
-            error_message = str(e)
-            FailedOrder.objects.update_or_create(
-                order_id=order_id,
-                defaults={
-                    "message": f"Error al crear el contacto en BIMS. {error_message}"
-                },
-            )
-            return Response(
-                data={"status": "fail", "error": "Error al crear el contacto en BIMS."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-
-        line_items = order.get("line_items")
-
-        sale_products = []
-        for item in line_items:
-            if "variation_id" in item:
-                search = item.get("variation_id")
+                social_reason = next(
+                    (
+                        element
+                        for element in meta_data
+                        if element["key"] == "_billing_razon_social"
+                    ),
+                    None,
+                )
             else:
-                search = item.get("product_id")
-            if search == 0:
-                search = item.get("product_id")
-            product = wc_api.get_product(search)
-            if product.get("sku") == "":
+                ruc = re.sub(regex, subst, order.get("shipping").get("company"), 0)
+                social_reason = order.get("shipping").get("last_name", None)
+                gov_id = None
+            document_type = "ci"
+            document_id = ""
+            if (ruc or gov_id) and not user_id:
+                if not ruc or ruc.get("value", "") == "":
+                    document_type = "ci"
+                    document_id = gov_id.get("value")
+                else:
+                    document_type = "ruc"
+                    document_id = ruc.get("value")
+
+            if social_reason and not user_id:
+                if social_reason.get("value") != "":
+                    name = re.sub(regex, subst, social_reason.get("value"), 0)
+                else:
+                    name = f"{first_name} {last_name}"
+            else:
+                name = social_reason
+                document_id = ruc
+                if "-" in ruc:
+                    document_type = "ruc"
+
+            contact_emails = None
+            contact = None
+            try:
+                if (
+                    first_name == ""
+                    and last_name == ""
+                    and (
+                        social_reason == None
+                        or social_reason == ""
+                        or document_id == ""
+                    )
+                ):
+                    contact_id = None
+                    if email != "":
+                        contact_emails = email
+                else:
+                    contact = bims.list_contacts(
+                        document_id=re.sub(r"\D", "", document_id.split("-")[0]),
+                        document_type=document_type,
+                    )
+                    contact_id = bims.create_contact(
+                        id=contact,
+                        name=name,
+                        address="",
+                        document_type=document_type,
+                        document_id=re.sub(r"\D", "", document_id.split("-")[0]),
+                        emails=email,
+                        phones=phone,
+                    )
+            except Exception as e:
+                error_message = str(e)
                 FailedOrder.objects.update_or_create(
                     order_id=order_id,
-                    defaults={"message": f"No procesado por falta de sku."},
+                    defaults={
+                        "message": f"Error al crear el contacto en BIMS. {error_message}"
+                    },
                 )
-                return Response(data={"status": "No procesado por falta de sku."})
-            bims_id = int(product.get("sku", 0))
-            if bims_id != 0:
+                return Response(
+                    data={
+                        "status": "fail",
+                        "error": "Error al crear el contacto en BIMS.",
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
 
-                # verificamos si hay descuentos por cupon o descuentos de entradas online
+            line_items = order.get("line_items")
 
-                if (
-                    discount > 0 or search == 10648 or search == 14369
-                ) and prices_include_tax == False:
+            sale_products = []
+            for item in line_items:
+                if "variation_id" in item:
+                    search = item.get("variation_id")
+                else:
+                    search = item.get("product_id")
+                if search == 0:
+                    search = item.get("product_id")
+                product = wc_api.get_product(search)
+                if product.get("sku") == "":
+                    FailedOrder.objects.update_or_create(
+                        order_id=order_id,
+                        defaults={"message": f"No procesado por falta de sku."},
+                    )
+                    return Response(data={"status": "No procesado por falta de sku."})
+                bims_id = int(product.get("sku", 0))
+                if bims_id != 0:
+
+                    # verificamos si hay descuentos por cupon o descuentos de entradas online
+
+                    if (
+                        discount > 0 or search == 10648 or search == 14369
+                    ) and prices_include_tax == False:
+                        sale_products.append(
+                            {
+                                "product_id": bims_id,
+                                "quantity": item.get("quantity"),
+                                "price": (
+                                    int(item.get("total")) / int(item.get("quantity"))
+                                )
+                                + int(item.get("total_tax")),
+                            }
+                        )
+                    elif (
+                        search == 19657  # entrada grupal sc
+                        or search == 14372  # entrada grupal ttklab
+                        or search == 8421  # donación en caja
+                        or search == 3681  # paquete de cumple
+                        or search == 24482  # entrada online sc
+                    ):
+                        sale_products.append(
+                            {
+                                "product_id": bims_id,
+                                "quantity": 1.00,
+                                "price": float(item.get("total")),
+                            }
+                        )
+                    else:
+                        sale_products.append(
+                            {
+                                "product_id": bims_id,
+                                "quantity": item.get("quantity"),
+                                "price": (
+                                    int(item.get("total")) + int(item.get("total_tax"))
+                                )
+                                / int(item.get("quantity")),
+                            }
+                        )
+            fee_lines = order.get("fee_lines")
+            for fee in fee_lines:
+                if fee.get("name") == "Tip":
                     sale_products.append(
                         {
-                            "product_id": bims_id,
-                            "quantity": item.get("quantity"),
-                            "price": (
-                                int(item.get("total")) / int(item.get("quantity"))
-                            )
-                            + int(item.get("total_tax")),
+                            "product_id": 100,
+                            "quantity": 1.00,
+                            "price": float(fee.get("total")),
                         }
                     )
-                elif (
-                    search == 19657  # entrada grupal sc
-                    or search == 14372  # entrada grupal ttklab
-                    or search == 8421  # donación en caja
-                    or search == 3681  # paquete de cumple
-                    or search == 24482  # entrada online sc
-                ):
-                    sale_products.append(
-                        {
-                            "product_id": bims_id,
-                            "quantity": 1.00,
-                            "price": float(item.get("total")),
-                        }
+            try:
+                if contact_id == None and contact != None:
+                    sale_id = bims.create_sale(
+                        contact_id=contact,
+                        sale_products=sale_products,
+                        posale_id=posale_id,
+                        sales_payment_methods=sales_payment_methods,
+                        contact_emails=contact_emails,
+                        order=order_id,
                     )
                 else:
-                    sale_products.append(
-                        {
-                            "product_id": bims_id,
-                            "quantity": item.get("quantity"),
-                            "price": (
-                                int(item.get("total")) + int(item.get("total_tax"))
-                            )
-                            / int(item.get("quantity")),
-                        }
+                    sale_id = bims.create_sale(
+                        contact_id=contact_id,
+                        sale_products=sale_products,
+                        posale_id=posale_id,
+                        sales_payment_methods=sales_payment_methods,
+                        contact_emails=contact_emails,
+                        order=order_id,
                     )
-        fee_lines = order.get("fee_lines")
-        for fee in fee_lines:
-            if fee.get("name") == "Tip":
-                sale_products.append(
-                    {
-                        "product_id": 100,
-                        "quantity": 1.00,
-                        "price": float(fee.get("total")),
-                    }
+            except Exception as e:
+                error_message = str(e)
+                FailedOrder.objects.update_or_create(
+                    order_id=order_id,
+                    defaults={
+                        "message": f"Error al crear la venta en BIMS. {error_message}"
+                    },
                 )
-        try:
-            if contact_id == None and contact != None:
-                sale_id = bims.create_sale(
-                    contact_id=contact,
-                    sale_products=sale_products,
-                    posale_id=posale_id,
-                    sales_payment_methods=sales_payment_methods,
-                    contact_emails=contact_emails,
-                    order=order_id,
+                return Response(
+                    data={
+                        "status": "fail",
+                        "error": "Error al crear la venta en BIMS.",
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
-            else:
-                sale_id = bims.create_sale(
-                    contact_id=contact_id,
-                    sale_products=sale_products,
-                    posale_id=posale_id,
-                    sales_payment_methods=sales_payment_methods,
-                    contact_emails=contact_emails,
-                    order=order_id,
-                )
+            # Thread(target=bims.send_invoice, args=[sale_id]).start()
+
+            return Response(data={"status": "ok"})
+
         except Exception as e:
             error_message = str(e)
             FailedOrder.objects.update_or_create(
                 order_id=order_id,
-                defaults={
-                    "message": f"Error al crear la venta en BIMS. {error_message}"
-                },
+                defaults={"message": error_message},
             )
             return Response(
-                data={"status": "fail", "error": "Error al crear la venta en BIMS."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                data={
+                    "status": "fail",
+                    "error": error_message,
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-        # Thread(target=bims.send_invoice, args=[sale_id]).start()
-
-        return Response(data={"status": "ok"})
 
 
 class RefundView(APIView):
