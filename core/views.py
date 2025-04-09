@@ -19,12 +19,13 @@ class SalesView(APIView):
             error_message = str(e)
             FailedOrder.objects.update_or_create(
                 order_id=order_id,
-                defaults={
-                    "message": f"No se pudo obtener la orden. {error_message}"
-                },
+                defaults={"message": f"No se pudo obtener la orden. {error_message}"},
             )
             return Response(
-                data={"status": "fail", "error": f"No se pudo obtener la orden. {error_message}"},
+                data={
+                    "status": "fail",
+                    "error": f"No se pudo obtener la orden. {error_message}",
+                },
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
         meta_data = order.get("meta_data")
@@ -245,6 +246,10 @@ class SalesView(APIView):
                 search = item.get("product_id")
             product = wc_api.get_product(search)
             if product.get("sku") == "":
+                FailedOrder.objects.update_or_create(
+                    order_id=order_id,
+                    defaults={"message": f"No procesado por falta de sku."},
+                )
                 return Response(data={"status": "No procesado por falta de sku."})
             bims_id = int(product.get("sku", 0))
             if bims_id != 0:
