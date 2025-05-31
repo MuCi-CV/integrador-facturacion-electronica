@@ -17,6 +17,7 @@ class SalesView(APIView):
             order = wc_api.get_order(order_id)
         except Exception as e:
             error_message = str(e)
+            logger.error(f"Error al obtener la orden {order_id} de WooCommerce: {error_message}", exc_info=True)
             FailedOrder.objects.update_or_create(
                 order_id=order_id,
                 defaults={"message": f"No se pudo obtener la orden. {error_message}"},
@@ -234,6 +235,7 @@ class SalesView(APIView):
                     )
             except Exception as e:
                 error_message = str(e)
+                logger.error(f"Error al crear el contacto en BIMS para orden {order_id}: {error_message}", exc_info=True)
                 FailedOrder.objects.update_or_create(
                     order_id=order_id,
                     defaults={
@@ -339,6 +341,7 @@ class SalesView(APIView):
                     )
             except Exception as e:
                 error_message = str(e)
+                logger.error(f"Error al crear la venta en BIMS para orden {order_id}: {error_message}", exc_info=True)
                 FailedOrder.objects.update_or_create(
                     order_id=order_id,
                     defaults={
@@ -358,6 +361,7 @@ class SalesView(APIView):
 
         except Exception as e:
             error_message = str(e)
+            logger.error(f"Error inesperado en SalesView para orden {order_id}: {error_message}", exc_info=True)
             FailedOrder.objects.update_or_create(
                 order_id=order_id,
                 defaults={"message": error_message},
