@@ -4,6 +4,7 @@ from django.conf import settings
 from typing import Optional, Any
 import hashlib
 import time
+import sentry_sdk
 
 logging.basicConfig(
     filename="app.log",
@@ -16,6 +17,7 @@ class BimsApi:
     def __init__(self) -> None:
         self.base_url = settings.BIMS_URL
         self.sid = self.login()
+        self.session = requests.Session()
 
     def login(self) -> Optional[str]:
         url = f"{self.base_url}/users/login/"

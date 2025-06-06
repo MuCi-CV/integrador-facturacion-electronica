@@ -1,10 +1,21 @@
+import os
 import json
 from pathlib import Path
 from dotenv import dotenv_values
 import sentry_sdk
+from sentry_sdk.integrations.django import DjangoIntegration
+from sentry_sdk.integrations.logging import LoggingIntegration
+import logging
 
 sentry_sdk.init(
-    dsn="https://d4bb11945a6f075bc0d9371375cefab7@o4505665337294848.ingest.us.sentry.io/4507267019964416",
+    dsn="https://695919a3d075c89f4368be07b5e67f46@o4509430066315264.ingest.us.sentry.io/4509430068609024",
+    integrations=[
+        DjangoIntegration(),
+        LoggingIntegration(
+            level=logging.INFO, # Captura logs de nivel INFO o superior de Python (aparecen en journalctl)
+            event_level=logging.ERROR # Solo envía a Sentry logs de nivel ERROR o superior
+        ),
+    ],
     # Set traces_sample_rate to 1.0 to capture 100%
     # of transactions for performance monitoring.
     traces_sample_rate=1.0,
@@ -12,6 +23,8 @@ sentry_sdk.init(
     # of sampled transactions.
     # We recommend adjusting this value in production.
     profiles_sample_rate=1.0,
+    release="integrador-facturacion-electronica@1.0.2",
+    environment="production",
 )
 
 config = dotenv_values(".env")
