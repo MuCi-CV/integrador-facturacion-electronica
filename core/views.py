@@ -278,70 +278,60 @@ class SalesView(APIView):
                         message = f"Producto {search_id} (nombre: {item.get('name')}) no procesado por falta de SKU."
                         logger.warning(f"Order {order_id}: {message}")
                         skipped_items_messages.append(message)
-                        continue
+                        continue # Saltar este ítem y continuar con el siguiente
 
                     bims_id = int(product.get("sku", 0))
                     if bims_id == 0: # Si el SKU existe pero es 0, también lo saltamos
-                            message = f"Producto {search_id} (nombre: {item.get('name')}) no procesado porque su SKU es 0."
-                            logger.warning(f"Order {order_id}: {message}")
-                            skipped_items_messages.append(message)
-                            continue # Saltar este ítem y continuar con el siguiente
+                        message = f"Producto {search_id} (nombre: {item.get('name')}) no procesado porque su SKU es 0."
+                        logger.warning(f"Order {order_id}: {message}")
+                        skipped_items_messages.append(message)
+                        continue # Saltar este ítem y continuar con el siguiente
 
-                        item_quantity = int(item.get("quantity", 0))
-                        if item_quantity == 0:
-                            message = f"Producto {search_id} (nombre: {item.get('name')}) no procesado por tener cantidad 0."
-                            logger.warning(f"Order {order_id}: {message}")
-                            skipped_items_messages.append(message)
-                            continue # Saltar este ítem
+                    item_quantity = int(item.get("quantity", 0))
+                    if item_quantity == 0:
+                        message = f"Producto {search_id} (nombre: {item.get('name')}) no procesado por tener cantidad 0."
+                        logger.warning(f"Order {order_id}: {message}")
+                        skipped_items_messages.append(message)
+                        continue # Saltar este ítem
 
-                        # Calcular price_per_item antes de las condiciones
-                        # Evitar ZeroDivisionError
-                        if item_quantity > 0:
-                            item_total_with_tax = int(item.get("total", 0)) + int(item.get("total_tax", 0))
-                            price_per_item = item_total_with_tax / item_quantity
-                        else:
-                            price_per_item = 0 # O maneja como un error si un item con qty=0 es un problema de datos
+                    # Calcular price_per_item antes de las condiciones
+                    # Evitar ZeroDivisionError
+                    if item_quantity > 0:
+                        item_total_with_tax = float(item.get("total", 0)) + float(item.get("total_tax", 0)) # Usar float para precisión
+                        price_per_item = item_total_with_tax / item_quantity
+                    else:
+                        price_per_item = 0.0 # Usar float para consistencia
 
-                        # Lógica para precios basada en descuentos o tipos de producto específicos
-                        if (discount > 0 or search_id in [10648, 14369]) and not prices_include_tax:
-                            # La lógica de cálculo de precio original aquí (int(item.get("total")) / int(item.get("quantity"))) + int(item.get("total_tax"))
-                            # es potencialmente problemática si item.get("total") ya incluye el impuesto total.
-                            # Revisa cómo quieres calcular el precio en este caso particular.
-                            # Si price_per_item ya incluye el impuesto, y total_tax es el impuesto del item entero,
-                            # la suma podría duplicar el impuesto si prices_include_tax es False.
-                            # Asumiendo que price_per_item es el costo unitario ya con su parte del impuesto:
-                            final_price = price_per_item 
-                            # Si `prices_include_tax` es False y `discount > 0`, y quieres el precio neto + impuesto unitario,
-                            # la fórmula original puede ser: (int(item.get("total")) / item_quantity) + (int(item.get("total_tax")) / item_quantity)
-                            # O simplemente el price_per_item calculado si es el total por unidad incluyendo impuestos.
-                            # Aquí usaré `price_per_item` ya que es el total del ítem dividido por su cantidad incluyendo impuestos.
-                            
-                            # Si el caso es de descuento y NO incluye impuestos, y `price_per_item` ya tiene el impuesto,
-                            # no necesitas sumar `int(item.get("total_tax"))` de nuevo.
-                            # Considera que `price_per_item` ya es (total + total_tax) / quantity.
-                            sale_products.append(
-                                {
-                                    "product_id": bims_id,
-                                    "quantity": item.get("quantity"),
-                                    "price": price_per_item,
-                                }
-                            )
-                        elif search_id in [19657, 14372, 8421, 3681, 24482]:
-                            sale_products.append(
-                                {
-                                    "product_id": bims_id,
-                                    "quantity": 1.00,
-                                    "price": float(item.get("total")),
-                                }
-                            )
-                        else:
-                            sale_products.append(
-                                {
-                                    "product_id": bims_id,
-                                    "quantity": item.get("quantity"),
-                                    "price": price_per_item,
-                                }
-                            )
+                    # Lógica para precios basada en descuentos o tipos de producto específicos
+                    # (Revisado con tu aclaración de BIMS esperando precios con impuesto)
+                    if (discount > 0 or search_id in [10648, 14369]):
+                        sale_products.append(
+                            {
+                                "product_id": bims_id,
+                                "quantity": item_quantity, # Usar item_quantity ya convertido
+                                "price": round(price_per_item, 2), # Redondear para precisión monetaria
+                            }
+                        )
+                    elif search_id in [19657, 14372, 8421, 3681, 24482]:
+                        # **REVISAR ESTA LÍNEA** si estos productos tienen impuestos y BIMS los espera incluidos:
+                        # price_for_special_item = float(item.get("total", 0)) + float(item.get("total_tax", 0))
+                        # "price": round(price_for_special_item, 2),
+                        sale_products.append(
+                            {
+                                "product_id": bims_id,
+                                "quantity": 1.00,
+                                "price": round(float(item.get("total", 0)), 2),
+                            }
+                        )
+                    else:
+                        sale_products.append(
+                            {
+                                "product_id": bims_id,
+                                "quantity": item_quantity, # Usar item_quantity ya convertido
+                                "price": round(price_per_item, 2), # Redondear para precisión monetaria
+                            }
+                        )
+
                 fee_lines = order.get("fee_lines")
                 for fee in fee_lines:
                     if fee.get("name") == "Tip":
