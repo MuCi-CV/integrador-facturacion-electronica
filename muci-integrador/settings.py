@@ -68,7 +68,7 @@ ROOT_URLCONF = "muci-integrador.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": [BASE_DIR / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -161,6 +161,32 @@ REST_FRAMEWORK = {
         "rest_framework.filters.SearchFilter",
     ),
 }
+
+if DEBUG:
+    # Para desarrollo: los emails se muestran en la consola
+    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+else:
+    # Para producción: configura según tu proveedor de email
+    EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+    EMAIL_HOST = config.get("EMAIL_HOST", "smtp.gmail.com")
+    EMAIL_PORT = int(config.get("EMAIL_PORT", 587))
+    EMAIL_USE_TLS = True if config.get("EMAIL_USE_TLS", "true").lower() in ["true", "1"] else False
+    EMAIL_HOST_USER = config.get("EMAIL_HOST_USER", "")
+    EMAIL_HOST_PASSWORD = config.get("EMAIL_HOST_PASSWORD", "")
+    DEFAULT_FROM_EMAIL = config.get("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER)
+
+# Configuración del sitio para los emails de recuperación
+SITE_ID = 1
+if config.get("BASE_URL"):
+    # Configurar el dominio para los enlaces de recuperación
+    from django.urls import get_script_prefix
+    BASE_URL = config.get("BASE_URL")
+    if BASE_URL:
+        # Extraer el dominio de BASE_URL
+        from urllib.parse import urlparse
+        parsed_url = urlparse(BASE_URL)
+        SITE_DOMAIN = parsed_url.netloc
+        SITE_NAME = "MUCi Integrador"
 
 WOOCOMMERCE_URL = config["WOOCOMMERCE_URL"]
 WOOCOMMERCE_KEY = config["WOOCOMMERCE_KEY"]

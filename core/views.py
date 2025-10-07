@@ -280,7 +280,7 @@ class SalesView(APIView):
                         skipped_items_messages.append(message)
                         continue # Saltar este ítem y continuar con el siguiente
 
-                    bims_id = int(product.get("sku", 0))
+                    bims_id = int(product.get("sku", 0)) #To do
                     if bims_id == 0: # Si el SKU existe pero es 0, también lo saltamos
                         message = f"Producto {search_id} (nombre: {item.get('name')}) no procesado porque su SKU es 0."
                         logger.warning(f"Order {order_id}: {message}")
