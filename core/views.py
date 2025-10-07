@@ -8,6 +8,8 @@ from rest_framework.response import Response
 from core.woocommerce import wc_api
 from core.bims import bims
 from core.models import FailedOrder
+from django.views.generic import TemplateView
+
 
 logger = logging.getLogger(__name__)
 
@@ -451,3 +453,36 @@ class RefundView(APIView):
         data = {"api_refund": False, "api_restock": True, "line_items": products}
         wc_api.refund_order(id=order_id, data=data)
         return Response(data={"status": "ok"})
+
+
+class ForgotPasswordView(APIView):
+    def post(self, request):
+        email = request.data.get('email')
+        
+        # Aquí llamas a la API de BIMS para reset de password
+        # Necesitas verificar si BIMS tiene este endpoint
+        bims_url = f"{settings.BIMS_URL}/users/forgot-password/"
+        body = {
+            "email": email,
+            "tenant": settings.BIMS_TENANT,
+        }
+        
+        try:
+            res = requests.post(url=bims_url, json=body)
+            if res.status_code == 200:
+                return Response({
+                    "message": "Se han enviado instrucciones a tu email"
+                }, status=status.HTTP_200_OK)
+            else:
+                return Response({
+                    "error": "No se pudo procesar la solicitud"
+                }, status=status.HTTP_400_BAD_REQUEST)
+                
+        except requests.RequestException as e:
+            return Response({
+                "error": "Error de conexión con el servicio"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class SimpleForgotPasswordView(TemplateView):
+    template_name = 'forgot_password.html'
