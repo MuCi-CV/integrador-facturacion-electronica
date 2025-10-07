@@ -455,30 +455,57 @@ class RefundView(APIView):
         return Response(data={"status": "ok"})
 
 
+import logging
+
 class ForgotPasswordView(APIView):
     def post(self, request):
         email = request.data.get('email')
         
+        # Verificar que tenemos la configuración necesaria
+        if not settings.BIMS_URL:
+            logging.error("BIMS_URL no está configurado")
+            return Response({
+                "error": "Configuración del servicio no disponible"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
         # Aquí llamas a la API de BIMS para reset de password
-        # Necesitas verificar si BIMS tiene este endpoint
         bims_url = f"{settings.BIMS_URL}/users/forgot-password/"
         body = {
             "email": email,
             "tenant": settings.BIMS_TENANT,
         }
         
+        logging.info(f"Intentando reset de password para: {email}")
+        logging.info(f"URL de BIMS: {bims_url}")
+        
         try:
-            res = requests.post(url=bims_url, json=body)
+            res = requests.post(url=bims_url, json=body, timeout=10)
+            logging.info(f"Respuesta de BIMS - Status: {res.status_code}")
+            logging.info(f"Respuesta de BIMS - Contenido: {res.text}")
+            
             if res.status_code == 200:
                 return Response({
                     "message": "Se han enviado instrucciones a tu email"
                 }, status=status.HTTP_200_OK)
             else:
                 return Response({
-                    "error": "No se pudo procesar la solicitud"
+                    "error": f"Error del servicio: {res.status_code} - {res.text}"
                 }, status=status.HTTP_400_BAD_REQUEST)
                 
+        except requests.exceptions.Timeout:
+            logging.error("Timeout al conectar con BIMS")
+            return Response({
+                "error": "El servicio no respondió a tiempo"
+            }, status=status.HTTP_408_REQUEST_TIMEOUT)
+            
+        except requests.exceptions.ConnectionError:
+            logging.error("Error de conexión con BIMS")
+            return Response({
+                "error": "No se pudo conectar con el servicio"
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            
         except requests.RequestException as e:
+            logging.error(f"Error en request a BIMS: {str(e)}")
             return Response({
                 "error": "Error de conexión con el servicio"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
