@@ -1,6 +1,6 @@
 from django.urls import path, re_path, include
 
-from core.views import SalesView, RefundView
+from core.views import SalesView, RefundView, SimpleForgotPasswordView, ForgotPasswordView
 
 urlpatterns = [
     path("sales/", SalesView.as_view()),
