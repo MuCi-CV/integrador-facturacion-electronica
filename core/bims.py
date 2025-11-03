@@ -75,6 +75,21 @@ class BimsApi:
                 time.sleep(retry_delay)
         raise Exception(f"Failed request to {url} after {max_retries} attempts.")
 
+    def reset_user_password(self, user_id, new_password):
+    """Reset password directamente en BIMS"""
+    url = f"{self.base_url}/users/{user_id}/reset-password/"
+    body = {
+        "new_password": new_password,
+        "tenant": settings.BIMS_TENANT,
+    }
+    
+    try:
+        res = self._retry_request(requests.post, url, json=body)
+        return res.get("status") == "ok"
+    except Exception as e:
+        logging.error(f"Error resetting password: {e}")
+        return False
+
     def list_contacts(self, document_id: str, document_type: str):
         url = f"{self.base_url}/contacts/"
         params = {

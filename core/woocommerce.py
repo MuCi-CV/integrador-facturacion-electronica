@@ -56,5 +56,11 @@ class WooCommerceAPI:
             return res.json()
         raise self.ServerException(res.text)
 
+    def update_product(self, id, data, **kwargs):
+        res = self.wcapi.put(f"products/{id}", data=data)
+        if res.status_code == 200:
+            return res.json()
+        raise self.ServerException(res.text)
+
 
 wc_api = WooCommerceAPI()

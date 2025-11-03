@@ -2,12 +2,16 @@ import sentry_sdk
 import logging
 import re
 import json
+import secrets
+import string
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from core.woocommerce import wc_api
 from core.bims import bims
 from core.models import FailedOrder
+from django.contrib.auth.models import User
+from django.contrib.auth.hashers import make_password
 from django.views.generic import TemplateView
 
 
@@ -455,33 +459,146 @@ class RefundView(APIView):
         return Response(data={"status": "ok"})
 
 
-import logging
-
 class ForgotPasswordView(APIView):
     def post(self, request):
+        email = request.data.get('email')
+        
+        if not email:
+            return Response({"error": "Email requerido"}, status=400)
+        
         try:
-            email = request.data.get('email', '').strip()
+            # Buscar usuario en la base de datos de Django Admin
+            user = User.objects.get(email=email)
             
-            # Validar email
-            if not email:
-                return Response({
-                    "error": "Por favor proporciona un email válido"
-                }, status=status.HTTP_400_BAD_REQUEST)
+            # Generar contraseña temporal
+            alphabet = string.ascii_letters + string.digits
+            temporary_password = ''.join(secrets.choice(alphabet) for i in range(12))
             
-            # Log para debugging
-            logger.info(f"✅ Solicitud de recuperación de contraseña recibida para: {email}")
+            # 🔑 Usar el hashing SEGURO de Django (PBKDF2)
+            user.password = make_password(temporary_password)
+            user.save()
             
-            # Respuesta exitosa inmediata
+            logger.info(f"✅ Password reset exitoso para Django Admin: {email}")
+            logger.info(f"🔑 Contraseña temporal generada")
+            
             return Response({
-                "message": f"✅ Solicitud recibida para {email}. El administrador contactará contigo pronto para resetear tu contraseña en BIMS."
-            }, status=status.HTTP_200_OK)
+                "message": f"✅ Contraseña reseteada exitosamente para {email}",
+                "temporary_password": temporary_password,
+                "instructions": "Usa esta contraseña para acceder al Django Admin y cámbiala inmediatamente"
+            })
+            
+        except User.DoesNotExist:
+            logger.error(f"❌ Usuario de Django Admin no encontrado: {email}")
+            return Response({
+                "error": f"No se encontró usuario con email: {email} en el sistema Django Admin"
+            }, status=404)
+
+class StockSyncView(APIView):
+    def post(self, request):
+        """
+        Sincroniza stock desde BIMS hacia WooCommerce
+        Similar a receiveFromBims() del plugin PHP
+        """
+        try:
+            # Obtener parámetros
+            limit = request.data.get('limit', 100)
+            offset = request.data.get('offset', 0)
+            
+            # Obtener productos desde BIMS
+            products_data = self.get_products_from_bims(limit, offset)
+            
+            # Actualizar stock en WooCommerce
+            updated_products = self.update_woocommerce_stock(products_data)
+            
+            return Response({
+                "status": "ok",
+                "updated": len(updated_products),
+                "offset": offset + limit,
+                "products": updated_products
+            })
             
         except Exception as e:
-            logger.error(f"❌ Error en ForgotPasswordView: {str(e)}")
-            return Response({
-                "error": "Error interno del servidor. Por favor contacta al administrador."
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
+            logger.error(f"Error sincronizando stock: {str(e)}", exc_info=True)
+            return Response(
+                {"status": "fail", "error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    def get_products_from_bims(self, limit, offset):
+        """Obtiene productos desde BIMS con su stock"""
+        try:
+            # Usar la API de BIMS similar al plugin PHP
+            url = f"{settings.BIMS_URL}/products/"
+            params = {
+                'sid': bims.sid,
+                'recursive': -1,
+                'full_images': 1,
+                'v_stock': 1,
+                'webpos': 1,
+                'limit': limit,
+                'offset': offset
+            }
+            
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            
+            return response.json().get('data', [])
+            
+        except Exception as e:
+            logger.error(f"Error obteniendo productos de BIMS: {str(e)}")
+            raise
+    
+    def update_woocommerce_stock(self, products_data):
+        """Actualiza stock en WooCommerce"""
+        updated = []
+        
+        for product in products_data:
+            try:
+                bims_id = product['Product']['id']
+                stock_total = 0
+                
+                # Calcular stock total desde AvailabilityFull
+                if product['Product'].get('AvailabilityFull'):
+                    for stock in product['Product']['AvailabilityFull']:
+                        stock_total += float(stock.get('total', 0))
+                
+                # Buscar producto en WooCommerce por SKU o meta _bims_id
+                wc_product = self.find_woocommerce_product(bims_id)
+                
+                if wc_product:
+                    # Actualizar stock
+                    wc_api.update_product(wc_product['id'], {
+                        'stock_quantity': int(stock_total),
+                        'manage_stock': True,
+                        'stock_status': 'instock' if stock_total > 0 else 'outofstock'
+                    })
+                    
+                    updated.append({
+                        'bims_id': bims_id,
+                        'wc_id': wc_product['id'],
+                        'stock': stock_total
+                    })
+                    
+            except Exception as e:
+                logger.error(f"Error actualizando producto {bims_id}: {str(e)}")
+                continue
+        
+        return updated
+    
+    def find_woocommerce_product(self, bims_id):
+        """Encuentra un producto en WooCommerce por su BIMS ID"""
+        try:
+            # Buscar por meta _bims_id
+            products = wc_api.get_products(meta_key='_bims_id', meta_value=str(bims_id))
+            
+            if products:
+                return products[0]
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error buscando producto en WooCommerce: {str(e)}")
+            return None
 
 class SimpleForgotPasswordView(TemplateView):
     template_name = 'forgot_password.html'
