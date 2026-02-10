@@ -32,6 +32,20 @@ class WooCommerceAPI:
             url, key, secret, version="wc/v3", timeout=480, verify_ssl=False
         )
 
+    def get_variations(self, product_id, **kwargs):
+        """Obtiene las variaciones de un producto variable"""
+        res = self.wcapi.get(f"products/{product_id}/variations", params=kwargs)
+        if res.status_code == 200:
+            return res.json()
+        raise self.ServerException(res.text)
+    
+    def update_variation(self, product_id, variation_id, data, **kwargs):
+        """Actualiza una variación específica"""
+        res = self.wcapi.put(f"products/{product_id}/variations/{variation_id}", data=data)
+        if res.status_code == 200:
+            return res.json()
+        raise self.ServerException(res.text)
+    
     def get_products(self, **kwargs):
         res = self.wcapi.get("products", params=kwargs)
         if res.status_code == 200:
@@ -40,6 +54,13 @@ class WooCommerceAPI:
 
     def get_product(self, id, **kwargs):
         res = self.wcapi.get(f"products/{id}", params=kwargs)
+        if res.status_code == 200:
+            return res.json()
+        raise self.ServerException(res.text)
+    
+    def update_product(self, id, data, **kwargs):
+        """Actualiza un producto en WooCommerce"""
+        res = self.wcapi.put(f"products/{id}", data=data)
         if res.status_code == 200:
             return res.json()
         raise self.ServerException(res.text)

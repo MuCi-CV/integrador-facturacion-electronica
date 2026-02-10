@@ -16,10 +16,13 @@ logging.basicConfig(
 class BimsApi:
     def __init__(self) -> None:
         self.base_url = settings.BIMS_URL
-        self.sid = self.login()
+        self.sid = None
         self.session = requests.Session()
+        self._login_attempted = False
+        self._login_error = None
 
     def login(self) -> Optional[str]:
+        """Intenta login a BIMS. Retorna session ID si tiene éxito, None si falla."""
         url = f"{self.base_url}/users/login/"
         body = {
             "user": settings.BIMS_USER,
@@ -28,14 +31,40 @@ class BimsApi:
         }
 
         try:
-            res = requests.post(url=url, json=body)
+            # BIMS espera parámetros en query string, no en body
+            res = requests.post(url=url, params=body, timeout=10)
             response_data = res.json()
             if response_data.get("status") == "ok":
+                self._login_attempted = True
+                self._login_error = None
                 return response_data.get("data").get("Session").get("id")
+            else:
+                error_msg = f"BIMS login failed: {response_data}"
+                logging.error(error_msg)
+                self._login_error = error_msg
+                return None
         except requests.RequestException as e:
-            logging.error("Login BIMS error.")
-            logging.error(str(e))
-            raise e
+            error_msg = f"Login BIMS error: {str(e)}"
+            logging.error(error_msg)
+            self._login_error = error_msg
+            self._login_attempted = True
+            return None
+        except Exception as e:
+            error_msg = f"Unexpected error during BIMS login: {str(e)}"
+            logging.error(error_msg)
+            self._login_error = error_msg
+            self._login_attempted = True
+            return None
+
+    def ensure_logged_in(self) -> bool:
+        """Asegura que hay una sesión activa. Retorna True si exitoso, False si falla."""
+        if self.sid is not None:
+            return True
+        
+        if not self._login_attempted:
+            self.sid = self.login()
+        
+        return self.sid is not None
 
     def _request_with_relogin(self, method, url, **kwargs):
         try:
@@ -54,6 +83,10 @@ class BimsApi:
             raise e
 
     def _retry_request(self, method, url, max_retries=5, retry_delay=2, **kwargs):
+        # Asegurar login antes de hacer peticiones
+        if not self.ensure_logged_in():
+            raise Exception(f"Cannot connect to BIMS: {self._login_error}")
+        
         attempts = 0
         while attempts < max_retries:
             try:

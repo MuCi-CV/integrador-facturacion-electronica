@@ -4,6 +4,7 @@ from django.conf import settings
 from django.views.generic.base import RedirectView
 from drf_yasg.views import get_schema_view
 from drf_yasg import openapi
+from core.admin_views import bims_diagnostic_view
 
 schema_view = get_schema_view(
     openapi.Info(
@@ -15,6 +16,7 @@ schema_view = get_schema_view(
 )
 
 urlpatterns = [
+    path("admin/bims-diagnostic/", bims_diagnostic_view, name="bims-diagnostic"),
     path("admin/", admin.site.urls),
     re_path(
         r"^swagger(?P<format>\.json|\.yaml)$",

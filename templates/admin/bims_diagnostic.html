@@ -1,0 +1,92 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block title %}{{ title }}{% endblock %}
+
+{% block content %}
+<div class="content-main" style="max-width: 900px; margin: 20px auto;">
+    <h1>🔧 {{ title }}</h1>
+    
+    <div class="module" style="margin: 20px 0;">
+        <h2>Configuración Actual</h2>
+        <table style="width: 100%; border-collapse: collapse;">
+            <tr style="border-bottom: 1px solid #ddd;">
+                <td style="padding: 10px; font-weight: bold;">URL Base BIMS:</td>
+                <td style="padding: 10px;"><code>{{ bims_url }}</code></td>
+            </tr>
+            <tr style="border-bottom: 1px solid #ddd;">
+                <td style="padding: 10px; font-weight: bold;">Usuario:</td>
+                <td style="padding: 10px;"><code>{{ bims_user }}</code></td>
+            </tr>
+            <tr style="border-bottom: 1px solid #ddd;">
+                <td style="padding: 10px; font-weight: bold;">Tenant:</td>
+                <td style="padding: 10px;"><code>{{ bims_tenant }}</code></td>
+            </tr>
+            {% if password_hash %}
+            <tr style="border-bottom: 1px solid #ddd;">
+                <td style="padding: 10px; font-weight: bold;">Password (MD5 Hash):</td>
+                <td style="padding: 10px;"><code>{{ password_hash }}</code></td>
+            </tr>
+            {% endif %}
+        </table>
+    </div>
+
+    {% if test_executed %}
+    <div class="module" style="margin: 20px 0; padding: 20px; 
+         background: {% if login_successful %}#d4edda{% else %}#f8d7da{% endif %}; 
+         border: 1px solid {% if login_successful %}#c3e6cb{% else %}#f5c6cb{% endif %}; 
+         border-radius: 5px;">
+        <h2 style="margin-top: 0;">Resultado del Test</h2>
+        <p style="font-size: 18px; margin: 10px 0;">
+            <strong>{{ message }}</strong>
+        </p>
+        
+        {% if login_successful %}
+        <div style="margin: 15px 0;">
+            <strong>Session ID:</strong><br>
+            <code style="background: #fff; padding: 5px 10px; border-radius: 3px; display: inline-block; margin-top: 5px;">{{ session_id }}</code>
+        </div>
+        {% else %}
+        <div style="margin: 15px 0;">
+            <strong>Error:</strong><br>
+            <pre style="background: #fff; padding: 10px; border-radius: 3px; overflow-x: auto; white-space: pre-wrap;">{{ error_message }}</pre>
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
+
+    <form method="post" style="margin: 30px 0;">
+        {% csrf_token %}
+        <button type="submit" class="button" style="
+            background: #417690; 
+            color: white; 
+            border: none; 
+            padding: 12px 24px; 
+            font-size: 14px; 
+            cursor: pointer; 
+            border-radius: 4px;
+            font-weight: bold;">
+            🧪 Probar Conexión a BIMS
+        </button>
+    </form>
+
+    <div class="module" style="margin: 20px 0; padding: 15px; background: #f8f9fa; border-left: 4px solid #007bff;">
+        <h3 style="margin-top: 0;">ℹ️ Información</h3>
+        <ul style="line-height: 1.8;">
+            <li>Este panel permite testear la conexión a BIMS API sin afectar el funcionamiento del integrador</li>
+            <li>El login se realiza con las credenciales configuradas en las variables de entorno</li>
+            <li>Si la prueba falla, verifica:
+                <ul>
+                    <li>Que las credenciales sean correctas</li>
+                    <li>Que la IP del servidor no esté bloqueada por Cloudflare</li>
+                    <li>Que BIMS esté accesible desde el servidor</li>
+                </ul>
+            </li>
+        </ul>
+    </div>
+
+    <div style="margin: 20px 0;">
+        <a href="{% url 'admin:index' %}" class="button" style="text-decoration: none;">← Volver al Admin</a>
+    </div>
+</div>
+{% endblock %}
