@@ -89,6 +89,17 @@ class BimsApi:
             return int(response_data.get("data")[0].get("Contact").get("id"))
         return None
 
+    def find_contact_by_email(self, email: str):
+        url = f"{self.base_url}/contacts/"
+        params = {
+            "sid": self.sid,
+            "emails": email,
+        }
+        response_data = self._retry_request(requests.get, url, params=params)
+        if int(response_data.get("count")) > 0:
+            return int(response_data.get("data")[0].get("Contact").get("id"))
+        return None
+
     def create_contact(
         self,
         id: Any,

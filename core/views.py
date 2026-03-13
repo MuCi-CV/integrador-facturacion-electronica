@@ -235,19 +235,31 @@ class SalesView(APIView):
                         if email != "":
                             contact_emails = email
                     else:
-                        contact = bims.list_contacts(
-                            document_id=re.sub(r"\D", "", document_id.split("-")[0]),
-                            document_type=document_type,
-                        )
-                        contact_id = bims.create_contact(
-                            id=contact,
-                            name=name,
-                            address="",
-                            document_type=document_type,
-                            document_id=re.sub(r"\D", "", document_id.split("-")[0]),
-                            emails=email,
-                            phones=phone,
-                        )
+                        clean_document_id = ""
+                        if document_id:
+                            clean_document_id = re.sub(r"\D", "", str(document_id).split("-")[0])
+
+                        if not clean_document_id or not name:
+                            contact_id = None
+                            if email != "":
+                                contact_emails = email
+                        else:
+                            contact = bims.list_contacts(
+                                document_id=clean_document_id,
+                                document_type=document_type,
+                            )
+                            if not contact and email != "":
+                                contact = bims.find_contact_by_email(email)
+
+                            contact_id = bims.create_contact(
+                                id=contact,
+                                name=name,
+                                address="",
+                                document_type=document_type,
+                                document_id=clean_document_id,
+                                emails=email,
+                                phones=phone,
+                            )
                 except Exception as e:
                     error_message = str(e)
                     logger.error(f"Error al crear el contacto en BIMS para orden {order_id}: {error_message}", exc_info=True)
