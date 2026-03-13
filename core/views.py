@@ -259,16 +259,17 @@ class SalesView(APIView):
 
                             if not contact:
                                 logger.info(f"Order {order_id}: No se encontró contacto previo en BIMS. Intentando crear uno nuevo para '{name}'.")
-
-                            contact_id = bims.create_contact(
-                                id=contact,
-                                name=name,
-                                address="",
-                                document_type=document_type,
-                                document_id=clean_document_id,
-                                emails=email,
-                                phones=phone,
-                            )
+                                contact_id = bims.create_contact(
+                                    id=None,
+                                    name=name,
+                                    address="",
+                                    document_type=document_type,
+                                    document_id=clean_document_id,
+                                    emails=email,
+                                    phones=phone,
+                                )
+                            else:
+                                contact_id = contact
                 except Exception as e:
                     error_message = str(e)
                     logger.error(f"Error al crear el contacto en BIMS para orden {order_id}: {error_message}", exc_info=True)
