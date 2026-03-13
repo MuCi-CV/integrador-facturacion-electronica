@@ -240,6 +240,7 @@ class SalesView(APIView):
                             clean_document_id = re.sub(r"\D", "", str(document_id).split("-")[0])
 
                         if not clean_document_id or not name:
+                            logger.info(f"Order {order_id}: Omitiendo creación de contacto en BIMS. Motivo: Falta nombre ('{name}') o documento de identidad ('{clean_document_id}').")
                             contact_id = None
                             if email != "":
                                 contact_emails = email
@@ -248,8 +249,16 @@ class SalesView(APIView):
                                 document_id=clean_document_id,
                                 document_type=document_type,
                             )
+                            if contact:
+                                logger.info(f"Order {order_id}: Se encontró contacto en BIMS por documento de identidad ({clean_document_id}). ID existente: {contact}")
+                            
                             if not contact and email != "":
                                 contact = bims.find_contact_by_email(email)
+                                if contact:
+                                    logger.info(f"Order {order_id}: Se encontró contacto en BIMS por email ({email}). ID existente: {contact}")
+
+                            if not contact:
+                                logger.info(f"Order {order_id}: No se encontró contacto previo en BIMS. Intentando crear uno nuevo para '{name}'.")
 
                             contact_id = bims.create_contact(
                                 id=contact,
