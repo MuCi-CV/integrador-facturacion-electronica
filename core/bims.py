@@ -49,9 +49,12 @@ class BimsApi:
             res.raise_for_status()
             return res.json()
         except requests.RequestException as e:
-            logging.error(f"Error during {method.__name__.upper()} request to {url}.")
+            error_msg = f"Error during {method.__name__.upper()} request to {url}."
+            if hasattr(e, 'response') and e.response is not None:
+                error_msg += f" Response status: {e.response.status_code}. Response body: {e.response.text}"
+            logging.error(error_msg)
             logging.error(str(e))
-            raise e
+            raise Exception(error_msg) from e
 
     def _retry_request(self, method, url, max_retries=5, retry_delay=2, **kwargs):
         attempts = 0
@@ -62,18 +65,17 @@ class BimsApi:
                     return response_data
                 else:
                     attempts += 1
-                    logging.warning(
-                        f"Attempt {attempts} failed: status not 'ok'. Retrying..."
-                    )
+                    err_message = f"Attempt {attempts} failed: status not 'ok'. Response: {response_data}"
+                    last_error_details = err_message
+                    logging.warning(err_message + " Retrying...")
                     time.sleep(retry_delay)
-            except requests.RequestException as e:
-                logging.error(
-                    f"Error in request to {url}. Attempt {attempts + 1} of {max_retries}."
-                )
-                logging.error(str(e))
+            except Exception as e:
+                err_message = f"Error in request to {url}. Attempt {attempts + 1} of {max_retries}. Error: {str(e)}"
+                last_error_details = err_message
+                logging.error(err_message)
                 attempts += 1
                 time.sleep(retry_delay)
-        raise Exception(f"Failed request to {url} after {max_retries} attempts.")
+        raise Exception(f"Failed request to {url} after {max_retries} attempts. Last error: {last_error_details}")
 
     def list_contacts(self, document_id: str, document_type: str):
         url = f"{self.base_url}/contacts/"
