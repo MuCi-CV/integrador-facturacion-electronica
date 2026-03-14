@@ -31,7 +31,8 @@ class Command(BaseCommand):
             for item in data:
                 contact = item.get("Contact", {})
                 bims_id = contact.get("id")
-                email = contact.get("emails", "").strip()
+                email = contact.get("emails") or ""
+                email = email.strip()
                 document_id = contact.get("document_id", "")
                 if document_id:
                     document_id = document_id.strip()
