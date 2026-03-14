@@ -7,7 +7,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from core.woocommerce import wc_api
 from core.bims import bims
-from core.models import FailedOrder
+from core.models import FailedOrder, ContactCache
 from django.views.generic import TemplateView
 
 
@@ -253,9 +253,10 @@ class SalesView(APIView):
                                 logger.info(f"Order {order_id}: Se encontró contacto en BIMS por documento de identidad ({clean_document_id}). ID existente: {contact}")
                             
                             if not contact and email != "":
-                                contact = bims.find_contact_by_email(email)
-                                if contact:
-                                    logger.info(f"Order {order_id}: Se encontró contacto en BIMS por email ({email}). ID existente: {contact}")
+                                local_contact = ContactCache.objects.filter(email=email).first()
+                                if local_contact:
+                                    contact = local_contact.bims_id
+                                    logger.info(f"Order {order_id}: Se encontró contacto en Caché Local por email ({email}). ID existente: {contact}")
 
                             if not contact:
                                 logger.info(f"Order {order_id}: No se encontró contacto previo en BIMS. Intentando crear uno nuevo para '{name}'.")

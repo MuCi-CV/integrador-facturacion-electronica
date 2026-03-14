@@ -162,5 +162,14 @@ class BimsApi:
         response_data = self._retry_request(requests.get, url, params=params)
         return "ok" if response_data.get("status") == "ok" else None
 
+    def get_contacts(self, limit=500, offset=0):
+        url = f"{self.base_url}/contacts/"
+        params = {
+            "sid": self.sid,
+            "limit": limit,
+            "offset": offset,
+        }
+        return self._retry_request(requests.get, url, params=params)
+
 
 bims = BimsApi()

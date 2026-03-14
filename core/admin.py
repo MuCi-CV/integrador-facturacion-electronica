@@ -10,6 +10,9 @@ from core.models import FailedOrder
 from core.woocommerce import wc_api
 
 
+from django.core.management import call_command
+from django.db import connection
+
 @admin.register(FailedOrder)
 class FailedOrderAdmin(admin.ModelAdmin):
     list_display = ("order_id", "colored_status", "message")
@@ -18,6 +21,12 @@ class FailedOrderAdmin(admin.ModelAdmin):
     ordering = ("status", "order_id")
     list_filter = ("status",)
     actions = ["retry_selected_orders"]
+
+    def changelist_view(self, request, extra_context=None):
+        extra_context = extra_context or {}
+        tables = connection.introspection.table_names()
+        extra_context["contact_cache_table_exists"] = "core_contactcache" in tables
+        return super().changelist_view(request, extra_context=extra_context)
 
     def colored_status(self, obj):
         colors = {1: "red", 2: "green"}
@@ -53,8 +62,30 @@ class FailedOrderAdmin(admin.ModelAdmin):
                 self.admin_site.admin_view(self.search_order_view),
                 name="search_order",
             ),
+            path(
+                "run_migrations/",
+                self.admin_site.admin_view(self.run_migrations_button),
+                name="run_migrations",
+            ),
         ]
         return custom_urls + urls
+
+    def run_migrations_button(self, request):
+        """Runs the makemigrations and migrate commands manually from UI."""
+        try:
+            call_command("migrate")
+            self.message_user(
+                request,
+                "Migración ejecutada con éxito. La tabla ContactCache se ha creado.",
+                level=messages.SUCCESS,
+            )
+        except Exception as e:
+            self.message_user(
+                request,
+                f"Error al migrar la base de datos: {e}",
+                level=messages.ERROR,
+            )
+        return HttpResponseRedirect("..")
 
     def retry_failed_orders_button(self, request):
         """Processes all failed orders."""

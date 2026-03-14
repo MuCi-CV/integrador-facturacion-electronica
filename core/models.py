@@ -1,6 +1,20 @@
 from django.db import models
 from django.utils.timezone import now
 
+class ContactCache(models.Model):
+    bims_id = models.IntegerField(verbose_name="ID en BIMS", unique=True)
+    email = models.EmailField(verbose_name="Email", db_index=True)
+    document_id = models.CharField(verbose_name="Documento", max_length=50, blank=True, null=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Caché de Contacto"
+        verbose_name_plural = "Cachés de Contactos"
+
+    def __str__(self):
+        return f"{self.email} - {self.bims_id}"
+
 
 class FailedOrder(models.Model):
 
