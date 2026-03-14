@@ -52,5 +52,30 @@ class Command(BaseCommand):
             
             offset += limit
             time.sleep(1)  # Prevenir rate limiting si lo hubiera
-            
         self.stdout.write(self.style.SUCCESS(f"Sincronización completa. Total guardados: {total_synced}"))
+
+        self.stdout.write("Buscando órdenes pausadas para auto-reintento...")
+        from core.models import FailedOrder
+        import requests
+        from django.conf import settings
+        
+        paused_orders = FailedOrder.objects.filter(status=FailedOrder.FAILED, message__startswith="Pausada: Esperando")
+        
+        if not paused_orders.exists():
+            self.stdout.write("No hay órdenes pausadas actualmente.")
+            return
+
+        url = settings.BASE_URL + "/sales/"
+        for order in paused_orders:
+            self.stdout.write(f"Reintentando orden pausada {order.order_id}...")
+            try:
+                response = requests.post(url, json={"arg": order.order_id}, verify=True, timeout=15)
+                if response.status_code == 200 and response.json().get("status") == "ok":
+                    order.status = FailedOrder.COMPLETED
+                    order.message = "Procesado con éxito tras sincronización asíncrona."
+                    order.save()
+                    self.stdout.write(self.style.SUCCESS(f"Orden {order.order_id} procesada exitosamente."))
+                else:
+                    self.stderr.write(f"Fallo al reintentar orden {order.order_id}: {response.text}")
+            except Exception as e:
+                self.stderr.write(f"Error HTTP al reintentar orden {order.order_id}: {e}")

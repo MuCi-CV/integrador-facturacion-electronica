@@ -9,6 +9,8 @@ from core.woocommerce import wc_api
 from core.bims import bims
 from core.models import FailedOrder, ContactCache
 from django.views.generic import TemplateView
+import threading
+from django.core.management import call_command
 
 
 logger = logging.getLogger(__name__)
@@ -257,6 +259,18 @@ class SalesView(APIView):
                                 if local_contact:
                                     contact = local_contact.bims_id
                                     logger.info(f"Order {order_id}: Se encontró contacto en Caché Local por email ({email}). ID existente: {contact}")
+                                else:
+                                    logger.warning(f"Order {order_id}: Email {email} NO encontrado en RUC ni en Caché Local. Pausando venta para sincronización BIMS.")
+                                    FailedOrder.objects.update_or_create(
+                                        order_id=order_id,
+                                        defaults={
+                                            "message": f"Pausada: Esperando sincronización de BIMS para el correo '{email}'",
+                                            "status": FailedOrder.FAILED
+                                        }
+                                    )
+                                    # Lanzar sincronizador en segundo plano sin bloquear el webhook
+                                    threading.Thread(target=call_command, args=("sync_bims_contacts",)).start()
+                                    return Response({"status": "ok", "message": "Orden pausada para limpieza de caché"})
 
                             if not contact:
                                 logger.info(f"Order {order_id}: No se encontró contacto previo en BIMS. Intentando crear uno nuevo para '{name}'.")
