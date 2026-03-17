@@ -260,17 +260,7 @@ class SalesView(APIView):
                                     contact = local_contact.bims_id
                                     logger.info(f"Order {order_id}: Se encontró contacto en Caché Local por email ({email}). ID existente: {contact}")
                                 else:
-                                    logger.warning(f"Order {order_id}: Email {email} NO encontrado en RUC ni en Caché Local. Pausando venta para sincronización BIMS.")
-                                    FailedOrder.objects.update_or_create(
-                                        order_id=order_id,
-                                        defaults={
-                                            "message": f"Pausada: Esperando sincronización de BIMS para el correo '{email}'",
-                                            "status": FailedOrder.FAILED
-                                        }
-                                    )
-                                    # Lanzar sincronizador en segundo plano sin bloquear el webhook
-                                    threading.Thread(target=call_command, args=("sync_bims_contacts",)).start()
-                                    return Response({"status": "paused", "message": "Orden pausada para limpieza de caché"})
+                                    logger.info(f"Order {order_id}: Email {email} no encontrado en Caché Local. Se procederá a crear contacto nuevo en BIMS.")
 
                             if not contact:
                                 logger.info(f"Order {order_id}: No se encontró contacto previo en BIMS. Intentando crear uno nuevo para '{name}'.")
@@ -283,6 +273,16 @@ class SalesView(APIView):
                                     emails=email,
                                     phones=phone,
                                 )
+                                # Guardar el nuevo contacto en el caché local para futuras búsquedas
+                                if contact_id and email:
+                                    ContactCache.objects.update_or_create(
+                                        bims_id=int(contact_id),
+                                        defaults={
+                                            "email": email,
+                                            "document_id": clean_document_id
+                                        }
+                                    )
+                                    logger.info(f"Order {order_id}: Nuevo contacto guardado en Caché Local. BIMS ID: {contact_id}, Email: {email}")
                             else:
                                 contact_id = contact
                 except Exception as e:
