@@ -20,7 +20,7 @@ class FailedOrderAdmin(admin.ModelAdmin):
     search_fields = ("order_id",)
     ordering = ("status", "order_id")
     list_filter = ("status",)
-    actions = ["retry_selected_orders"]
+    actions = ["retry_selected_orders", "mark_as_failed"]
 
     def changelist_view(self, request, extra_context=None):
         extra_context = extra_context or {}
@@ -166,6 +166,17 @@ class FailedOrderAdmin(admin.ModelAdmin):
             )
 
     retry_selected_orders.short_description = "Reintentar órdenes seleccionadas"
+
+    def mark_as_failed(self, request, queryset):
+        """Marks the selected orders as failed."""
+        updated = queryset.update(status=FailedOrder.FAILED, message="Marcado como fallido manualmente.")
+        self.message_user(
+            request,
+            f"{updated} orden(es) marcada(s) como fallida(s).",
+            level=messages.SUCCESS,
+        )
+
+    mark_as_failed.short_description = "Marcar como fallidas"
 
     def search_product_view(self, request):
         """View to search for products by ID."""
