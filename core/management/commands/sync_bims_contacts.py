@@ -70,13 +70,20 @@ class Command(BaseCommand):
         for order in paused_orders:
             self.stdout.write(f"Reintentando orden pausada {order.order_id}...")
             try:
-                response = requests.post(url, json={"arg": order.order_id}, verify=True, timeout=15)
-                if response.status_code == 200 and response.json().get("status") == "ok":
+                response = requests.post(url, json={"arg": order.order_id}, verify=True, timeout=30)
+                resp_json = response.json()
+                resp_status = resp_json.get("status")
+                resp_message = resp_json.get("message", "")
+                
+                if response.status_code == 200 and resp_status == "ok":
                     order.status = FailedOrder.COMPLETED
-                    order.message = "Procesado con éxito tras sincronización asíncrona."
+                    order.message = f"Procesado con éxito tras sincronización asíncrona. Detalle: {resp_message}"
                     order.save()
-                    self.stdout.write(self.style.SUCCESS(f"Orden {order.order_id} procesada exitosamente."))
+                    self.stdout.write(self.style.SUCCESS(f"Orden {order.order_id} procesada exitosamente en BIMS."))
+                elif resp_status == "paused":
+                    self.stderr.write(f"Orden {order.order_id} se volvió a pausar (email aún no encontrado en caché). Se reintentará en la próxima sincronización.")
                 else:
-                    self.stderr.write(f"Fallo al reintentar orden {order.order_id}: {response.text}")
+                    error_detail = resp_json.get("error", response.text)
+                    self.stderr.write(f"Fallo al reintentar orden {order.order_id}: {error_detail}")
             except Exception as e:
                 self.stderr.write(f"Error HTTP al reintentar orden {order.order_id}: {e}")

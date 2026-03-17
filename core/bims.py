@@ -89,15 +89,61 @@ class BimsApi:
             return int(response_data.get("data")[0].get("Contact").get("id"))
         return None
 
+    ## buscar ruc en turuc
+    def find_razon_social_by_ruc(self, document_id: str):
+        url = f"{self.ruc_url}/contribuyente/"
+        params = {
+            "ruc": document_id
+        }
+        response_data = self._retry_request(requests.get, url, params=params)
+        if int(response_data.get("count")) > 0:
+            return response_data.get("data")[0].get("Contact").get("name")
+        return None
+
+    def find_contact_by_ruc(self, document_id: str, document_type: str):
+        url = f"{self.base_url}/contacts/"
+        params = {
+            "sid": self.sid,
+            "document_id": document_id,
+            "document_type": document_type,
+        }
+
+        response_data = self._retry_request(requests.get, url, params=params)
+        if int(response_data.get("count")) > 0:
+            return int(response_data.get("data")[0].get("Contact").get("id"))
+        return None
+
     def find_contact_by_email(self, email: str):
         url = f"{self.base_url}/contacts/"
         params = {
             "sid": self.sid,
-            "emails": email,
+            "email": email,
         }
+
         response_data = self._retry_request(requests.get, url, params=params)
         if int(response_data.get("count")) > 0:
             return int(response_data.get("data")[0].get("Contact").get("id"))
+        return None
+
+    def find_contact_by_name(self, name: str, email: str = None, document_id: str = None):
+        url = f"{self.base_url}/contacts/"
+        params = {
+            "sid": self.sid,
+            "q": name,
+        }
+        
+        response_data = self._retry_request(requests.get, url, params=params)
+
+        if not email and not document_id:
+            raise ValueError("Debes proporcionar al menos el 'email' o el 'document_id' para validar el contacto.")
+
+        if int(response_data.get("count")) > 0:
+            for item in response_data.get("data"):
+                contact = item.get("Contact", {})
+                if contact.get("document_id") == document_id:
+                    return int(contact.get("id"))
+                if contact.get("emails") == email:
+                    return int(contact.get("id"))
         return None
 
     def create_contact(

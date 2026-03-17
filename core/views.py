@@ -270,7 +270,7 @@ class SalesView(APIView):
                                     )
                                     # Lanzar sincronizador en segundo plano sin bloquear el webhook
                                     threading.Thread(target=call_command, args=("sync_bims_contacts",)).start()
-                                    return Response({"status": "ok", "message": "Orden pausada para limpieza de caché"})
+                                    return Response({"status": "paused", "message": "Orden pausada para limpieza de caché"})
 
                             if not contact:
                                 logger.info(f"Order {order_id}: No se encontró contacto previo en BIMS. Intentando crear uno nuevo para '{name}'.")
