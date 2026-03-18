@@ -1,16 +1,59 @@
 import requests
 import logging
+import json
 from django.conf import settings
 from typing import Optional, Any
 import hashlib
 import time
 import sentry_sdk
+import inspect
 
 logging.basicConfig(
     filename="app.log",
     level=logging.ERROR,
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
+
+# Logger dedicado para comunicación con BIMS API
+bims_logger = logging.getLogger("bims_api")
+
+
+def _get_caller_name():
+    """Obtiene el nombre del método que originó la llamada a BIMS."""
+    frame = inspect.currentframe()
+    # Subir en el stack: _get_caller_name -> _request_with_relogin -> _retry_request -> método público
+    for _ in range(4):
+        if frame is not None:
+            frame = frame.f_back
+    return frame.f_code.co_name if frame else "unknown"
+
+
+def _safe_json(obj):
+    """Serializa un objeto a JSON de forma segura para logging."""
+    try:
+        return json.dumps(obj, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return str(obj)
+
+
+def _mask_params(params):
+    """Enmascara el sid en los params para no loguear credenciales."""
+    if not params:
+        return params
+    masked = dict(params)
+    if "sid" in masked:
+        masked["sid"] = "***"
+    return masked
+
+
+def _mask_login_body(body):
+    """Enmascara password y tenant en el body de login."""
+    if not body:
+        return body
+    masked = dict(body)
+    if "password" in masked:
+        masked["password"] = "***"
+    return masked
 
 
 class BimsApi:
@@ -27,34 +70,82 @@ class BimsApi:
             "tenant": settings.BIMS_TENANT,
         }
 
+        bims_logger.info("══════ BIMS REQUEST ══════")
+        bims_logger.info(f"POST {url} | Caller: login")
+        bims_logger.info(f"Body: {_safe_json(_mask_login_body(body))}")
+
+        start_time = time.time()
         try:
             res = requests.post(url=url, json=body)
+            elapsed = time.time() - start_time
             response_data = res.json()
+
+            bims_logger.info("══════ BIMS RESPONSE ══════")
+            bims_logger.info(f"Status: {res.status_code} | Time: {elapsed:.2f}s")
+            bims_logger.info(f"Body: {_safe_json(response_data)}")
+
             if response_data.get("status") == "ok":
                 return response_data.get("data").get("Session").get("id")
         except requests.RequestException as e:
+            elapsed = time.time() - start_time
+            bims_logger.error("══════ BIMS ERROR ══════")
+            bims_logger.error(f"Login failed | Time: {elapsed:.2f}s | Error: {str(e)}")
             logging.error("Login BIMS error.")
             logging.error(str(e))
             raise e
 
     def _request_with_relogin(self, method, url, **kwargs):
+        caller = _get_caller_name()
+        method_name = method.__name__.upper()
+        params = kwargs.get("params", {})
+        body = kwargs.get("json", None)
+
+        bims_logger.info("══════ BIMS REQUEST ══════")
+        bims_logger.info(f"{method_name} {url} | Caller: {caller}")
+        bims_logger.info(f"Params: {_safe_json(_mask_params(params))}")
+        if body is not None:
+            bims_logger.info(f"Body: {_safe_json(body)}")
+
+        start_time = time.time()
         try:
             res = method(url, **kwargs)
+            elapsed = time.time() - start_time
+
             if res.status_code == 401:
+                bims_logger.warning(f"Session expired (401) | Time: {elapsed:.2f}s | Attempting relogin...")
                 logging.info("Session expired, attempting relogin...")
-                self.sid = self.login()  # Intentar relogin
+                self.sid = self.login()
                 if self.sid:
                     kwargs["params"]["sid"] = self.sid
+                    bims_logger.info("══════ BIMS RETRY (after relogin) ══════")
+                    bims_logger.info(f"{method_name} {url} | Caller: {caller}")
+                    start_time = time.time()
                     res = method(url, **kwargs)
+                    elapsed = time.time() - start_time
+
+            response_body = res.json()
+            bims_logger.info("══════ BIMS RESPONSE ══════")
+            bims_logger.info(f"Status: {res.status_code} | Time: {elapsed:.2f}s")
+            bims_logger.info(f"Body: {_safe_json(response_body)}")
+
             res.raise_for_status()
-            return res.json()
+            return response_body
         except requests.RequestException as e:
-            error_msg = f"Error during {method.__name__.upper()} request to {url}."
+            elapsed = time.time() - start_time
+            error_msg = f"Error during {method_name} request to {url}."
             if hasattr(e, 'response') and e.response is not None:
                 error_msg += f" Response status: {e.response.status_code}. Response body: {e.response.text}"
+                bims_logger.error("══════ BIMS ERROR ══════")
+                bims_logger.error(f"{method_name} {url} | Time: {elapsed:.2f}s")
+                bims_logger.error(f"Status: {e.response.status_code}")
+                bims_logger.error(f"Response: {e.response.text}")
+            else:
+                bims_logger.error("══════ BIMS ERROR ══════")
+                bims_logger.error(f"{method_name} {url} | Time: {elapsed:.2f}s | Error: {str(e)}")
             logging.error(error_msg)
             logging.error(str(e))
             raise Exception(error_msg) from e
+
 
     def _retry_request(self, method, url, max_retries=5, retry_delay=2, **kwargs):
         attempts = 0

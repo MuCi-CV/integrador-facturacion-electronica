@@ -116,6 +116,9 @@ LOGGING = {
         'verbose': {
             'format': '%(asctime)s - %(levelname)s - %(module)s - %(message)s'
         },
+        'bims_api_fmt': {
+            'format': '%(asctime)s - %(levelname)s - %(message)s'
+        },
     },
     'handlers': {
         'console': {
@@ -128,6 +131,14 @@ LOGGING = {
             'filename': BASE_DIR / 'bims_sync.log',
             'formatter': 'verbose',
         },
+        'bims_api_file': {
+            'level': 'DEBUG',
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': BASE_DIR / 'bims_api.log',
+            'maxBytes': 5 * 1024 * 1024,  # 5 MB
+            'backupCount': 3,
+            'formatter': 'bims_api_fmt',
+        },
     },
     'loggers': {
         'core': {
@@ -138,6 +149,11 @@ LOGGING = {
         '': {
             'handlers': ['console', 'file'],
             'level': 'INFO',
+        },
+        'bims_api': {
+            'handlers': ['bims_api_file'],
+            'level': 'DEBUG',
+            'propagate': False,
         },
     },
     'root': {
