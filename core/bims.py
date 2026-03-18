@@ -163,6 +163,7 @@ class BimsApi:
                 "name": name,
                 "document_id": document_id,
                 "document_type": document_type,
+                "company_id": 1,
                 "address": address,
                 "phones": phones,
                 "emails": emails,
