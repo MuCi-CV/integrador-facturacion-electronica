@@ -411,7 +411,7 @@ class SalesView(APIView):
                     try:
                         # Al menos un producto se pudo procesar, entonces intentamos crear la venta
                         final_contact_id_for_sale = contact_id if contact_id is not None else None
-                        sale_id = bims.create_sale(
+                        sale_id, bims_error = bims.create_sale(
                             contact_id=final_contact_id_for_sale,
                             sale_products=sale_products,
                             posale_id=posale_id,
@@ -419,6 +419,16 @@ class SalesView(APIView):
                             contact_emails=contact_emails,
                             order=order_id,
                         )
+
+                        if not sale_id:
+                            error_message = f"Rechazado por BIMS: {bims_error}"
+                            logger.error(f"Orden {order_id} rechazada por BIMS: {bims_error}")
+                            
+                            FailedOrder.objects.update_or_create(
+                                order_id=order_id,
+                                defaults={"status": FailedOrder.FAILED, "message": error_message},
+                            )
+                            return Response(data={"status": "fail", "error": error_message}, status=status.HTTP_400_BAD_REQUEST)
 
                         # Si llegamos aquí, la venta se creó con éxito en BIMS (parcial o completa)
                         final_status_message = "Procesado con éxito."

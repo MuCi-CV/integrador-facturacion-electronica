@@ -14,3 +14,4 @@ env.json
 .env
 post.py
 app.log
+.aider*

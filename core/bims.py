@@ -292,7 +292,13 @@ class BimsApi:
         response_data = self._retry_request(
             requests.post, url, json=body, params=params
         )
-        return response_data.get("data").get("Sale").get("id")
+        
+        data = response_data.get("data")
+        if isinstance(data, dict) and data.get("Sale") and data["Sale"].get("id"):
+            return data["Sale"]["id"], None
+            
+        error_msg = response_data.get("message") or response_data.get("error") or "BIMS devolvió HTTP 200 pero no generó la venta (ID vacío)."
+        return None, error_msg
 
     def send_invoice(self, sale_id):
         url = f"{self.base_url}/sales/send/{sale_id}/"
