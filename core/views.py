@@ -126,6 +126,8 @@ class SalesView(APIView):
                         None,
                     )
 
+                    logger.info(f"Order {order_id}: payment_metadata = {payment_metadata}")
+
                     # Mapeo de métodos de pago de FooEvents POS a BIMS
                     method_mapping = {
                         "fooeventspos_check_payment": 34,  # Gift Card
@@ -170,6 +172,8 @@ class SalesView(APIView):
                                         "amount": amount,
                                     }
                                 )
+
+                        logger.info(f"Order {order_id}: sales_payment_methods = {sales_payment_methods}")
 
                 if not user_id:
                     ruc = next(
