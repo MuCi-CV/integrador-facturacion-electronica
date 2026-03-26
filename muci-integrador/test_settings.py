@@ -1,0 +1,34 @@
+"""
+Settings mínimos para correr tests unitarios sin .env ni base de datos externa.
+Usar con: python manage.py test core/ --settings=muci-integrador.test_settings
+"""
+SECRET_KEY = "test-secret-key-only-for-tests"
+DEBUG = True
+ALLOWED_HOSTS = ["*"]
+
+INSTALLED_APPS = [
+    "django.contrib.contenttypes",
+    "django.contrib.auth",
+    "rest_framework",
+    "core",
+]
+
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": ":memory:",
+    }
+}
+
+LOGGING = {"version": 1, "disable_existing_loggers": True}
+
+WOOCOMMERCE_URL = "http://test.local"
+WOOCOMMERCE_KEY = "test_key"
+WOOCOMMERCE_SECRET = "test_secret"
+BIMS_URL = "http://bims.test.local"
+BIMS_USER = "test_user"
+BIMS_PASSWORD = "test_password"
+BIMS_TENANT = "test_tenant"
+BASE_URL = "http://localhost"
+
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
