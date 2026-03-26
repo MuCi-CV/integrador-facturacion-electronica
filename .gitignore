@@ -15,5 +15,5 @@ env.json
 post.py
 app.log
 .aider*
-bims_api.log
-bims_sync.log
+*.log
+*.json
