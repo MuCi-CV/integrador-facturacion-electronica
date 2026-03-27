@@ -1,7 +1,6 @@
 import json
 import logging
 import re
-from typing import Optional
 
 import sentry_sdk
 
@@ -28,13 +27,13 @@ def _camel_to_spaces(text: str) -> str:
     return _CAMEL_CASE_RE.sub(" ", text or "")
 
 
-def _get_meta(meta_data: list, key: str) -> Optional[dict]:
+def _get_meta(meta_data: list, key: str):
     return next((item for item in meta_data if item["key"] == key), None)
 
 
 def resolve_pos_and_payments(
     meta_data: list, total: int, payment_method_title: str
-) -> Optional[tuple[int, list]]:
+):
     """
     Determina el punto de venta y los métodos de pago para una orden.
 
@@ -96,7 +95,7 @@ def resolve_contact_id(
     billing: dict,
     shipping: dict,
     is_pos: bool,
-) -> tuple[Optional[int], Optional[str]]:
+):
     """
     Encuentra o crea un contacto en BIMS a partir de los datos de la orden.
     Usa ContactCache para evitar búsquedas repetidas por email.
@@ -185,7 +184,7 @@ def resolve_contact_id(
 
 def build_sale_products(
     order_id: int, line_items: list, fee_lines: list, discount: int
-) -> tuple[list, list]:
+):
     """
     Construye la lista de productos para enviar a BIMS.
 
