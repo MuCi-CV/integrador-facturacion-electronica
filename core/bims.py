@@ -154,6 +154,11 @@ class BimsApi:
                 response_data = self._request_with_relogin(method, url, **kwargs)
                 if response_data.get("status") == "ok":
                     return response_data
+                elif response_data.get("code") == "403":
+                    raise Exception(
+                        f"BIMS rechazó la solicitud a {url}: "
+                        f"{response_data.get('message')} (code 403)"
+                    )
                 else:
                     attempts += 1
                     err_message = f"Attempt {attempts} failed: status not 'ok'. Response: {response_data}"
@@ -178,6 +183,30 @@ class BimsApi:
         response_data = self._retry_request(requests.get, url, params=params)
         if int(response_data.get("count")) > 0:
             return int(response_data.get("data")[0].get("Contact").get("id"))
+        return None
+
+    def find_contact(self, document_id: str, document_type: str) -> Optional[dict]:
+        """Busca un contacto y devuelve sus datos completos de BIMS.
+
+        Retorna dict con id, name, document_id, document_type, emails
+        o None si no se encuentra.
+        """
+        url = f"{self.base_url}/contacts/"
+        params = {
+            "sid": self.sid,
+            "document_id": document_id,
+            "document_type": document_type,
+        }
+        response_data = self._retry_request(requests.get, url, params=params)
+        if int(response_data.get("count")) > 0:
+            contact = response_data["data"][0]["Contact"]
+            return {
+                "id": int(contact["id"]),
+                "name": contact.get("name", ""),
+                "document_id": contact.get("document_id", ""),
+                "document_type": contact.get("document_type", ""),
+                "emails": contact.get("emails", ""),
+            }
         return None
 
     ## buscar ruc en turuc
@@ -265,6 +294,40 @@ class BimsApi:
             requests.post, url, json=body, params=params
         )
         return response_data.get("data").get("Contact").get("id")
+
+    def update_contact_email(
+        self, contact_id: int, name: str,
+        document_id: str, document_type: str,
+        new_email: str,
+    ) -> bool:
+        """Intenta actualizar el email de un contacto existente.
+
+        Usa document_id y document_type exactos como están en BIMS
+        (obtenidos previamente vía find_contact).
+        Retorna True si tuvo éxito, False si falló.
+        """
+        url = f"{self.base_url}/contacts/"
+        body = {
+            "Contact": {
+                "id": contact_id,
+                "name": name,
+                "document_id": document_id,
+                "document_type": document_type,
+                "emails": new_email,
+                "company_id": 1,
+            }
+        }
+        params = {"sid": self.sid}
+        try:
+            response_data = self._request_with_relogin(
+                requests.post, url, json=body, params=params
+            )
+            return response_data.get("status") == "ok"
+        except Exception as e:
+            bims_logger.warning(
+                f"No se pudo actualizar email del contacto {contact_id}: {e}"
+            )
+            return False
 
     def create_sale(
         self,

@@ -21,10 +21,64 @@ from core.constants import (
 logger = logging.getLogger(__name__)
 
 _CAMEL_CASE_RE = re.compile(r"(?<=[a-zA-Z])(?=[A-Z])")
+_EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
 
 def _camel_to_spaces(text: str) -> str:
     return _CAMEL_CASE_RE.sub(" ", text or "")
+
+
+def _clean_email(email: str) -> str:
+    """Extrae el primer email válido de un string potencialmente corrupto.
+
+    Maneja casos como 'user@mail.com asistencia contable' extrayendo
+    solo la parte del email. Retorna cadena vacía si no es válido.
+    """
+    if not email:
+        return ""
+    candidate = email.strip().split()[0]
+    return candidate.lower() if _EMAIL_RE.match(candidate) else ""
+
+
+def _search_contact_in_bims(document_id: str, document_type: str) -> dict | None:
+    """Busca un contacto en BIMS probando variantes de document_type
+    y document_id (con/sin dígito verificador).
+
+    Retorna dict con datos exactos de BIMS (id, name, document_id,
+    document_type, emails) o None.
+    """
+    base_number = document_id.split("-")[0]
+    has_verificador = "-" in document_id
+    alt_type = "ci" if document_type == "ruc" else "ruc"
+
+    # Construir variantes a probar (la más probable primero)
+    variants = [
+        (document_id, document_type),
+        (document_id, alt_type),
+    ]
+    # Si tiene dígito verificador, probar también solo el número base
+    if has_verificador:
+        variants.append((base_number, "ci"))
+        variants.append((base_number, "ruc"))
+
+    # Eliminar duplicados preservando orden
+    seen = set()
+    unique_variants = []
+    for v in variants:
+        if v not in seen:
+            seen.add(v)
+            unique_variants.append(v)
+
+    for doc_id, doc_type in unique_variants:
+        contact = bims.find_contact(document_id=doc_id, document_type=doc_type)
+        if contact:
+            logger.info(
+                f"Contacto encontrado en BIMS con variante "
+                f"(doc={doc_id}, type={doc_type}). BIMS ID: {contact['id']}"
+            )
+            return contact
+
+    return None
 
 
 def _get_meta(meta_data: list, key: str):
@@ -120,12 +174,18 @@ def resolve_contact_id(
         social_reason_meta = _get_meta(meta_data, "_billing_razon_social")
 
         ruc_value = (ruc_meta or {}).get("value", "")
+        gov_id_value = (gov_id_meta or {}).get("value", "")
         if ruc_value:
-            document_type = "ruc"
+            # Un RUC real tiene guión verificador (ej: "1234567-8").
+            # Si no tiene guión, es una CI puesta en campo equivocado.
+            if "-" in ruc_value:
+                document_type = "ruc"
+            else:
+                document_type = "ci"
             document_id = ruc_value
-        elif gov_id_meta:
+        elif gov_id_value:
             document_type = "ci"
-            document_id = gov_id_meta.get("value", "")
+            document_id = gov_id_value
         else:
             document_type = "ci"
             document_id = ""
@@ -133,51 +193,132 @@ def resolve_contact_id(
         social_reason_value = (social_reason_meta or {}).get("value", "")
         name = _camel_to_spaces(social_reason_value) if social_reason_value else f"{first_name} {last_name}"
 
+    clean_email = _clean_email(email)
+
     # Sin datos suficientes para identificar al contacto
     if not first_name and not last_name and not name.strip():
         logger.info(f"Order {order_id}: Sin datos de contacto, se usará email como referencia.")
-        return None, (email or None)
+        return None, (clean_email or None)
 
-    clean_document_id = re.sub(r"\D", "", str(document_id).split("-")[0]) if document_id else ""
+    # Preservar document_id completo (con guión si lo tiene) para búsqueda
+    # y extraer solo dígitos del número base para limpieza
+    raw_document_id = str(document_id).strip() if document_id else ""
+    base_number = re.sub(r"\D", "", raw_document_id.split("-")[0])
 
-    if not clean_document_id or not name.strip():
+    if not base_number or not name.strip():
         logger.info(
             f"Order {order_id}: Omitiendo creación de contacto. "
-            f"Falta nombre ('{name}') o documento ('{clean_document_id}')."
+            f"Falta nombre ('{name}') o documento ('{base_number}')."
         )
-        return None, (email or None)
+        return None, (clean_email or None)
 
-    # Buscar contacto existente por documento
-    contact = bims.list_contacts(document_id=clean_document_id, document_type=document_type)
-    if contact:
-        logger.info(f"Order {order_id}: Contacto encontrado en BIMS por documento ({clean_document_id}). ID: {contact}")
-        return contact, None
+    # Reconstruir document_id limpio (base + verificador si existe)
+    verificador = raw_document_id.split("-")[1] if "-" in raw_document_id else None
+    clean_document_id = f"{base_number}-{verificador}" if verificador else base_number
 
-    # Buscar en caché local por email
-    if email:
-        local_contact = ContactCache.objects.filter(email=email).first()
-        if local_contact:
-            logger.info(f"Order {order_id}: Contacto encontrado en caché local por email ({email}). ID: {local_contact.bims_id}")
-            return local_contact.bims_id, None
-        logger.info(f"Order {order_id}: Email {email} no encontrado en caché. Se creará contacto nuevo.")
+    # ── 1. Buscar en caché local por document_id (más confiable) ──
+    cached_by_doc = ContactCache.objects.filter(document_id=base_number).first()
+    if not cached_by_doc and verificador:
+        cached_by_doc = ContactCache.objects.filter(document_id=clean_document_id).first()
+    if cached_by_doc:
+        logger.info(
+            f"Order {order_id}: Contacto en caché por documento ({base_number}). "
+            f"BIMS ID: {cached_by_doc.bims_id}"
+        )
+        return cached_by_doc.bims_id, None
 
-    # Crear contacto nuevo
+    # ── 2. Buscar en caché local por email ──
+    if clean_email:
+        cached_by_email = ContactCache.objects.filter(email=clean_email).first()
+        if cached_by_email:
+            logger.info(
+                f"Order {order_id}: Contacto en caché por email ({clean_email}). "
+                f"BIMS ID: {cached_by_email.bims_id}"
+            )
+            return cached_by_email.bims_id, None
+
+    # ── 3. Buscar en BIMS con variantes de document_type/id ──
+    bims_contact = _search_contact_in_bims(clean_document_id, document_type)
+    if bims_contact:
+        contact_id = bims_contact["id"]
+        logger.info(
+            f"Order {order_id}: Contacto encontrado en BIMS por variante. "
+            f"ID: {contact_id}, doc={bims_contact['document_id']}, "
+            f"type={bims_contact['document_type']}"
+        )
+
+        # Intentar actualizar email si cambió (best-effort)
+        bims_email = _clean_email(bims_contact.get("emails", ""))
+        if clean_email and clean_email != bims_email:
+            logger.info(
+                f"Order {order_id}: Email difiere "
+                f"(BIMS='{bims_email}', orden='{clean_email}'). "
+                f"Intentando actualizar..."
+            )
+            updated = bims.update_contact_email(
+                contact_id=contact_id,
+                name=bims_contact["name"],
+                document_id=bims_contact["document_id"],
+                document_type=bims_contact["document_type"],
+                new_email=clean_email,
+            )
+            if updated:
+                logger.info(f"Order {order_id}: Email actualizado a '{clean_email}'.")
+            else:
+                logger.warning(
+                    f"Order {order_id}: No se pudo actualizar email "
+                    f"(probablemente ya en uso por otro contacto). "
+                    f"Usando contacto {contact_id} sin actualizar."
+                )
+
+        # Guardar/actualizar caché local
+        cache_email = clean_email if clean_email else bims_email
+        if cache_email:
+            ContactCache.objects.update_or_create(
+                bims_id=contact_id,
+                defaults={"email": cache_email, "document_id": base_number},
+            )
+
+        return contact_id, None
+
+    # ── 4. Crear contacto nuevo en BIMS ──
     logger.info(f"Order {order_id}: Creando contacto nuevo en BIMS para '{name}'.")
-    contact_id = bims.create_contact(
-        id=None,
-        name=name,
-        address="",
-        document_type=document_type,
-        document_id=clean_document_id,
-        emails=email,
-        phones=phone,
-    )
-    if contact_id and email:
+    try:
+        contact_id = bims.create_contact(
+            id=None,
+            name=name,
+            address="",
+            document_type=document_type,
+            document_id=clean_document_id,
+            emails=clean_email,
+            phones=phone,
+        )
+    except Exception as e:
+        # Si falla con 403, intentar buscar en caché por document_id
+        # (pudo haber sido creado por otro request concurrente)
+        if "403" in str(e):
+            logger.warning(
+                f"Order {order_id}: 403 al crear contacto. "
+                f"Buscando en caché por doc {base_number}..."
+            )
+            cached = ContactCache.objects.filter(document_id=base_number).first()
+            if cached:
+                logger.info(
+                    f"Order {order_id}: Contacto encontrado en caché tras 403. "
+                    f"BIMS ID: {cached.bims_id}"
+                )
+                return cached.bims_id, None
+        raise
+
+    if contact_id and clean_email:
         ContactCache.objects.update_or_create(
             bims_id=int(contact_id),
-            defaults={"email": email, "document_id": clean_document_id},
+            defaults={"email": clean_email, "document_id": base_number},
         )
-        logger.info(f"Order {order_id}: Contacto guardado en caché. BIMS ID: {contact_id}, Email: {email}")
+        logger.info(
+            f"Order {order_id}: Contacto guardado en caché. "
+            f"BIMS ID: {contact_id}, Email: {clean_email}"
+        )
 
     return contact_id, None
 
