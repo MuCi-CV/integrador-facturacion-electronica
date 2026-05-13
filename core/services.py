@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from typing import Optional
 
 import sentry_sdk
 from django.db import IntegrityError
@@ -41,7 +42,7 @@ def _clean_email(email: str) -> str:
     return candidate.lower() if _EMAIL_RE.match(candidate) else ""
 
 
-def _search_contact_in_bims(document_id: str, document_type: str) -> dict | None:
+def _search_contact_in_bims(document_id: str, document_type: str) -> Optional[dict]:
     """Busca un contacto en BIMS probando variantes de document_type
     y document_id (con/sin dígito verificador).
 
