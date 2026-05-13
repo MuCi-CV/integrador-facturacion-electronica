@@ -28,8 +28,9 @@ class WooCommerceAPI:
         assert key is not None, "WooCommerce Key not found"
         assert secret is not None, "WooCommerce Secret not found"
 
+        verify_ssl = getattr(settings, "WOOCOMMERCE_VERIFY_SSL", True)
         self.wcapi = WCAPI(
-            url, key, secret, version="wc/v3", timeout=480, verify_ssl=False
+            url, key, secret, version="wc/v3", timeout=480, verify_ssl=verify_ssl
         )
 
     def get_products(self, **kwargs):

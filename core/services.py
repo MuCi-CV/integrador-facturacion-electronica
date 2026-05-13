@@ -3,6 +3,7 @@ import logging
 import re
 
 import sentry_sdk
+from django.db import IntegrityError
 
 from core.bims import bims
 from core.models import ContactCache, FailedOrder
@@ -274,10 +275,14 @@ def resolve_contact_id(
         # Guardar/actualizar caché local
         cache_email = clean_email if clean_email else bims_email
         if cache_email:
-            ContactCache.objects.update_or_create(
-                bims_id=contact_id,
-                defaults={"email": cache_email, "document_id": base_number},
-            )
+            try:
+                ContactCache.objects.update_or_create(
+                    bims_id=contact_id,
+                    defaults={"email": cache_email, "document_id": base_number},
+                )
+            except IntegrityError:
+                # Otro request concurrente ya insertó este registro; sin efecto.
+                pass
 
         return contact_id, None
 
@@ -311,14 +316,18 @@ def resolve_contact_id(
         raise
 
     if contact_id and clean_email:
-        ContactCache.objects.update_or_create(
-            bims_id=int(contact_id),
-            defaults={"email": clean_email, "document_id": base_number},
-        )
-        logger.info(
-            f"Order {order_id}: Contacto guardado en caché. "
-            f"BIMS ID: {contact_id}, Email: {clean_email}"
-        )
+        try:
+            ContactCache.objects.update_or_create(
+                bims_id=int(contact_id),
+                defaults={"email": clean_email, "document_id": base_number},
+            )
+            logger.info(
+                f"Order {order_id}: Contacto guardado en caché. "
+                f"BIMS ID: {contact_id}, Email: {clean_email}"
+            )
+        except IntegrityError:
+            # Otro request concurrente ya insertó este registro; sin efecto.
+            pass
 
     return contact_id, None
 

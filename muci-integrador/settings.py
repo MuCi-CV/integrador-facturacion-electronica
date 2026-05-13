@@ -230,8 +230,10 @@ if config.get("BASE_URL"):
 WOOCOMMERCE_URL = config["WOOCOMMERCE_URL"]
 WOOCOMMERCE_KEY = config["WOOCOMMERCE_KEY"]
 WOOCOMMERCE_SECRET = config["WOOCOMMERCE_SECRET"]
+WOOCOMMERCE_VERIFY_SSL = config.get("WOOCOMMERCE_VERIFY_SSL", "true").lower() not in ("false", "0")
 BIMS_URL = config.get("BIMS_URL")
 BIMS_USER = config.get("BIMS_USER")
 BIMS_PASSWORD = config.get("BIMS_PASSWORD")
 BIMS_TENANT = config.get("BIMS_TENANT")
+RUC_URL = config.get("RUC_URL")
 BASE_URL = config.get("BASE_URL")

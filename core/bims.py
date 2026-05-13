@@ -59,6 +59,7 @@ def _mask_login_body(body):
 class BimsApi:
     def __init__(self) -> None:
         self.base_url = settings.BIMS_URL
+        self.ruc_url = getattr(settings, "RUC_URL", None)
         self.sid = self.login()
         self.session = requests.Session()
 
@@ -78,7 +79,17 @@ class BimsApi:
         try:
             res = requests.post(url=url, json=body)
             elapsed = time.time() - start_time
-            response_data = res.json()
+
+            try:
+                response_data = res.json()
+            except ValueError:
+                bims_logger.error(
+                    f"Login: respuesta no es JSON válido. "
+                    f"Status: {res.status_code} | Body: {res.text[:500]}"
+                )
+                raise requests.RequestException(
+                    f"BIMS login devolvió respuesta no-JSON (status {res.status_code})"
+                )
 
             bims_logger.info("══════ BIMS RESPONSE ══════")
             bims_logger.info(f"Status: {res.status_code} | Time: {elapsed:.2f}s")
@@ -111,8 +122,23 @@ class BimsApi:
             res = method(url, **kwargs)
             elapsed = time.time() - start_time
 
-            if res.status_code == 401:
-                bims_logger.warning(f"Session expired (401) | Time: {elapsed:.2f}s | Attempting relogin...")
+            try:
+                response_body = res.json()
+            except ValueError:
+                bims_logger.error(
+                    f"{method_name} {url}: respuesta no es JSON válido. "
+                    f"Status: {res.status_code} | Body: {res.text[:500]}"
+                )
+                raise requests.RequestException(
+                    f"BIMS devolvió respuesta no-JSON (status {res.status_code}): {res.text[:200]}"
+                )
+
+            # BIMS puede indicar sesión expirada via HTTP 401 o via JSON body code "401" (HTTP 200)
+            if res.status_code == 401 or response_body.get("code") == "401":
+                bims_logger.warning(
+                    f"Session expired (HTTP {res.status_code} / body code {response_body.get('code')}) "
+                    f"| Time: {elapsed:.2f}s | Attempting relogin..."
+                )
                 logging.info("Session expired, attempting relogin...")
                 self.sid = self.login()
                 if self.sid:
@@ -122,8 +148,17 @@ class BimsApi:
                     start_time = time.time()
                     res = method(url, **kwargs)
                     elapsed = time.time() - start_time
+                    try:
+                        response_body = res.json()
+                    except ValueError:
+                        bims_logger.error(
+                            f"{method_name} {url}: respuesta no es JSON válido tras relogin. "
+                            f"Status: {res.status_code} | Body: {res.text[:500]}"
+                        )
+                        raise requests.RequestException(
+                            f"BIMS devolvió respuesta no-JSON tras relogin (status {res.status_code}): {res.text[:200]}"
+                        )
 
-            response_body = res.json()
             bims_logger.info("══════ BIMS RESPONSE ══════")
             bims_logger.info(f"Status: {res.status_code} | Time: {elapsed:.2f}s")
             bims_logger.info(f"Body: {_safe_json(response_body)}")
@@ -211,10 +246,13 @@ class BimsApi:
 
     ## buscar ruc en turuc
     def find_razon_social_by_ruc(self, document_id: str):
+        if not self.ruc_url:
+            raise ValueError(
+                "RUC_URL no está configurado en settings. "
+                "Agregá RUC_URL al .env para usar esta función."
+            )
         url = f"{self.ruc_url}/contribuyente/"
-        params = {
-            "ruc": document_id
-        }
+        params = {"ruc": document_id}
         response_data = self._retry_request(requests.get, url, params=params)
         if int(response_data.get("count")) > 0:
             return response_data.get("data")[0].get("Contact").get("name")

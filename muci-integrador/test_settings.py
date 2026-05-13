@@ -25,10 +25,12 @@ LOGGING = {"version": 1, "disable_existing_loggers": True}
 WOOCOMMERCE_URL = "http://test.local"
 WOOCOMMERCE_KEY = "test_key"
 WOOCOMMERCE_SECRET = "test_secret"
+WOOCOMMERCE_VERIFY_SSL = False
 BIMS_URL = "http://bims.test.local"
 BIMS_USER = "test_user"
 BIMS_PASSWORD = "test_password"
 BIMS_TENANT = "test_tenant"
+RUC_URL = None
 BASE_URL = "http://localhost"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
