@@ -361,3 +361,51 @@ class FetchFromApiTest(TestCase):
         m.raise_for_status.return_value = None
         mock_get.return_value = m
         self.assertIsNone(_fetch_from_api("80012345-6"))
+
+
+class ResolveContactRucEnrichmentTest(TestCase):
+    def _meta(self, ruc, razon_social):
+        return [
+            {"key": "_billing_ruc", "value": ruc},
+            {"key": "_billing_razon_social", "value": razon_social},
+        ]
+
+    @patch("core.services.bims")
+    @patch("core.services.get_razon_social")
+    def test_ruc_con_fuente_positiva_usa_nombre_autoritativo(self, mock_ruc, mock_bims):
+        from core.services import resolve_contact_id
+
+        mock_ruc.return_value = "RAZON SOCIAL OFICIAL SA"
+        mock_bims.find_contact.return_value = None
+        mock_bims.create_contact.return_value = 999
+
+        resolve_contact_id(
+            order_id=1,
+            meta_data=self._meta("80012345-6", "nombre mal escrito"),
+            billing={"first_name": "Juan", "last_name": "Pérez", "email": "j@x.com"},
+            shipping={},
+            is_pos=False,
+        )
+
+        mock_ruc.assert_called_once_with("80012345-6")
+        # el name autoritativo llega a create_contact
+        _, kwargs = mock_bims.create_contact.call_args
+        self.assertEqual(kwargs["name"], "RAZON SOCIAL OFICIAL SA")
+
+    @patch("core.services.bims")
+    @patch("core.services.get_razon_social")
+    def test_ci_no_consulta_la_fuente(self, mock_ruc, mock_bims):
+        from core.services import resolve_contact_id
+
+        mock_bims.find_contact.return_value = None
+        mock_bims.create_contact.return_value = 999
+
+        resolve_contact_id(
+            order_id=2,
+            meta_data=[{"key": "_billing_documento", "value": "1234567"}],
+            billing={"first_name": "Ana", "last_name": "López", "email": "a@x.com"},
+            shipping={},
+            is_pos=False,
+        )
+
+        mock_ruc.assert_not_called()

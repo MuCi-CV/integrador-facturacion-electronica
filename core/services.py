@@ -7,6 +7,7 @@ import sentry_sdk
 from django.db import IntegrityError
 
 from core.bims import bims, BimsBusinessError
+from core.ruc import get_razon_social
 from core.models import ContactCache, FailedOrder
 from core.woocommerce import wc_api
 from core.constants import (
@@ -194,6 +195,16 @@ def resolve_contact_id(
 
         social_reason_value = (social_reason_meta or {}).get("value", "")
         name = _camel_to_spaces(social_reason_value) if social_reason_value else f"{first_name} {last_name}"
+
+        # Corrección autoritativa: si hay RUC, la razón social del padrón manda.
+        if document_type == "ruc":
+            authoritative = get_razon_social(document_id)
+            if authoritative:
+                logger.info(
+                    f"Order {order_id}: Razón social corregida por RUC {document_id}: "
+                    f"'{name}' -> '{authoritative}'"
+                )
+                name = authoritative
 
     clean_email = _clean_email(email)
 
