@@ -1,8 +1,12 @@
 import logging
+from datetime import timedelta
 from typing import Optional
 
 import requests
 from django.conf import settings
+from django.utils.timezone import now
+
+from core.models import RucCache
 
 logger = logging.getLogger("ruc_api")
 
@@ -28,4 +32,34 @@ def _fetch_from_api(ruc: str, timeout: int = 5) -> Optional[str]:
     razon_social = (payload.get("data") or {}).get("razonSocial")
     if razon_social and razon_social.strip():
         return razon_social.strip()
+    return None
+
+
+def get_razon_social(ruc: str, timeout: int = 5) -> Optional[str]:
+    """
+    Resuelve la razón social de un RUC usando RucCache (TTL 30 días) y, si hace
+    falta, la fuente externa.
+
+    - Caché fresco (<30 días): devuelve el valor cacheado, sin llamar a la API.
+    - Caché vencido/ausente + API ok: devuelve el valor nuevo y refresca checked_at.
+    - Caché vencido + API falla: devuelve el valor viejo SIN renovar checked_at.
+    - Sin caché + API falla: devuelve None (el caller cae a WooCommerce).
+    """
+    if not ruc:
+        return None
+
+    cached = RucCache.objects.filter(ruc=ruc).first()
+
+    if cached and (now() - cached.checked_at) < timedelta(days=CACHE_TTL_DAYS):
+        return cached.razon_social
+
+    fetched = _fetch_from_api(ruc, timeout)
+    if fetched:
+        RucCache.objects.update_or_create(
+            ruc=ruc, defaults={"razon_social": fetched, "checked_at": now()}
+        )
+        return fetched
+
+    if cached:
+        return cached.razon_social
     return None

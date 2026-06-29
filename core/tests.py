@@ -240,6 +240,65 @@ class RetryRequestTest(TestCase):
 from core.models import RucCache
 
 
+class GetRazonSocialTest(TestCase):
+    def _make_cache(self, ruc, razon, dias_atras):
+        from django.utils.timezone import now
+        from datetime import timedelta
+
+        return RucCache.objects.create(
+            ruc=ruc, razon_social=razon, checked_at=now() - timedelta(days=dias_atras)
+        )
+
+    @patch("core.ruc._fetch_from_api")
+    def test_cache_fresco_no_llama_api(self, mock_fetch):
+        from core.ruc import get_razon_social
+
+        self._make_cache("80012345-6", "EMPRESA FRESCA SA", dias_atras=5)
+        self.assertEqual(get_razon_social("80012345-6"), "EMPRESA FRESCA SA")
+        mock_fetch.assert_not_called()
+
+    @patch("core.ruc._fetch_from_api")
+    def test_cache_vencido_api_ok_actualiza(self, mock_fetch):
+        from core.ruc import get_razon_social
+        from django.utils.timezone import now
+        from datetime import timedelta
+
+        self._make_cache("80012345-6", "NOMBRE VIEJO SA", dias_atras=40)
+        mock_fetch.return_value = "NOMBRE NUEVO SA"
+
+        self.assertEqual(get_razon_social("80012345-6"), "NOMBRE NUEVO SA")
+        row = RucCache.objects.get(ruc="80012345-6")
+        self.assertEqual(row.razon_social, "NOMBRE NUEVO SA")
+        self.assertGreater(row.checked_at, now() - timedelta(minutes=1))
+
+    @patch("core.ruc._fetch_from_api")
+    def test_cache_vencido_api_falla_usa_viejo_sin_renovar(self, mock_fetch):
+        from core.ruc import get_razon_social
+
+        row = self._make_cache("80012345-6", "NOMBRE VIEJO SA", dias_atras=40)
+        viejo_checked_at = row.checked_at
+        mock_fetch.return_value = None
+
+        self.assertEqual(get_razon_social("80012345-6"), "NOMBRE VIEJO SA")
+        self.assertEqual(RucCache.objects.get(ruc="80012345-6").checked_at, viejo_checked_at)
+
+    @patch("core.ruc._fetch_from_api")
+    def test_sin_cache_api_ok_crea_fila(self, mock_fetch):
+        from core.ruc import get_razon_social
+
+        mock_fetch.return_value = "EMPRESA NUEVA SA"
+        self.assertEqual(get_razon_social("80012345-6"), "EMPRESA NUEVA SA")
+        self.assertTrue(RucCache.objects.filter(ruc="80012345-6").exists())
+
+    @patch("core.ruc._fetch_from_api")
+    def test_sin_cache_api_falla_devuelve_none(self, mock_fetch):
+        from core.ruc import get_razon_social
+
+        mock_fetch.return_value = None
+        self.assertIsNone(get_razon_social("80012345-6"))
+        self.assertFalse(RucCache.objects.filter(ruc="80012345-6").exists())
+
+
 class RucCacheModelTest(TestCase):
     def test_se_crea_y_es_unico_por_ruc(self):
         from django.utils.timezone import now
