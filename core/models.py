@@ -39,3 +39,19 @@ class FailedOrder(models.Model):
 
     def __str__(self):
         return f"Orden {self.order_id}"
+
+
+class RucCache(models.Model):
+    ruc = models.CharField(
+        verbose_name="RUC", max_length=20, unique=True, db_index=True
+    )  # con dígito verificador: "80012345-6"
+    razon_social = models.CharField(verbose_name="Razón social", max_length=255)
+    checked_at = models.DateTimeField(verbose_name="Última consulta exitosa a la API")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Caché de RUC"
+        verbose_name_plural = "Cachés de RUC"
+
+    def __str__(self):
+        return f"{self.ruc} - {self.razon_social}"

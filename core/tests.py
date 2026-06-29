@@ -235,3 +235,21 @@ class RetryRequestTest(TestCase):
                 self.api._request_with_relogin(
                     method, "http://bims.test/contacts/", params={"sid": "old_sid"}
                 )
+
+
+from core.models import RucCache
+
+
+class RucCacheModelTest(TestCase):
+    def test_se_crea_y_es_unico_por_ruc(self):
+        from django.utils.timezone import now
+        from django.db import IntegrityError
+
+        RucCache.objects.create(
+            ruc="80012345-6", razon_social="EMPRESA SA", checked_at=now()
+        )
+        self.assertEqual(RucCache.objects.get(ruc="80012345-6").razon_social, "EMPRESA SA")
+        with self.assertRaises(IntegrityError):
+            RucCache.objects.create(
+                ruc="80012345-6", razon_social="OTRA SA", checked_at=now()
+            )
