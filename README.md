@@ -18,34 +18,15 @@ Sisteque que integra woocommerce y BIMS
     mysql --execute="GRANT ALL PRIVILEGES ON muci-integrador.* to 'muci-integrador'@'localhost';"
     ```
 
-2. En la carpeta raíz, crea un archivo `.env` con el siguiente contenido:
+2. En la carpeta raíz, crea el archivo `.env` a partir de la plantilla:
 
+    ```bash
+    cp .env.example .env
     ```
-        DEBUG = True
-        SECRET_KEY = supersecretkey
-        ALLOWED_HOSTS = *
-        DB_USER = muci-integrador
-        DB_PASSWORD = superstrongpassword
-        DB_NAME = muci-integrador
-        DB_HOST = 127.0.0.1
-        DB_PORT = 3306
-        EMAIL_HOST = emaillhost
-        EMAIL_FROM = emailfrom
-        EMAIL_PORT = emailport
-        EMAIL_USER = emailuser
-        EMAIL_PASSWORD = emailpassword
-        FRONTEND_URL = frontenturl
-        EMAIL_USE_SSL = true
-        EMAIL_USE_TLS = false
-        WOOCOMMERCE_URL = woocommerce_url
-        WOOCOMMERCE_KEY = woocommerce_key
-        WOOCOMMERCE_SECRET = woocommerce_secret
-        BIMS_URL = bims_url
-        BIMS_USER = bims_user
-        BIMS_PASSWORD = bims_password
-        BIMS_TENANT = bims_tenant
 
-    ```
+    Luego completá los valores reales. La lista completa de variables (cuáles
+    son obligatorias y cuáles opcionales) está documentada en `.env.example`.
+    El `.env` está en `.gitignore`: nunca se commitea.
 
 3. Instala las dependencias del proyecto:
 
@@ -64,4 +45,10 @@ Sisteque que integra woocommerce y BIMS
 
     ```bash
     pipenv run python manage.py runserver
+    ```
+
+6. Ejecuta los tests (no requieren `.env`; usan settings mínimos con SQLite en memoria):
+
+    ```bash
+    pipenv run python manage.py test core/ --settings=muci-integrador.test_settings
     ```

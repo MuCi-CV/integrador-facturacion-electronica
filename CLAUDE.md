@@ -7,14 +7,17 @@ Este proyecto sirve como un middleware (intermediario) entre WooCommerce y el si
 - **Activar entorno**: `pipenv shell`
 - **Ejecutar servidor**: `python manage.py runserver`
 - **Migraciones**: `python manage.py makemigrations core` y `python manage.py migrate`
-- **Tests**: `python manage.py test core/` o `pytest` (si está configurado en el futuro).
+- **Tests**: `.venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings` (settings mínimos sin `.env`, SQLite en memoria). Alternativa con pipenv: `python manage.py test core/`.
 
 ## Arquitectura y Estructura del Proyecto
 - `core/`: Contiene el dominio principal y lógica de la aplicación.
-  - `bims.py`: Lógica principal de negocio, sincronización e interacción de APIs con el ecosistema BIMS (muy importante mantenerla limpia y modular).
-  - `models.py`: Entidades de persistencia (ej. `ContactCache` para evitar múltiples peticiones a BIMS al crear usuarios; `FailedOrder` para registro de transacciones que requieran reintentos).
-  - `views.py`: Endpoints y webhooks. Reciben la información (ej. de WooCommerce), validan el request y delegan el procesamiento a `bims.py` o equivalentes.
-- `muci-integrador/`: Configuración global del proyecto Django (`settings.py`, `urls.py`).
+  - `bims.py`: Cliente e interacción de APIs con el ecosistema BIMS. Incluye la jerarquía de excepciones `BimsError` → `BimsTransientError` (reintentable) / `BimsBusinessError` (rechazo terminal: 403 o 401 de permisos). `_retry_request` solo reintenta errores transitorios; los terminales fallan de inmediato.
+  - `services.py`: Capa de servicio (Service Layer). Orquesta el flujo de una orden (`process_order`, `resolve_contact_id`, `build_sale_products`, etc.). Las vistas delegan acá.
+  - `ruc.py`: Consulta de razón social por RUC contra la API pública turuc (`get_razon_social`, `_fetch_from_api`). Independiente de BIMS: HTTP propio con `timeout`, fail-safe (nunca lanza). Cachea en `RucCache` con TTL 30 días.
+  - `models.py`: Entidades de persistencia: `ContactCache` (mapeo email/documento→bims_id para evitar peticiones a BIMS); `FailedOrder` (transacciones que requieren reintentos); `RucCache` (caché RUC→razón social, TTL 30 días).
+  - `views.py`: Endpoints y webhooks. Reciben la información (ej. de WooCommerce), validan el request y delegan el procesamiento a `services.py`.
+- `muci-integrador/`: Configuración global del proyecto Django (`settings.py`, `test_settings.py`, `urls.py`).
+- `.env.example`: Plantilla de variables de entorno (copiar a `.env` en la raíz; el `.env` real está en `.gitignore`).
 - `runretryfaileds.sh`: Script utilizado para el reintento de sincronizaciones de órdenes caídas.
 - **Logs locales**: Los archivos tipo `.log` (como `bims_api.log`, `bims_sync-2.log`) almacenan el histórico vital para el debugeo de respuestas y comunicación con BIMS.
 
