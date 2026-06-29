@@ -1,4 +1,5 @@
 import requests
+from django.db import IntegrityError
 from unittest.mock import MagicMock, patch
 
 # bims.py instancia BimsApi() al ser importado, lo que intenta conectar a BIMS.
@@ -11,6 +12,7 @@ with patch("requests.post") as _mock_post:
     from core.services import _parse_pos_payments, build_sale_products, resolve_pos_and_payments
     from core.bims import BimsApi, BimsBusinessError, BimsTransientError
 
+from core.models import RucCache
 from django.test import TestCase, override_settings
 
 
@@ -237,9 +239,6 @@ class RetryRequestTest(TestCase):
                 )
 
 
-from core.models import RucCache
-
-
 class GetRazonSocialTest(TestCase):
     def _make_cache(self, ruc, razon, dias_atras):
         from django.utils.timezone import now
@@ -297,6 +296,19 @@ class GetRazonSocialTest(TestCase):
         mock_fetch.return_value = None
         self.assertIsNone(get_razon_social("80012345-6"))
         self.assertFalse(RucCache.objects.filter(ruc="80012345-6").exists())
+
+    @patch("core.ruc.RucCache.objects.update_or_create")
+    @patch("core.ruc._fetch_from_api")
+    def test_integrity_error_en_cache_no_propaga(self, mock_fetch, mock_uoc):
+        """Regresión: un IntegrityError por insert concurrente no debe propagarse al caller."""
+        from core.ruc import get_razon_social
+
+        mock_fetch.return_value = "EMPRESA CONCURRENTE SA"
+        mock_uoc.side_effect = IntegrityError("dup")
+
+        result = get_razon_social("80012345-6")
+
+        self.assertEqual(result, "EMPRESA CONCURRENTE SA")
 
 
 class RucCacheModelTest(TestCase):

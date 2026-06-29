@@ -4,6 +4,7 @@ from typing import Optional
 
 import requests
 from django.conf import settings
+from django.db import IntegrityError
 from django.utils.timezone import now
 
 from core.models import RucCache
@@ -55,9 +56,13 @@ def get_razon_social(ruc: str, timeout: int = 5) -> Optional[str]:
 
     fetched = _fetch_from_api(ruc, timeout)
     if fetched:
-        RucCache.objects.update_or_create(
-            ruc=ruc, defaults={"razon_social": fetched, "checked_at": now()}
-        )
+        try:
+            RucCache.objects.update_or_create(
+                ruc=ruc, defaults={"razon_social": fetched, "checked_at": now()}
+            )
+        except IntegrityError:
+            # Otro request concurrente ya insertó este RUC; sin efecto.
+            pass
         return fetched
 
     if cached:
