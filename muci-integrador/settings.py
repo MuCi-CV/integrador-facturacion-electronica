@@ -236,4 +236,5 @@ BIMS_USER = config.get("BIMS_USER")
 BIMS_PASSWORD = config.get("BIMS_PASSWORD")
 BIMS_TENANT = config.get("BIMS_TENANT")
 RUC_URL = config.get("RUC_URL")
+RUC_API_URL = config.get("RUC_API_URL") or "https://turuc.com.py"
 BASE_URL = config.get("BASE_URL")

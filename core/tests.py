@@ -11,7 +11,7 @@ with patch("requests.post") as _mock_post:
     from core.services import _parse_pos_payments, build_sale_products, resolve_pos_and_payments
     from core.bims import BimsApi, BimsBusinessError, BimsTransientError
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 
 class ParsePosPaymentsTest(TestCase):
@@ -253,3 +253,52 @@ class RucCacheModelTest(TestCase):
             RucCache.objects.create(
                 ruc="80012345-6", razon_social="OTRA SA", checked_at=now()
             )
+
+
+class FetchFromApiTest(TestCase):
+    def _resp(self, json_data, status=200):
+        m = MagicMock(status_code=status)
+        m.json.return_value = json_data
+        m.raise_for_status.return_value = None
+        return m
+
+    @patch("core.ruc.requests.get")
+    def test_positivo_devuelve_razon_social(self, mock_get):
+        from core.ruc import _fetch_from_api
+
+        mock_get.return_value = self._resp(
+            {"data": {"razonSocial": "COMERCIO Y FINANZAS SA"}, "message": "OK"}
+        )
+        self.assertEqual(_fetch_from_api("80012345-6"), "COMERCIO Y FINANZAS SA")
+
+    @patch("core.ruc.requests.get")
+    def test_sin_match_devuelve_none(self, mock_get):
+        from core.ruc import _fetch_from_api
+
+        mock_get.return_value = self._resp({"data": {}, "message": "OK"})
+        self.assertIsNone(_fetch_from_api("80012345-6"))
+
+    @patch("core.ruc.requests.get")
+    def test_error_de_red_devuelve_none(self, mock_get):
+        from core.ruc import _fetch_from_api
+
+        mock_get.side_effect = requests.RequestException("timeout")
+        self.assertIsNone(_fetch_from_api("80012345-6"))
+
+    @override_settings(RUC_API_URL=None)
+    @patch("core.ruc.requests.get")
+    def test_no_configurado_no_hace_request(self, mock_get):
+        from core.ruc import _fetch_from_api
+
+        self.assertIsNone(_fetch_from_api("80012345-6"))
+        mock_get.assert_not_called()
+
+    @patch("core.ruc.requests.get")
+    def test_json_malformado_devuelve_none(self, mock_get):
+        from core.ruc import _fetch_from_api
+
+        m = MagicMock(status_code=200)
+        m.json.side_effect = ValueError("no JSON")
+        m.raise_for_status.return_value = None
+        mock_get.return_value = m
+        self.assertIsNone(_fetch_from_api("80012345-6"))

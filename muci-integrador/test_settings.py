@@ -31,6 +31,7 @@ BIMS_USER = "test_user"
 BIMS_PASSWORD = "test_password"
 BIMS_TENANT = "test_tenant"
 RUC_URL = None
+RUC_API_URL = "http://turuc.test.local"
 BASE_URL = "http://localhost"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
