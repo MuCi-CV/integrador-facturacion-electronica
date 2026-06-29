@@ -2,7 +2,7 @@
 
 **Fecha:** 2026-06-29
 **Rama:** `feature/refactor-service-layer`
-**Estado:** Aprobado para implementación (sin caché)
+**Estado:** Aprobado para implementación (con caché dedicado `RucCache`, TTL 30 días)
 
 ## Problema
 
@@ -79,23 +79,30 @@ Independiente de `BimsApi`. **No** reutiliza `_retry_request` / `_request_with_r
 (esa maquinaria es de BIMS: relogin con `sid`, `raise_for_status`, formato BIMS — nada de
 eso aplica a un endpoint de terceros).
 
+Se separa en dos piezas: `_fetch_from_api` (solo HTTP, sin saber de caché) y
+`get_razon_social` (orquesta caché + API).
+
 ```python
 import logging
-import requests
+from datetime import timedelta
 from typing import Optional
 
+import requests
 from django.conf import settings
+from django.utils.timezone import now
+
+from core.models import RucCache
 
 logger = logging.getLogger("ruc_api")
 
+CACHE_TTL_DAYS = 30
 
-def get_razon_social(ruc: str, timeout: int = 5) -> Optional[str]:
+
+def _fetch_from_api(ruc: str, timeout: int = 5) -> Optional[str]:
     """
-    Consulta la razón social de un RUC (con dígito verificador) en la fuente externa.
-
-    Devuelve la razón social si la fuente responde positivo; devuelve None ante
-    cualquier otra situación (fuente no configurada, error de red, timeout, respuesta
-    no-JSON, sin match, o razón social vacía). Nunca lanza excepción hacia el caller.
+    Pega a la fuente externa. Devuelve la razón social si responde positivo;
+    None ante fuente no configurada, error de red/timeout, JSON inválido, sin
+    match o razón social vacía. Nunca lanza hacia el caller.
     """
     base_url = getattr(settings, "RUC_API_URL", None)
     if not base_url or not ruc:
@@ -107,12 +114,77 @@ def get_razon_social(ruc: str, timeout: int = 5) -> Optional[str]:
     except (requests.RequestException, ValueError) as e:
         logger.warning(f"Consulta RUC {ruc} falló: {e}")
         return None
-
     razon_social = (payload.get("data") or {}).get("razonSocial")
     if razon_social and razon_social.strip():
         return razon_social.strip()
     return None
+
+
+def get_razon_social(ruc: str, timeout: int = 5) -> Optional[str]:
+    """
+    Resuelve la razón social de un RUC usando RucCache (TTL 30 días) y, si hace
+    falta, la fuente externa. Ver reglas de caché/fallback en la sección RucCache.
+    """
+    if not ruc:
+        return None
+
+    cached = RucCache.objects.filter(ruc=ruc).first()
+
+    # 1. Caché fresco (<30 días) → usar sin pegarle a la API.
+    if cached and (now() - cached.checked_at) < timedelta(days=CACHE_TTL_DAYS):
+        return cached.razon_social
+
+    # 2. No hay caché o está vencido → consultar la API.
+    fetched = _fetch_from_api(ruc, timeout)
+    if fetched:
+        # Éxito: refrescar el caché y SÍ renovar checked_at.
+        RucCache.objects.update_or_create(
+            ruc=ruc, defaults={"razon_social": fetched, "checked_at": now()}
+        )
+        return fetched
+
+    # 3. La API falló o no devolvió match:
+    #    - hay valor viejo en caché → usarlo SIN renovar checked_at (caso B1),
+    #      para que la próxima orden vuelva a intentar la API.
+    if cached:
+        return cached.razon_social
+    #    - no hay nada cacheado → caer a WooCommerce (caso A).
+    return None
 ```
+
+### Modelo nuevo: `RucCache` (`core/models.py`)
+
+Caché dedicado para el padrón de RUC. **Separado** de `ContactCache` porque: (a) se
+puebla en la consulta misma, no depende de que el contacto exista en BIMS (que necesita
+`bims_id`); (b) la llave es el **RUC completo con dígito verificador**, no el número base
+sin DV que guarda `ContactCache.document_id`; (c) es otra responsabilidad (cachear una
+fuente externa, no mapear contactos a BIMS).
+
+```python
+class RucCache(models.Model):
+    ruc = models.CharField(verbose_name="RUC", max_length=20, unique=True, db_index=True)  # con DV: "80012345-6"
+    razon_social = models.CharField(verbose_name="Razón social", max_length=255)
+    checked_at = models.DateTimeField(verbose_name="Última consulta exitosa a la API")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Caché de RUC"
+        verbose_name_plural = "Cachés de RUC"
+```
+
+- `checked_at` se setea **explícitamente** a `now()` (no `auto_now`) y solo se actualiza
+  cuando la API responde positivo. Representa la última consulta **exitosa**, no la última
+  lectura.
+- Migración nueva (`0005_ruccache`).
+
+### Reglas de caché y fallback
+
+| Situación | Acción | ¿Se actualiza `checked_at`? |
+|---|---|---|
+| Caché fresco (`checked_at` < 30 días) | Usar razón social cacheada, **sin** llamar a la API | No |
+| Caché vencido/ausente + API positiva | Usar valor de la API y `update_or_create` | **Sí** (a `now()`) |
+| Caché vencido + API falla/sin match (B1) | Usar el valor **viejo** del caché | **No** (queda vencido → se reintenta en la próxima orden) |
+| Sin caché + API falla/sin match (A) | Caer a los datos de WooCommerce (`None`) | — |
 
 ### Configuración
 
@@ -137,10 +209,11 @@ Se usa `document_id` con su guión verificador (el código ya preserva `ruc_valu
 
 ### Latencia
 
-Agrega un HTTP extra por orden con RUC, en un webhook síncrono. Mitigación: `timeout`
-corto (5 s) y fallo silencioso a los datos de WooCommerce. **Sin caché** en esta
-iteración (decisión explícita). Si la latencia molesta, se podrá agregar después un
-cache RUC→razón social sin cambiar la interfaz del módulo.
+Agrega un HTTP extra por orden con RUC, en un webhook síncrono. Mitigaciones: `timeout`
+corto (5 s), fallo silencioso a WooCommerce, y el **caché `RucCache` (TTL 30 días)** que
+evita la llamada para RUCs ya consultados recientemente (los clientes recurrentes no
+pegan a la API). La razón social casi nunca cambia, así que el TTL de 30 días refresca lo
+suficiente sin penalizar cada orden.
 
 ## Lo que NO se toca
 
@@ -150,18 +223,29 @@ cache RUC→razón social sin cambiar la interfaz del módulo.
 
 ## Tests (`core/tests.py`, con mock de `requests`)
 
-Clase nueva, sin pegarle a turuc real:
+Clase nueva, con mock de `requests` (sin pegarle a turuc real). `RucCache` usa la BD de
+test en memoria.
 
-1. **Positivo sobrescribe**: la fuente devuelve `razonSocial` → `get_razon_social`
-   retorna ese valor (y en services, `name` se sobrescribe).
-2. **Negativo usa WooCommerce**: respuesta sin match (`data` ausente o sin
-   `razonSocial`, o `razonSocial` vacía) → `None`.
-3. **Error de red/timeout → None**: `requests.RequestException` capturada → `None`.
+**`_fetch_from_api` (capa HTTP):**
+1. **Positivo**: la fuente devuelve `razonSocial` → retorna ese valor.
+2. **Sin match → None**: `data` ausente o sin `razonSocial`, o `razonSocial` vacía.
+3. **Error de red/timeout → None**: `requests.RequestException` capturada.
 4. **No configurado → None**: `RUC_API_URL` ausente → `None` sin hacer request.
-5. **JSON malformado → None**: respuesta no-JSON (`ValueError`) → `None`.
-6. **Integración en `resolve_contact_id`**: con `document_type == "ruc"` y fuente
-   positiva, el contacto se arma con la razón social autoritativa; con `document_type
-   == "ci"` no se consulta la fuente.
+5. **JSON malformado → None**: respuesta no-JSON (`ValueError`).
+
+**`get_razon_social` (caché + API):**
+6. **Caché fresco**: existe `RucCache` con `checked_at` reciente → devuelve el valor
+   cacheado y **no** llama a `_fetch_from_api`.
+7. **Caché vencido + API ok**: `checked_at` > 30 días → consulta la API, devuelve el
+   nuevo valor y actualiza `checked_at` a ahora.
+8. **Caché vencido + API falla (B1)**: devuelve el valor **viejo** y `checked_at`
+   **no** cambia (sigue vencido).
+9. **Sin caché + API ok**: crea la fila en `RucCache` y devuelve el valor.
+10. **Sin caché + API falla (A)**: devuelve `None`.
+
+**Integración en `resolve_contact_id`:**
+11. Con `document_type == "ruc"` y fuente positiva, el contacto se arma con la razón
+    social autoritativa; con `document_type == "ci"` no se consulta la fuente.
 
 ## Compatibilidad
 
