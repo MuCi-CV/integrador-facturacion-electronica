@@ -154,7 +154,8 @@ Clase nueva, sin pegarle a turuc real:
 
 1. **Positivo sobrescribe**: la fuente devuelve `razonSocial` → `get_razon_social`
    retorna ese valor (y en services, `name` se sobrescribe).
-2. **Negativo usa WooCommerce**: `count`/match vacío (`data` sin `razonSocial`) → `None`.
+2. **Negativo usa WooCommerce**: respuesta sin match (`data` ausente o sin
+   `razonSocial`, o `razonSocial` vacía) → `None`.
 3. **Error de red/timeout → None**: `requests.RequestException` capturada → `None`.
 4. **No configurado → None**: `RUC_API_URL` ausente → `None` sin hacer request.
 5. **JSON malformado → None**: respuesta no-JSON (`ValueError`) → `None`.
