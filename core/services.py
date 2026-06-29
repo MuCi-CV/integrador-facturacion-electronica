@@ -6,7 +6,7 @@ from typing import Optional
 import sentry_sdk
 from django.db import IntegrityError
 
-from core.bims import bims
+from core.bims import bims, BimsBusinessError
 from core.models import ContactCache, FailedOrder
 from core.woocommerce import wc_api
 from core.constants import (
@@ -301,8 +301,10 @@ def resolve_contact_id(
         )
     except Exception as e:
         # Si falla con 403, intentar buscar en caché por document_id
-        # (pudo haber sido creado por otro request concurrente)
-        if "403" in str(e):
+        # (pudo haber sido creado por otro request concurrente).
+        # Detectamos por tipo (BimsBusinessError) y mantenemos el match de string
+        # como respaldo por compatibilidad.
+        if isinstance(e, BimsBusinessError) or "403" in str(e):
             logger.warning(
                 f"Order {order_id}: 403 al crear contacto. "
                 f"Buscando en caché por doc {base_number}..."

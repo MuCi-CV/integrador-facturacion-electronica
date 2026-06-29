@@ -56,6 +56,22 @@ def _mask_login_body(body):
     return masked
 
 
+class BimsError(Exception):
+    """Error base de comunicación con BIMS."""
+
+
+class BimsTransientError(BimsError):
+    """Error reintentable: red, timeout o status no-ok no terminal."""
+
+
+class BimsBusinessError(BimsError):
+    """
+    Rechazo de negocio terminal de BIMS (403, o 401 de permisos persistente
+    tras un relogin exitoso). Reintentar no cambia el resultado, así que se
+    propaga de inmediato sin agotar los reintentos.
+    """
+
+
 class BimsApi:
     def __init__(self) -> None:
         self.base_url = settings.BIMS_URL
@@ -159,6 +175,14 @@ class BimsApi:
                             f"BIMS devolvió respuesta no-JSON tras relogin (status {res.status_code}): {res.text[:200]}"
                         )
 
+                    # Si tras un relogin EXITOSO sigue viniendo 401, no es sesión expirada
+                    # sino falta de permisos del usuario de API → terminal, no reintentar.
+                    if res.status_code == 401 or response_body.get("code") == "401":
+                        raise BimsBusinessError(
+                            f"BIMS denegó el acceso tras relogin a {url}: "
+                            f"{response_body.get('message')} (code 401)"
+                        )
+
             bims_logger.info("══════ BIMS RESPONSE ══════")
             bims_logger.info(f"Status: {res.status_code} | Time: {elapsed:.2f}s")
             bims_logger.info(f"Body: {_safe_json(response_body)}")
@@ -179,34 +203,42 @@ class BimsApi:
                 bims_logger.error(f"{method_name} {url} | Time: {elapsed:.2f}s | Error: {str(e)}")
             logging.error(error_msg)
             logging.error(str(e))
-            raise Exception(error_msg) from e
+            raise BimsTransientError(error_msg) from e
 
 
     def _retry_request(self, method, url, max_retries=5, retry_delay=2, **kwargs):
-        attempts = 0
-        while attempts < max_retries:
+        last_error_details = None
+        for attempt in range(1, max_retries + 1):
             try:
                 response_data = self._request_with_relogin(method, url, **kwargs)
-                if response_data.get("status") == "ok":
-                    return response_data
-                elif response_data.get("code") == "403":
-                    raise Exception(
-                        f"BIMS rechazó la solicitud a {url}: "
-                        f"{response_data.get('message')} (code 403)"
-                    )
-                else:
-                    attempts += 1
-                    err_message = f"Attempt {attempts} failed: status not 'ok'. Response: {response_data}"
-                    last_error_details = err_message
-                    logging.warning(err_message + " Retrying...")
+            except BimsBusinessError:
+                # Rechazo terminal (403 / 401 de permisos): propagar sin reintentar.
+                raise
+            except BimsTransientError as e:
+                last_error_details = (
+                    f"Error in request to {url}. Attempt {attempt} of {max_retries}. Error: {str(e)}"
+                )
+                logging.error(last_error_details)
+                if attempt < max_retries:
                     time.sleep(retry_delay)
-            except Exception as e:
-                err_message = f"Error in request to {url}. Attempt {attempts + 1} of {max_retries}. Error: {str(e)}"
-                last_error_details = err_message
-                logging.error(err_message)
-                attempts += 1
+                continue
+
+            if response_data.get("status") == "ok":
+                return response_data
+            # El check de 403 vive FUERA del try original: nada puede tragarse este corte.
+            if response_data.get("code") == "403":
+                raise BimsBusinessError(
+                    f"BIMS rechazó la solicitud a {url}: "
+                    f"{response_data.get('message')} (code 403)"
+                )
+            # status no-ok no terminal → transitorio, reintentar.
+            last_error_details = f"Attempt {attempt} failed: status not 'ok'. Response: {response_data}"
+            logging.warning(last_error_details + " Retrying...")
+            if attempt < max_retries:
                 time.sleep(retry_delay)
-        raise Exception(f"Failed request to {url} after {max_retries} attempts. Last error: {last_error_details}")
+        raise BimsTransientError(
+            f"Failed request to {url} after {max_retries} attempts. Last error: {last_error_details}"
+        )
 
     def list_contacts(self, document_id: str, document_type: str):
         url = f"{self.base_url}/contacts/"

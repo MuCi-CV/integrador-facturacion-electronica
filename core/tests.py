@@ -1,3 +1,4 @@
+import requests
 from unittest.mock import MagicMock, patch
 
 # bims.py instancia BimsApi() al ser importado, lo que intenta conectar a BIMS.
@@ -8,6 +9,7 @@ with patch("requests.post") as _mock_post:
         json=lambda: {"status": "ok", "data": {"Session": {"id": "mock_sid"}}},
     )
     from core.services import _parse_pos_payments, build_sale_products, resolve_pos_and_payments
+    from core.bims import BimsApi, BimsBusinessError, BimsTransientError
 
 from django.test import TestCase
 
@@ -160,3 +162,76 @@ class BuildSaleProductsTest(TestCase):
         products, skipped = build_sale_products(1, items, [], discount=0)
         self.assertEqual(products, [])
         self.assertEqual(len(skipped), 1)
+
+
+@patch("core.bims.time.sleep")  # evita esperas reales durante los reintentos
+class RetryRequestTest(TestCase):
+    """Tests del control de reintentos vs. fallo terminal en _retry_request."""
+
+    def setUp(self):
+        with patch.object(BimsApi, "login", return_value="fake_sid"):
+            self.api = BimsApi()
+
+    def test_403_falla_de_inmediato_sin_reintentar(self, mock_sleep):
+        """Bug A: un 403 es un rechazo de negocio terminal, no debe agotar reintentos."""
+        response = {"status": "error", "code": "403", "message": "No tienes acceso a este recurso"}
+        with patch.object(self.api, "_request_with_relogin", return_value=response) as mock_req:
+            with self.assertRaises(BimsBusinessError) as ctx:
+                self.api._retry_request(requests.post, "http://bims.test/contacts/")
+        self.assertEqual(mock_req.call_count, 1)
+        self.assertIn("403", str(ctx.exception))
+        mock_sleep.assert_not_called()
+
+    def test_error_de_red_reintenta_hasta_max_retries(self, mock_sleep):
+        """Un error transitorio (red) sí debe reintentarse el número de veces configurado."""
+        with patch.object(
+            self.api, "_request_with_relogin", side_effect=BimsTransientError("network down")
+        ) as mock_req:
+            with self.assertRaises(BimsTransientError):
+                self.api._retry_request(requests.get, "http://bims.test/contacts/", max_retries=3)
+        self.assertEqual(mock_req.call_count, 3)
+
+    def test_status_ok_retorna_sin_reintentar(self, mock_sleep):
+        response = {"status": "ok", "data": {"Contact": {"id": 1}}}
+        with patch.object(self.api, "_request_with_relogin", return_value=response) as mock_req:
+            result = self.api._retry_request(requests.get, "http://bims.test/contacts/")
+        self.assertEqual(result, response)
+        self.assertEqual(mock_req.call_count, 1)
+
+    def test_status_no_ok_no_terminal_reintenta(self, mock_sleep):
+        """Un status no-ok que no sea 403/401 se trata como transitorio y se reintenta."""
+        response = {"status": "error", "code": "500", "message": "boom"}
+        with patch.object(self.api, "_request_with_relogin", return_value=response) as mock_req:
+            with self.assertRaises(BimsTransientError):
+                self.api._retry_request(requests.get, "http://bims.test/x/", max_retries=4)
+        self.assertEqual(mock_req.call_count, 4)
+
+    def test_no_duerme_tras_el_ultimo_intento(self, mock_sleep):
+        """No debe hacer sleep después del intento final (latencia desperdiciada en webhook síncrono)."""
+        with patch.object(
+            self.api, "_request_with_relogin", side_effect=BimsTransientError("network down")
+        ):
+            with self.assertRaises(BimsTransientError):
+                self.api._retry_request(requests.get, "http://bims.test/x/", max_retries=3)
+        # 3 intentos => como mucho 2 esperas entre ellos, nunca 3.
+        self.assertEqual(mock_sleep.call_count, 2)
+
+    def test_401_de_permisos_persistente_tras_relogin_es_terminal(self, mock_sleep):
+        """
+        Tras un relogin EXITOSO, si BIMS sigue devolviendo code 401 es un problema de
+        permisos (no de sesión expirada) y debe fallar como terminal, sin reintentar.
+        """
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {
+            "status": "error",
+            "code": "401",
+            "message": "No dispone de permisos para acceder a la función solicitada.",
+        }
+        resp.raise_for_status.return_value = None
+        method = MagicMock(return_value=resp)
+        method.__name__ = "get"  # el código real lee method.__name__ para loguear
+        with patch.object(self.api, "login", return_value="new_sid"):
+            with self.assertRaises(BimsBusinessError):
+                self.api._request_with_relogin(
+                    method, "http://bims.test/contacts/", params={"sid": "old_sid"}
+                )
