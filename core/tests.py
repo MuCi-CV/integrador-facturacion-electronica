@@ -239,6 +239,124 @@ class RetryRequestTest(TestCase):
                 )
 
 
+@patch("core.bims.time.sleep")  # evita esperas reales durante los reintentos
+class BimsFallbackUrlTest(TestCase):
+    """
+    Tests de la conmutación a la URL secundaria (BIMS_FALLBACK_URL) cuando la
+    base en uso agota sus reintentos por errores transitorios.
+    """
+
+    FALLBACK = "http://in.bims.test.local"
+
+    def setUp(self):
+        with patch.object(BimsApi, "login", return_value="fake_sid"):
+            self.api = BimsApi()
+        self.api.fallback_url = self.FALLBACK
+
+    def test_agotada_la_primaria_conmuta_a_la_secundaria(self, mock_sleep):
+        ok = {"status": "ok", "data": {}}
+        with patch.object(
+            self.api,
+            "_request_with_relogin",
+            side_effect=[BimsTransientError("down")] * 3 + [ok],
+        ) as mock_req:
+            result = self.api._retry_request(
+                requests.get, f"{self.api.primary_url}/contacts/", max_retries=3
+            )
+        self.assertEqual(result, ok)
+        self.assertEqual(mock_req.call_count, 4)
+        # El intento exitoso fue contra la URL secundaria.
+        self.assertEqual(mock_req.call_args[0][1], f"{self.FALLBACK}/contacts/")
+
+    def test_la_conmutacion_es_sticky_para_la_instancia(self, mock_sleep):
+        ok = {"status": "ok", "data": {}}
+        with patch.object(
+            self.api,
+            "_request_with_relogin",
+            side_effect=[BimsTransientError("down")] * 3 + [ok],
+        ):
+            self.api._retry_request(
+                requests.get, f"{self.api.primary_url}/contacts/", max_retries=3
+            )
+        # Las próximas URLs de la instancia se construyen sobre la secundaria.
+        self.assertEqual(self.api.base_url, self.FALLBACK)
+
+    def test_desde_la_secundaria_puede_volver_a_la_primaria(self, mock_sleep):
+        """La conmutación es simétrica: si la secundaria falla, reintenta la primaria."""
+        self.api.base_url = self.FALLBACK
+        ok = {"status": "ok", "data": {}}
+        with patch.object(
+            self.api,
+            "_request_with_relogin",
+            side_effect=[BimsTransientError("down")] * 3 + [ok],
+        ) as mock_req:
+            self.api._retry_request(
+                requests.get, f"{self.FALLBACK}/contacts/", max_retries=3
+            )
+        self.assertEqual(mock_req.call_args[0][1], f"{self.api.primary_url}/contacts/")
+        self.assertEqual(self.api.base_url, self.api.primary_url)
+
+    def test_sin_secundaria_configurada_mantiene_comportamiento_actual(self, mock_sleep):
+        self.api.fallback_url = None
+        with patch.object(
+            self.api, "_request_with_relogin", side_effect=BimsTransientError("down")
+        ) as mock_req:
+            with self.assertRaises(BimsTransientError):
+                self.api._retry_request(
+                    requests.get, f"{self.api.primary_url}/x/", max_retries=3
+                )
+        self.assertEqual(mock_req.call_count, 3)
+
+    def test_si_la_secundaria_tambien_falla_propaga_transitorio(self, mock_sleep):
+        with patch.object(
+            self.api, "_request_with_relogin", side_effect=BimsTransientError("down")
+        ) as mock_req:
+            with self.assertRaises(BimsTransientError):
+                self.api._retry_request(
+                    requests.get, f"{self.api.primary_url}/x/", max_retries=3
+                )
+        # 3 intentos contra la primaria + 3 contra la secundaria.
+        self.assertEqual(mock_req.call_count, 6)
+
+    def test_error_terminal_no_conmuta(self, mock_sleep):
+        """Un 403 es rechazo de negocio: cambiar de URL no cambia el resultado."""
+        response = {"status": "error", "code": "403", "message": "sin acceso"}
+        with patch.object(
+            self.api, "_request_with_relogin", return_value=response
+        ) as mock_req:
+            with self.assertRaises(BimsBusinessError):
+                self.api._retry_request(
+                    requests.get, f"{self.api.primary_url}/contacts/"
+                )
+        self.assertEqual(mock_req.call_count, 1)
+        self.assertEqual(self.api.base_url, self.api.primary_url)
+
+    def test_login_conmuta_a_la_secundaria_si_no_hay_conexion(self, mock_sleep):
+        ok = MagicMock(status_code=200)
+        ok.json.return_value = {
+            "status": "ok",
+            "data": {"Session": {"id": "sid-fallback"}},
+        }
+        with patch(
+            "core.bims.requests.post",
+            side_effect=[requests.ConnectionError("primaria caída"), ok],
+        ) as mock_post:
+            sid = self.api.login()
+        self.assertEqual(sid, "sid-fallback")
+        self.assertEqual(self.api.base_url, self.FALLBACK)
+        self.assertEqual(
+            mock_post.call_args[1]["url"], f"{self.FALLBACK}/users/login/"
+        )
+
+    def test_login_sin_secundaria_propaga_el_error(self, mock_sleep):
+        self.api.fallback_url = None
+        with patch(
+            "core.bims.requests.post", side_effect=requests.ConnectionError("down")
+        ):
+            with self.assertRaises(requests.RequestException):
+                self.api.login()
+
+
 class GetRazonSocialTest(TestCase):
     def _make_cache(self, ruc, razon, dias_atras):
         from django.utils.timezone import now

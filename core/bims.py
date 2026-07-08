@@ -75,12 +75,48 @@ class BimsBusinessError(BimsError):
 class BimsApi:
     def __init__(self) -> None:
         self.base_url = settings.BIMS_URL
+        self.primary_url = settings.BIMS_URL
+        self.fallback_url = getattr(settings, "BIMS_FALLBACK_URL", None)
         self.ruc_url = getattr(settings, "RUC_URL", None)
         self.sid = self.login()
         self.session = requests.Session()
 
+    def _alternate_base_url(self, url: str) -> Optional[str]:
+        """
+        Conmuta la instancia a la otra base (primaria ↔ secundaria) y devuelve
+        `url` reescrita sobre ella. La conmutación es sticky: las siguientes
+        llamadas de la instancia construyen sus URLs sobre la base nueva.
+        Devuelve None si no hay BIMS_FALLBACK_URL configurada o si `url` no
+        corresponde a ninguna de las dos bases.
+        """
+        if not self.fallback_url or self.fallback_url == self.primary_url:
+            return None
+        if url.startswith(self.primary_url):
+            old_base, new_base = self.primary_url, self.fallback_url
+        elif url.startswith(self.fallback_url):
+            old_base, new_base = self.fallback_url, self.primary_url
+        else:
+            return None
+        self.base_url = new_base
+        return new_base + url[len(old_base):]
+
     def login(self) -> Optional[str]:
         url = f"{self.base_url}/users/login/"
+        try:
+            return self._login_request(url)
+        except requests.RequestException:
+            alternate_url = self._alternate_base_url(url)
+            if alternate_url is None:
+                raise
+            logging.warning(
+                f"Login BIMS sin conexión contra {url}; "
+                f"reintentando contra la URL alternativa {alternate_url}"
+            )
+            bims_logger.warning("══════ BIMS FALLBACK ══════")
+            bims_logger.warning(f"Login: conmutando a URL alternativa {alternate_url}")
+            return self._login_request(alternate_url)
+
+    def _login_request(self, url: str) -> Optional[str]:
         body = {
             "user": settings.BIMS_USER,
             "password": hashlib.md5(settings.BIMS_PASSWORD.encode()).hexdigest(),
@@ -93,7 +129,7 @@ class BimsApi:
 
         start_time = time.time()
         try:
-            res = requests.post(url=url, json=body)
+            res = requests.post(url=url, json=body, timeout=30)
             elapsed = time.time() - start_time
 
             try:
@@ -207,6 +243,21 @@ class BimsApi:
 
 
     def _retry_request(self, method, url, max_retries=5, retry_delay=2, **kwargs):
+        try:
+            return self._retry_loop(method, url, max_retries, retry_delay, **kwargs)
+        except BimsTransientError:
+            alternate_url = self._alternate_base_url(url)
+            if alternate_url is None:
+                raise
+            logging.warning(
+                f"BIMS sin respuesta en {url} tras {max_retries} intentos; "
+                f"conmutando a la URL alternativa {alternate_url}"
+            )
+            bims_logger.warning("══════ BIMS FALLBACK ══════")
+            bims_logger.warning(f"Conmutando a URL alternativa: {alternate_url}")
+            return self._retry_loop(method, alternate_url, max_retries, retry_delay, **kwargs)
+
+    def _retry_loop(self, method, url, max_retries, retry_delay, **kwargs):
         last_error_details = None
         for attempt in range(1, max_retries + 1):
             try:
