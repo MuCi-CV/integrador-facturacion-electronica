@@ -11,7 +11,7 @@ Este proyecto sirve como un middleware (intermediario) entre WooCommerce y el si
 
 ## Arquitectura y Estructura del Proyecto
 - `core/`: Contiene el dominio principal y lógica de la aplicación.
-  - `bims.py`: Cliente e interacción de APIs con el ecosistema BIMS. Incluye la jerarquía de excepciones `BimsError` → `BimsTransientError` (reintentable) / `BimsBusinessError` (rechazo terminal: 403 o 401 de permisos). `_retry_request` solo reintenta errores transitorios; los terminales fallan de inmediato.
+  - `bims.py`: Cliente e interacción de APIs con el ecosistema BIMS. Incluye la jerarquía de excepciones `BimsError` → `BimsTransientError` (reintentable) / `BimsBusinessError` (rechazo terminal: 403 o 401 de permisos). `_retry_request` solo reintenta errores transitorios; los terminales fallan de inmediato. Soporta una URL secundaria opcional (`BIMS_FALLBACK_URL` en `.env`): si la base en uso agota sus reintentos por errores transitorios (o el login no conecta), conmuta automáticamente a la otra base (sticky por instancia; los rechazos de negocio no conmutan).
   - `services.py`: Capa de servicio (Service Layer). Orquesta el flujo de una orden (`process_order`, `resolve_contact_id`, `build_sale_products`, etc.). Las vistas delegan acá.
   - `ruc.py`: Consulta de razón social por RUC contra la API pública turuc (`get_razon_social`, `_fetch_from_api`). Independiente de BIMS: HTTP propio con `timeout`, fail-safe (nunca lanza). Cachea en `RucCache` con TTL 30 días.
   - `models.py`: Entidades de persistencia: `ContactCache` (mapeo email/documento→bims_id para evitar peticiones a BIMS); `FailedOrder` (transacciones que requieren reintentos); `RucCache` (caché RUC→razón social, TTL 30 días).

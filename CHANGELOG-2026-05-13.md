@@ -210,3 +210,32 @@ En el checkout de WooCommerce el cliente carga RUC y razón social a mano; es co
 ### Pendiente (no-código)
 - `RUC_API_URL` en el `.env` del server es OPCIONAL (default ya apunta a turuc).
 - Spec y plan: `docs/superpowers/specs/2026-06-29-razon-social-por-ruc-design.md` y `docs/superpowers/plans/2026-06-29-razon-social-por-ruc.md`.
+
+---
+
+## 2026-07-08 — Feature: URL secundaria de BIMS (`BIMS_FALLBACK_URL`) con conmutación automática
+
+**Commit:** `4fb3524`
+
+### Contexto
+El 2026-07-08 `bims.app` quedó indisponible y BIMS habilitó `in.bims.app` como host alternativo. Además, `bims = BimsApi()` es un singleton a nivel de módulo que hace login al importar: con la URL primaria caída, Django directamente no arrancaba.
+
+### Cambios en `core/bims.py`
+- `_alternate_base_url()`: conmuta la instancia entre base primaria y secundaria (simétrico) y reescribe la URL. La conmutación es *sticky*: las siguientes llamadas de la instancia usan la base nueva, y al reiniciar el proceso se vuelve a la primaria.
+- `_retry_request` ahora envuelve a `_retry_loop`: agota los `max_retries` (5) contra la base en uso y, solo si todos fallan por error transitorio, conmuta a la alternativa y reintenta ahí. Los rechazos terminales (403 / 401 de permisos) NO conmutan.
+- `login()` conmuta a la alternativa si no logra conectar (evita que el boot del proceso falle con la primaria caída). Se agrega `timeout=30` al POST de login, que no tenía.
+
+### Configuración
+- `muci-integrador/settings.py` + `test_settings.py`: nuevo setting opcional `BIMS_FALLBACK_URL`. Vacía o ausente = comportamiento idéntico al anterior (solo los 5 reintentos contra `BIMS_URL`).
+- `.env.example`: variable documentada.
+
+### Tests
+- 8 tests nuevos (`BimsFallbackUrlTest`) en `core/tests.py`. Suite completa: 44/44 verde.
+
+### Deploy en producción (2026-07-08)
+- Se activó con `BIMS_FALLBACK_URL=https://in.bims.app/api` en el `.env` del servidor + reinicio del servicio.
+- Al deployar se detectó que el servidor tenía migraciones sin aplicar (`0004` y `0005`): la orden `192462` falló con error MySQL 1146 (`core_ruccache doesn't exist`). Se corrió `python manage.py migrate` y se recuperó con `runretryfaileds.sh`.
+
+### Pendiente
+- **Endurecer `get_razon_social` (`core/ruc.py`)**: un error de base de datos al leer/escribir `RucCache` (p. ej. tabla inexistente) hoy se propaga y marca la orden entera como fallida. Debería degradar a "sin razón social", igual que cuando falla la API de turuc.
+- **Recordatorio operativo**: todo deploy debe incluir `python manage.py migrate` (el incidente 1146 salió de omitirlo).
