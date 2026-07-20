@@ -539,3 +539,66 @@ class ResolveContactRucEnrichmentTest(TestCase):
         )
 
         mock_ruc.assert_not_called()
+
+
+from core.models import ContactCache
+from core import contact_lookup
+
+
+class LookupContactTest(TestCase):
+    def test_normalize_document_con_verificador(self):
+        base, clean = contact_lookup._normalize_document("2109835-2")
+        self.assertEqual(base, "2109835")
+        self.assertEqual(clean, "2109835-2")
+
+    def test_normalize_document_sin_verificador(self):
+        base, clean = contact_lookup._normalize_document("2109835")
+        self.assertEqual(base, "2109835")
+        self.assertEqual(clean, "2109835")
+
+    @patch("core.contact_lookup.get_razon_social")
+    def test_por_ruc_con_contacto_y_razon(self, mock_razon):
+        mock_razon.return_value = "Carlos Vallory"
+        ContactCache.objects.create(bims_id=1, email="carlos@muci.org", document_id="2109835")
+        result = contact_lookup.lookup_contact(ruc="2109835-2")
+        self.assertEqual(result["email"], "carlos@muci.org")
+        self.assertEqual(result["razon_social"], "Carlos Vallory")
+        self.assertEqual(result["documento"], "2109835")
+        self.assertEqual(result["ruc"], "2109835-2")
+        self.assertEqual(result["source"], "contactcache")
+
+    @patch("core.contact_lookup.get_razon_social")
+    def test_por_ruc_sin_contacto_solo_razon(self, mock_razon):
+        mock_razon.return_value = "Empresa SA"
+        result = contact_lookup.lookup_contact(ruc="80012345-6")
+        self.assertIsNone(result["email"])
+        self.assertEqual(result["razon_social"], "Empresa SA")
+        self.assertEqual(result["source"], "ruc")
+
+    @patch("core.contact_lookup.get_razon_social")
+    def test_por_ruc_sin_nada(self, mock_razon):
+        mock_razon.return_value = None
+        result = contact_lookup.lookup_contact(ruc="99999999-9")
+        self.assertIsNone(result["razon_social"])
+        self.assertIsNone(result["email"])
+        self.assertEqual(result["documento"], "99999999")
+        self.assertEqual(result["source"], "none")
+
+    @patch("core.contact_lookup.get_razon_social")
+    def test_por_email_con_contacto(self, mock_razon):
+        mock_razon.return_value = "Carlos Vallory"
+        ContactCache.objects.create(bims_id=2, email="carlos@muci.org", document_id="2109835")
+        result = contact_lookup.lookup_contact(email="carlos@muci.org")
+        self.assertEqual(result["email"], "carlos@muci.org")
+        self.assertEqual(result["documento"], "2109835")
+        self.assertEqual(result["razon_social"], "Carlos Vallory")
+        self.assertEqual(result["source"], "contactcache")
+
+    def test_por_email_sin_contacto(self):
+        result = contact_lookup.lookup_contact(email="nadie@muci.org")
+        self.assertEqual(result["email"], "nadie@muci.org")
+        self.assertEqual(result["source"], "none")
+
+    def test_sin_argumentos(self):
+        result = contact_lookup.lookup_contact()
+        self.assertEqual(result["source"], "none")
