@@ -602,3 +602,54 @@ class LookupContactTest(TestCase):
     def test_sin_argumentos(self):
         result = contact_lookup.lookup_contact()
         self.assertEqual(result["source"], "none")
+
+
+from unittest.mock import patch as _patch
+
+from rest_framework.test import APIRequestFactory
+
+from core.lookup_views import ContactLookupView
+
+
+class ContactLookupViewTest(TestCase):
+    def setUp(self):
+        self.factory = APIRequestFactory()
+        self.view = ContactLookupView.as_view()
+
+    def test_sin_token_devuelve_401(self):
+        request = self.factory.get("/contact-lookup/", {"ruc": "2109835-2"})
+        response = self.view(request)
+        self.assertEqual(response.status_code, 401)
+
+    def test_token_incorrecto_devuelve_401(self):
+        request = self.factory.get(
+            "/contact-lookup/", {"ruc": "2109835-2"}, HTTP_X_MUCI_TOKEN="mal"
+        )
+        response = self.view(request)
+        self.assertEqual(response.status_code, 401)
+
+    def test_sin_params_devuelve_400(self):
+        request = self.factory.get("/contact-lookup/", HTTP_X_MUCI_TOKEN="test-token")
+        response = self.view(request)
+        self.assertEqual(response.status_code, 400)
+
+    @_patch("core.lookup_views.lookup_contact")
+    def test_ok_devuelve_datos(self, mock_lookup):
+        mock_lookup.return_value = {
+            "razon_social": "Carlos Vallory",
+            "email": "carlos@muci.org",
+            "documento": "2109835",
+            "ruc": "2109835-2",
+            "source": "contactcache",
+        }
+        request = self.factory.get(
+            "/contact-lookup/", {"ruc": "2109835-2"}, HTTP_X_MUCI_TOKEN="test-token"
+        )
+        response = self.view(request)
+        self.assertEqual(response.status_code, 200)
+        # La vista devuelve el dict tal cual en snake_case; el camelCasing de las claves
+        # es responsabilidad del CamelCaseJSONRenderer de PRODUCCIÓN (settings.py), que
+        # test_settings.py no configura. Por eso verificamos response.data, no el render.
+        self.assertEqual(response.data["razon_social"], "Carlos Vallory")
+        self.assertEqual(response.data["source"], "contactcache")
+        mock_lookup.assert_called_once_with(ruc="2109835-2", email=None)

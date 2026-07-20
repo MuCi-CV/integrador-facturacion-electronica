@@ -239,3 +239,6 @@ BIMS_TENANT = config.get("BIMS_TENANT")
 RUC_URL = config.get("RUC_URL")
 RUC_API_URL = config.get("RUC_API_URL") or "https://turuc.com.py"
 BASE_URL = config.get("BASE_URL")
+
+# Token compartido para el endpoint /contact-lookup/ (plugin POS de WordPress).
+POS_LOOKUP_TOKEN = config.get("POS_LOOKUP_TOKEN")

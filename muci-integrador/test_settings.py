@@ -34,5 +34,6 @@ BIMS_TENANT = "test_tenant"
 RUC_URL = None
 RUC_API_URL = "http://turuc.test.local"
 BASE_URL = "http://localhost"
+POS_LOOKUP_TOKEN = "test-token"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
