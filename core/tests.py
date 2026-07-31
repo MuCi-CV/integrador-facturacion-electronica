@@ -679,3 +679,34 @@ class ResolveContactPosNameTest(TestCase):
 
         _, kwargs = mock_bims.create_contact.call_args
         self.assertEqual(kwargs["name"], "Grecia Barreto")
+
+
+class ProcessOrderZeroTotalTest(TestCase):
+    """Ninguna orden con total 0 debe llegar a BIMS (con o sin descuento)."""
+
+    def _order(self, total, discount_total):
+        return {
+            "total": total,
+            "discount_total": discount_total,
+            "meta_data": [],
+            "billing": {},
+            "shipping": {},
+            "line_items": [
+                {"product_id": 182134, "quantity": 1, "total": "0", "total_tax": "0"}
+            ],
+            "fee_lines": [],
+        }
+
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_orden_total_cero_sin_descuento_no_llega_a_bims(self, mock_wc, mock_bims):
+        from core.services import process_order
+
+        mock_wc.get_order.return_value = self._order(total="0", discount_total="0")
+        # SKU válido: sin la guarda correcta, se armaría un producto y se llamaría a create_sale.
+        mock_wc.get_product.return_value = {"sku": "500"}
+        mock_bims.create_sale.return_value = (12345, None)
+
+        process_order(order_id=183527)
+
+        mock_bims.create_sale.assert_not_called()

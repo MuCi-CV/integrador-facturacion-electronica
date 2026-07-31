@@ -434,9 +434,12 @@ def process_order(order_id: int) -> dict:
     total = int(order.get("total", 0))
     discount = int(order.get("discount_total", 0))
 
-    if total == 0 and discount > 0:
-        logger.info(f"Order {order_id}: ignorada por descuento del 100%.")
-        return {"status": "Descuento 100%"}
+    # Ninguna orden con total 0 debe llegar a BIMS: una factura de 0 guaraníes
+    # no le sirve a nadie (sea gratis de origen o por un descuento del 100%).
+    if total == 0:
+        motivo = "descuento del 100%" if discount > 0 else "monto 0"
+        logger.info(f"Order {order_id}: ignorada por {motivo}.")
+        return {"status": "Descuento 100%" if discount > 0 else "Monto 0"}
 
     result = resolve_pos_and_payments(meta_data, total, order.get("payment_method_title", ""))
     if result is None:
