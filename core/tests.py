@@ -710,3 +710,19 @@ class ProcessOrderZeroTotalTest(TestCase):
         process_order(order_id=183527)
 
         mock_bims.create_sale.assert_not_called()
+
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_total_decimal_cero_se_trata_como_monto_cero(self, mock_wc, mock_bims):
+        from core.services import process_order
+
+        # WooCommerce puede enviar el total como string decimal ("0.00").
+        # int("0.00") lanza ValueError; debe tratarse como monto 0, no romper.
+        mock_wc.get_order.return_value = self._order(total="0.00", discount_total="0.00")
+        mock_wc.get_product.return_value = {"sku": "500"}
+        mock_bims.create_sale.return_value = (12345, None)
+
+        result = process_order(order_id=999)
+
+        mock_bims.create_sale.assert_not_called()
+        self.assertEqual(result["status"], "Monto 0")

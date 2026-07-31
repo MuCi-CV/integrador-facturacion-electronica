@@ -431,8 +431,11 @@ def process_order(order_id: int) -> dict:
         raise
 
     meta_data = order.get("meta_data", [])
-    total = int(order.get("total", 0))
-    discount = int(order.get("discount_total", 0))
+    # WooCommerce puede enviar montos como string decimal ("0.00", "40000.00").
+    # Parsear con float() antes de int() evita ValueError; en PYG (sin centavos)
+    # el truncado es lossless.
+    total = int(float(order.get("total", 0) or 0))
+    discount = int(float(order.get("discount_total", 0) or 0))
 
     # Ninguna orden con total 0 debe llegar a BIMS: una factura de 0 guaraníes
     # no le sirve a nadie (sea gratis de origen o por un descuento del 100%).
