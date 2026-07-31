@@ -170,7 +170,10 @@ def resolve_contact_id(
         company = _camel_to_spaces(shipping.get("company") or "")
         document_id = company
         document_type = "ruc" if "-" in company else "ci"
-        name = shipping.get("last_name") or f"{first_name} {last_name}"
+        # FooEvents POS envía nombre y apellido separados en billing (igual que la web).
+        # No usar shipping.last_name como nombre: contiene solo el apellido y
+        # descartaría el nombre de pila.
+        name = f"{first_name} {last_name}".strip()
     else:
         ruc_meta = _get_meta(meta_data, "_billing_ruc")
         gov_id_meta = _get_meta(meta_data, "_billing_documento")

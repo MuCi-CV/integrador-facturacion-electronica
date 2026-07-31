@@ -653,3 +653,29 @@ class ContactLookupViewTest(TestCase):
         self.assertEqual(response.data["razon_social"], "Carlos Vallory")
         self.assertEqual(response.data["source"], "contactcache")
         mock_lookup.assert_called_once_with(ruc="2109835-2", email=None)
+
+
+class ResolveContactPosNameTest(TestCase):
+    """El nombre del contacto en órdenes POS debe incluir nombre y apellido."""
+
+    @patch("core.services.bims")
+    @patch("core.services.get_razon_social")
+    def test_pos_usa_nombre_y_apellido_de_billing(self, mock_ruc, mock_bims):
+        from core.services import resolve_contact_id
+
+        mock_bims.find_contact.return_value = None
+        mock_bims.create_contact.return_value = 999
+
+        # FooEvents POS envía nombre y apellido separados en billing, y espeja
+        # el apellido en shipping.last_name. El integrador no debe quedarse solo
+        # con el apellido.
+        resolve_contact_id(
+            order_id=1,
+            meta_data=[],
+            billing={"first_name": "Grecia", "last_name": "Barreto", "email": "g@x.com"},
+            shipping={"company": "5292120-4", "last_name": "Barreto"},
+            is_pos=True,
+        )
+
+        _, kwargs = mock_bims.create_contact.call_args
+        self.assertEqual(kwargs["name"], "Grecia Barreto")
