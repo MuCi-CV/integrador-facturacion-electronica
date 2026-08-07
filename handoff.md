@@ -4,10 +4,13 @@
 
 | | |
 |---|---|
-| Rama activa | `feature/deteccion-venta-duplicada` |
+| Rama activa | `feature/deteccion-venta-duplicada` — pusheada (`bb24560`) |
 | `main` | mergeada, pusheada y sincronizada con el remoto (`e53b849`) |
 | Suite de tests | 59/59 en verde |
 | Trabajo pendiente | implementar el plan de detección de facturas duplicadas |
+
+PR listo para abrir en:
+`https://github.com/MuCi-CV/integrador-facturacion-electronica/pull/new/feature/deteccion-venta-duplicada`
 
 ---
 
@@ -56,11 +59,12 @@ documentado** de BIMS. Si lo cambian, duplicaríamos facturas en silencio.
 
 ## 3. Trabajo pendiente: red de detección
 
-Rama `feature/deteccion-venta-duplicada`, con spec y plan escritos y commiteados.
-**Nada de código implementado todavía.**
+Rama `feature/deteccion-venta-duplicada`, pusheada al remoto. **Nada de código
+implementado todavía** — solo la documentación de diseño.
 
 - Spec: `docs/superpowers/specs/2026-08-07-deteccion-venta-duplicada-design.md` (`0652614`)
 - Plan: `docs/superpowers/plans/2026-08-07-deteccion-venta-duplicada.md` (`1c32039`)
+- Este handoff (`bb24560`)
 
 El plan tiene 4 tareas en TDD, cada una con el test primero, el código exacto y su
 commit:
@@ -80,7 +84,13 @@ transitoriamente (services.py todavía desempaqueta 2 valores); se cierra en la 
 
 ## Trampas conocidas
 
-**Autenticación git.** El remoto `origin` tiene un PAT muerto (401) embebido en la URL.
+**Autenticación git.** Si un push devuelve `403 Permission to MuCi-CV/... denied to
+MuCi-CV` —el dueño rechazado en su propio repo— **no es un problema de cuenta: es que
+el token tiene `Contents: Read-only`**. Se arregla en Settings → Developer settings →
+Fine-grained tokens → el token → Permissions → Contents → *Read and write*. Pasó
+exactamente eso durante esta sesión.
+
+El remoto `origin` tiene además un PAT muerto (401) embebido en la URL.
 Y hay una limitación de GitHub que cuesta descubrir: **un PAT fine-grained solo opera
 sobre repos de su propio resource owner**, nunca sobre repos de otra cuenta personal
 aunque seas colaborador. Como el repo lo posee `MuCi-CV` —que es cuenta de *usuario*,
