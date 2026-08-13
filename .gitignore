@@ -17,3 +17,15 @@ app.log
 .aider*
 *.log
 *.json
+
+# Artefactos locales de herramientas
+.tokensave/
+
+# Exports de datos (dumps de la BD, reportes de fallos): contienen datos reales
+*.csv
+
+# Documentacion de la API de BIMS bajada de apiary y volcados de Sentry
+bims-api-reference.md
+bims-apiary-doc.md
+bims1-docs-apiary-io-reference-contacts.md
+sentry-error-*.md
