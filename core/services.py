@@ -357,7 +357,8 @@ def build_sale_products(
 
     Retorna (sale_products, skipped_messages).
     - sale_products: productos válidos listos para BIMS.
-    - skipped_messages: descripciones de ítems omitidos (sin SKU, SKU 0, cantidad 0).
+    - skipped_messages: descripciones de ítems omitidos (sin SKU, SKU 0, cantidad 0,
+      precio 0). La propina en 0 también se descarta, pero solo se registra en el log.
     """
     sale_products = []
     skipped_messages = []
@@ -393,22 +394,36 @@ def build_sale_products(
         price_per_item = round(total_with_tax / quantity, 2)
 
         if discount > 0 or search_id in DISCOUNT_PRICE_PRODUCT_IDS:
-            sale_products.append({"product_id": bims_id, "quantity": quantity, "price": price_per_item})
+            sale_product = {"product_id": bims_id, "quantity": quantity, "price": price_per_item}
         elif search_id in FLAT_PRICE_PRODUCT_IDS:
-            sale_products.append({
+            sale_product = {
                 "product_id": bims_id,
                 "quantity": 1.0,
                 "price": round(float(item.get("total", 0)), 2),
-            })
+            }
         else:
-            sale_products.append({"product_id": bims_id, "quantity": quantity, "price": price_per_item})
+            sale_product = {"product_id": bims_id, "quantity": quantity, "price": price_per_item}
+
+        # El precio se chequea sobre el dict ya armado: cada rama lo calcula distinto
+        # y ninguna debe mandar un producto que la factura cobraría en 0.
+        if sale_product["price"] == 0:
+            msg = f"Producto {search_id} ({item.get('name')}) omitido: precio 0."
+            logger.warning(f"Order {order_id}: {msg}")
+            skipped_messages.append(msg)
+            continue
+
+        sale_products.append(sale_product)
 
     for fee in fee_lines:
         if fee.get("name") == "Tip":
+            tip_price = float(fee.get("total", 0))
+            if tip_price == 0:
+                logger.info(f"Order {order_id}: propina omitida por ser 0.")
+                continue
             sale_products.append({
                 "product_id": TIP_BIMS_PRODUCT_ID,
                 "quantity": 1.0,
-                "price": float(fee.get("total", 0)),
+                "price": tip_price,
             })
 
     return sale_products, skipped_messages
@@ -474,6 +489,12 @@ def process_order(order_id: int) -> dict:
     )
 
     if not sale_products:
+        # Si lo único que sobró fueron precios en 0, no hay nada que facturar: es un
+        # descarte esperado, no un fallo. No se registra FailedOrder ni se reintenta.
+        if skipped_messages and all("precio 0" in msg for msg in skipped_messages):
+            logger.info(f"Order {order_id}: ignorada, todos los productos tienen precio 0.")
+            return {"status": "Productos en 0"}
+
         contains_sku_issue = any("sin SKU" in msg for msg in skipped_messages)
         detail = " Detalles: " + "; ".join(skipped_messages) if skipped_messages else ""
         final_message = "No se pudo procesar la orden: todos los productos fueron omitidos." + detail

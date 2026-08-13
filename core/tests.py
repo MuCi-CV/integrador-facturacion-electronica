@@ -12,7 +12,8 @@ with patch("requests.post") as _mock_post:
     from core.services import _parse_pos_payments, build_sale_products, resolve_pos_and_payments
     from core.bims import BimsApi, BimsBusinessError, BimsTransientError
 
-from core.models import RucCache
+from core.constants import FLAT_PRICE_PRODUCT_IDS
+from core.models import FailedOrder, RucCache
 from django.test import TestCase, override_settings
 
 
@@ -164,6 +165,62 @@ class BuildSaleProductsTest(TestCase):
         products, skipped = build_sale_products(1, items, [], discount=0)
         self.assertEqual(products, [])
         self.assertEqual(len(skipped), 1)
+
+    @patch("core.services.wc_api")
+    def test_item_con_precio_cero_es_omitido(self, mock_wc):
+        mock_wc.get_product.return_value = {"sku": "500"}
+        items = [self._make_item(1, 1, "0", "0")]
+        products, skipped = build_sale_products(1, items, [], discount=0)
+        self.assertEqual(products, [])
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("precio 0", skipped[0])
+
+    @patch("core.services.wc_api")
+    def test_item_con_precio_cero_no_afecta_a_los_demas(self, mock_wc):
+        mock_wc.get_product.side_effect = [{"sku": "500"}, {"sku": "600"}]
+        items = [
+            self._make_item(1, 1, "0", "0", name="Gratis"),
+            self._make_item(2, 2, "20000", "2000", name="Pago"),
+        ]
+        products, skipped = build_sale_products(1, items, [], discount=0)
+        self.assertEqual(products, [{"product_id": 600, "quantity": 2, "price": 11000.0}])
+        self.assertEqual(len(skipped), 1)
+
+    @patch("core.services.wc_api")
+    def test_precio_unitario_que_redondea_a_cero_es_omitido(self, mock_wc):
+        # 1 Gs. repartido en 300 unidades redondea a 0.0: llegaría a BIMS con precio 0.
+        mock_wc.get_product.return_value = {"sku": "500"}
+        items = [self._make_item(1, 300, "1", "0")]
+        products, skipped = build_sale_products(1, items, [], discount=0)
+        self.assertEqual(products, [])
+        self.assertEqual(len(skipped), 1)
+
+    @patch("core.services.wc_api")
+    def test_item_flat_price_con_total_cero_es_omitido(self, mock_wc):
+        # La rama flat envía item["total"] sin impuesto: con total 0 el precio sería 0
+        # aunque total_with_tax sea > 0.
+        mock_wc.get_product.return_value = {"sku": "500"}
+        flat_id = next(iter(FLAT_PRICE_PRODUCT_IDS))
+        items = [self._make_item(flat_id, 1, "0", "1000")]
+        products, skipped = build_sale_products(1, items, [], discount=0)
+        self.assertEqual(products, [])
+        self.assertEqual(len(skipped), 1)
+
+    @patch("core.services.wc_api")
+    def test_tip_en_cero_es_omitido(self, mock_wc):
+        mock_wc.get_product.return_value = {"sku": "500"}
+        items = [self._make_item(1, 1, "10000", "1000")]
+        fee_lines = [{"name": "Tip", "total": "0"}]
+        products, _ = build_sale_products(1, items, fee_lines, discount=0)
+        self.assertEqual([p for p in products if p["product_id"] == 100], [])
+
+    @patch("core.services.wc_api")
+    def test_solo_la_propina_llega_si_los_productos_estan_en_cero(self, mock_wc):
+        mock_wc.get_product.return_value = {"sku": "500"}
+        items = [self._make_item(1, 1, "0", "0")]
+        fee_lines = [{"name": "Tip", "total": "5000"}]
+        products, _ = build_sale_products(1, items, fee_lines, discount=0)
+        self.assertEqual(products, [{"product_id": 100, "quantity": 1.0, "price": 5000.0}])
 
 
 @patch("core.bims.time.sleep")  # evita esperas reales durante los reintentos
@@ -726,3 +783,84 @@ class ProcessOrderZeroTotalTest(TestCase):
 
         mock_bims.create_sale.assert_not_called()
         self.assertEqual(result["status"], "Monto 0")
+
+
+class ProcessOrderZeroPriceItemsTest(TestCase):
+    """Los productos con precio 0 no llegan a BIMS; si no queda ninguno, la orden se descarta."""
+
+    def _order(self, line_items, fee_lines=None, total="10000"):
+        return {
+            "total": total,
+            "discount_total": "0",
+            "meta_data": [],
+            "billing": {},
+            "shipping": {},
+            "line_items": line_items,
+            "fee_lines": fee_lines or [],
+        }
+
+    def _item(self, product_id, total, total_tax="0", quantity=1, name="Producto"):
+        return {
+            "product_id": product_id,
+            "variation_id": 0,
+            "quantity": quantity,
+            "total": total,
+            "total_tax": total_tax,
+            "name": name,
+        }
+
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_todos_los_productos_en_cero_no_llega_a_bims(self, mock_wc, mock_bims, _mock_contact):
+        from core.services import process_order
+
+        mock_wc.get_order.return_value = self._order([self._item(1, "0"), self._item(2, "0")])
+        mock_wc.get_product.return_value = {"sku": "500"}
+        mock_bims.create_sale.return_value = (12345, None)
+
+        result = process_order(order_id=555)
+
+        mock_bims.create_sale.assert_not_called()
+        self.assertEqual(result["status"], "Productos en 0")
+        self.assertEqual(FailedOrder.objects.count(), 0)
+
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_producto_en_cero_junto_a_uno_sin_sku_se_registra_como_fallo(
+        self, mock_wc, mock_bims, _mock_contact
+    ):
+        from core.services import process_order
+
+        mock_wc.get_order.return_value = self._order([self._item(1, "0"), self._item(2, "5000")])
+        # El segundo ítem tiene monto pero no tiene SKU: es un problema real que revisar.
+        mock_wc.get_product.side_effect = [{"sku": "500"}, {"sku": ""}]
+        mock_bims.create_sale.return_value = (12345, None)
+
+        with self.assertRaises(ValueError):
+            process_order(order_id=556)
+
+        mock_bims.create_sale.assert_not_called()
+        self.assertEqual(FailedOrder.objects.filter(order_id=556).count(), 1)
+
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_solo_la_propina_llega_si_los_productos_estan_en_cero(
+        self, mock_wc, mock_bims, _mock_contact
+    ):
+        from core.services import process_order
+
+        mock_wc.get_order.return_value = self._order(
+            [self._item(1, "0")], fee_lines=[{"name": "Tip", "total": "5000"}]
+        )
+        mock_wc.get_product.return_value = {"sku": "500"}
+        mock_bims.create_sale.return_value = (12345, None)
+
+        process_order(order_id=557)
+
+        _, kwargs = mock_bims.create_sale.call_args
+        self.assertEqual(
+            kwargs["sale_products"], [{"product_id": 100, "quantity": 1.0, "price": 5000.0}]
+        )
