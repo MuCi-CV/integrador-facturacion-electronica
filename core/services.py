@@ -349,6 +349,19 @@ def resolve_contact_id(
     return contact_id, None
 
 
+# Motivo de omisión que no denota un problema de datos: el producto simplemente
+# no cobra nada. Se usa como marca para distinguirlo de los omitidos que sí hay
+# que revisar (sin SKU, SKU 0, cantidad 0).
+ZERO_PRICE_SKIP_REASON = "precio 0"
+
+
+def _all_skips_are_zero_price(skipped_messages: list) -> bool:
+    """True si hubo ítems omitidos y todos fueron por tener precio 0."""
+    return bool(skipped_messages) and all(
+        ZERO_PRICE_SKIP_REASON in msg for msg in skipped_messages
+    )
+
+
 def build_sale_products(
     order_id: int, line_items: list, fee_lines: list, discount: int
 ):
@@ -407,7 +420,7 @@ def build_sale_products(
         # El precio se chequea sobre el dict ya armado: cada rama lo calcula distinto
         # y ninguna debe mandar un producto que la factura cobraría en 0.
         if sale_product["price"] == 0:
-            msg = f"Producto {search_id} ({item.get('name')}) omitido: precio 0."
+            msg = f"Producto {search_id} ({item.get('name')}) omitido: {ZERO_PRICE_SKIP_REASON}."
             logger.warning(f"Order {order_id}: {msg}")
             skipped_messages.append(msg)
             continue
@@ -491,7 +504,7 @@ def process_order(order_id: int) -> dict:
     if not sale_products:
         # Si lo único que sobró fueron precios en 0, no hay nada que facturar: es un
         # descarte esperado, no un fallo. No se registra FailedOrder ni se reintenta.
-        if skipped_messages and all("precio 0" in msg for msg in skipped_messages):
+        if _all_skips_are_zero_price(skipped_messages):
             logger.info(f"Order {order_id}: ignorada, todos los productos tienen precio 0.")
             return {"status": "Productos en 0"}
 
@@ -536,10 +549,13 @@ def process_order(order_id: int) -> dict:
     status_message = "Procesado con éxito."
     if skipped_messages:
         status_message += " Algunos productos fueron omitidos: " + "; ".join(skipped_messages)
-        sentry_sdk.capture_message(
-            f"Order {order_id} procesada con ítems omitidos: {'; '.join(skipped_messages)}",
-            level="warning",
-        )
+        # Un producto gratis es esperado y no hay nada que revisar; solo alertamos
+        # cuando algún omitido responde a un problema de datos.
+        if not _all_skips_are_zero_price(skipped_messages):
+            sentry_sdk.capture_message(
+                f"Order {order_id} procesada con ítems omitidos: {'; '.join(skipped_messages)}",
+                level="warning",
+            )
 
     logger.info(f"Order {order_id} procesada. BIMS Sale ID: {sale_id}. {status_message}")
     FailedOrder.objects.update_or_create(

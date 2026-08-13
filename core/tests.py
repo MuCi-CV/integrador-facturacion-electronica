@@ -864,3 +864,98 @@ class ProcessOrderZeroPriceItemsTest(TestCase):
         self.assertEqual(
             kwargs["sale_products"], [{"product_id": 100, "quantity": 1.0, "price": 5000.0}]
         )
+
+    @patch("core.services.sentry_sdk")
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_item_en_cero_no_genera_warning_en_sentry(
+        self, mock_wc, mock_bims, _mock_contact, mock_sentry
+    ):
+        from core.services import process_order
+
+        # Un producto gratis junto a uno pago es normal: la venta llega bien a BIMS
+        # y no hay nada que revisar, así que no debe ensuciar Sentry.
+        mock_wc.get_order.return_value = self._order([self._item(1, "0"), self._item(2, "5000")])
+        mock_wc.get_product.side_effect = [{"sku": "500"}, {"sku": "600"}]
+        mock_bims.create_sale.return_value = (12345, None)
+
+        process_order(order_id=558)
+
+        mock_bims.create_sale.assert_called_once()
+        mock_sentry.capture_message.assert_not_called()
+
+    @patch("core.services.sentry_sdk")
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_item_sin_sku_sigue_generando_warning_en_sentry(
+        self, mock_wc, mock_bims, _mock_contact, mock_sentry
+    ):
+        from core.services import process_order
+
+        # Un ítem con monto pero sin SKU sí es un problema de datos que hay que revisar.
+        mock_wc.get_order.return_value = self._order([self._item(1, "3000"), self._item(2, "5000")])
+        mock_wc.get_product.side_effect = [{"sku": ""}, {"sku": "600"}]
+        mock_bims.create_sale.return_value = (12345, None)
+
+        process_order(order_id=559)
+
+        mock_bims.create_sale.assert_called_once()
+        mock_sentry.capture_message.assert_called_once()
+
+
+class RetryFailedsCommandTest(TestCase):
+    """El reintento debe cerrar las órdenes que nunca van a llegar a BIMS."""
+
+    def _response(self, status_code, payload):
+        return MagicMock(status_code=status_code, json=lambda: payload)
+
+    @patch("core.management.commands.retryfaileds.requests.post")
+    def test_estado_terminal_cierra_la_orden(self, mock_post):
+        from django.core.management import call_command
+
+        order = FailedOrder.objects.create(order_id=601, status=FailedOrder.FAILED)
+        mock_post.return_value = self._response(200, {"status": "Productos en 0"})
+
+        call_command("retryfaileds")
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, FailedOrder.COMPLETED)
+        self.assertIn("Productos en 0", order.message)
+
+    @patch("core.management.commands.retryfaileds.requests.post")
+    def test_monto_cero_tambien_cierra_la_orden(self, mock_post):
+        from django.core.management import call_command
+
+        order = FailedOrder.objects.create(order_id=602, status=FailedOrder.FAILED)
+        mock_post.return_value = self._response(200, {"status": "Monto 0"})
+
+        call_command("retryfaileds")
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, FailedOrder.COMPLETED)
+
+    @patch("core.management.commands.retryfaileds.requests.post")
+    def test_orden_procesada_con_exito_se_marca_completada(self, mock_post):
+        from django.core.management import call_command
+
+        order = FailedOrder.objects.create(order_id=603, status=FailedOrder.FAILED)
+        mock_post.return_value = self._response(200, {"status": "ok", "message": "Procesado con éxito."})
+
+        call_command("retryfaileds")
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, FailedOrder.COMPLETED)
+
+    @patch("core.management.commands.retryfaileds.requests.post")
+    def test_fallo_real_sigue_pendiente_de_reintento(self, mock_post):
+        from django.core.management import call_command
+
+        order = FailedOrder.objects.create(order_id=604, status=FailedOrder.FAILED)
+        mock_post.return_value = self._response(400, {"status": "fail", "error": "Rechazado por BIMS"})
+
+        call_command("retryfaileds")
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, FailedOrder.FAILED)
