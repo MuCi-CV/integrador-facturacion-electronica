@@ -222,6 +222,35 @@ class BuildSaleProductsTest(TestCase):
         products, _ = build_sale_products(1, items, fee_lines, discount=0)
         self.assertEqual(products, [{"product_id": 100, "quantity": 1.0, "price": 5000.0}])
 
+    @patch("core.services.wc_api")
+    def test_item_con_precio_negativo_es_omitido(self, mock_wc):
+        mock_wc.get_product.return_value = {"sku": "500"}
+        items = [self._make_item(1, 1, "-5000", "0")]
+        products, skipped = build_sale_products(1, items, [], discount=0)
+        self.assertEqual(products, [])
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("negativo", skipped[0])
+
+    @patch("core.services.wc_api")
+    def test_omitido_por_negativo_no_cuenta_como_precio_cero(self, mock_wc):
+        # El mensaje del negativo no debe confundirse con el del precio 0: de eso
+        # depende que la orden se registre como fallo y no como descarte limpio.
+        from core.services import _all_skips_are_zero_price
+
+        mock_wc.get_product.return_value = {"sku": "500"}
+        items = [self._make_item(1, 1, "-5000", "0")]
+        _, skipped = build_sale_products(1, items, [], discount=0)
+        self.assertFalse(_all_skips_are_zero_price(skipped))
+
+    @patch("core.services.wc_api")
+    def test_propina_negativa_es_omitida(self, mock_wc):
+        mock_wc.get_product.return_value = {"sku": "500"}
+        items = [self._make_item(1, 1, "10000", "1000")]
+        fee_lines = [{"name": "Tip", "total": "-5000"}]
+        products, skipped = build_sale_products(1, items, fee_lines, discount=0)
+        self.assertEqual([p for p in products if p["product_id"] == 100], [])
+        self.assertEqual(len(skipped), 1)
+
 
 @patch("core.bims.time.sleep")  # evita esperas reales durante los reintentos
 class RetryRequestTest(TestCase):
@@ -884,6 +913,50 @@ class ProcessOrderZeroPriceItemsTest(TestCase):
 
         mock_bims.create_sale.assert_called_once()
         mock_sentry.capture_message.assert_not_called()
+
+    @patch("core.services.sentry_sdk")
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_item_negativo_se_omite_y_alerta_en_sentry(
+        self, mock_wc, mock_bims, _mock_contact, mock_sentry
+    ):
+        from core.services import process_order
+
+        # Un precio negativo suele ser una linea de descuento mal armada: la venta
+        # sale con el resto, pero alguien tiene que revisarla.
+        mock_wc.get_order.return_value = self._order([self._item(1, "-5000"), self._item(2, "8000")])
+        mock_wc.get_product.side_effect = [{"sku": "500"}, {"sku": "600"}]
+        mock_bims.create_sale.return_value = (12345, None)
+
+        process_order(order_id=560)
+
+        _, kwargs = mock_bims.create_sale.call_args
+        self.assertEqual(
+            kwargs["sale_products"], [{"product_id": 600, "quantity": 1, "price": 8000.0}]
+        )
+        mock_sentry.capture_message.assert_called_once()
+
+    @patch("core.services.sentry_sdk")
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_orden_con_solo_items_negativos_se_registra_como_fallo(
+        self, mock_wc, mock_bims, _mock_contact, mock_sentry
+    ):
+        from core.services import process_order
+
+        # Sin productos validos y con un negativo de por medio no es un descarte
+        # esperado: queda en FailedOrder para revisar.
+        mock_wc.get_order.return_value = self._order([self._item(1, "-5000")])
+        mock_wc.get_product.return_value = {"sku": "500"}
+        mock_bims.create_sale.return_value = (12345, None)
+
+        with self.assertRaises(ValueError):
+            process_order(order_id=561)
+
+        mock_bims.create_sale.assert_not_called()
+        self.assertEqual(FailedOrder.objects.filter(order_id=561).count(), 1)
 
     @patch("core.services.sentry_sdk")
     @patch("core.services.resolve_contact_id", return_value=(999, None))

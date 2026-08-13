@@ -418,7 +418,20 @@ def build_sale_products(
             sale_product = {"product_id": bims_id, "quantity": quantity, "price": price_per_item}
 
         # El precio se chequea sobre el dict ya armado: cada rama lo calcula distinto
-        # y ninguna debe mandar un producto que la factura cobraría en 0.
+        # y ninguna debe mandar un producto que la factura cobraría en 0 o en menos.
+
+        # Un negativo suele ser una línea de descuento mal armada. Se omite igual
+        # (no puede llegar a BIMS), pero sin la marca de precio 0: así la orden
+        # alerta en Sentry y, si no queda nada, cae en FailedOrder para revisar.
+        if sale_product["price"] < 0:
+            msg = (
+                f"Producto {search_id} ({item.get('name')}) omitido: "
+                f"precio negativo ({sale_product['price']})."
+            )
+            logger.warning(f"Order {order_id}: {msg}")
+            skipped_messages.append(msg)
+            continue
+
         if sale_product["price"] == 0:
             msg = f"Producto {search_id} ({item.get('name')}) omitido: {ZERO_PRICE_SKIP_REASON}."
             logger.warning(f"Order {order_id}: {msg}")
@@ -430,6 +443,11 @@ def build_sale_products(
     for fee in fee_lines:
         if fee.get("name") == "Tip":
             tip_price = float(fee.get("total", 0))
+            if tip_price < 0:
+                msg = f"Propina omitida: monto negativo ({tip_price})."
+                logger.warning(f"Order {order_id}: {msg}")
+                skipped_messages.append(msg)
+                continue
             if tip_price == 0:
                 logger.info(f"Order {order_id}: propina omitida por ser 0.")
                 continue
