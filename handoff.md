@@ -1,155 +1,150 @@
-# Handoff — sesión del 2026-08-18
+# Handoff — sesión del 2026-08-19
 
-> Reconstruido el mismo día desde el transcript de la sesión, que se cortó por un apagón
-> accidental de la máquina. **No se perdió trabajo**: todo el código quedó commiteado y
-> pusheado antes del corte. Cada punto de abajo fue verificado contra el estado real del
-> disco y del remoto, no copiado del transcript.
+> Sesión corta y de dos mitades: se cerró la limpieza pendiente del merge anterior y se arrancó
+> el diseño del próximo objetivo grande. El diseño **se frenó a propósito** en su primera
+> pregunta, porque depende de un dato que no teníamos a mano.
 
 ## Estado al cierre
 
 | | |
 |---|---|
 | Rama activa | `main` — working tree limpio |
-| Remoto | `github/main` en `370e99a`. **`main` local está 1 commit adelante**: este handoff se commiteó local y **no se pusheó** (decisión explícita al cerrar). Pushear cuando quieras. |
-| PR #1 | **MERGED** (2026-08-18 13:03 UTC) |
-| Suite de tests | 79/79 en verde, corrida **sobre `main` ya mergeada** |
-| Migraciones | 5/5 aplicadas; `makemigrations --check` sin cambios |
-| Producción | Corriendo `08c7f7c` con el filtro **activo y verificado** |
+| Remoto | `github/main` sincronizado (el handoff del 18 se pusheó: `370e99a..bd5a3d2`) |
+| Ramas remotas | `feature/omitir-productos-monto-cero` **borrada** |
+| Producción | Sigue corriendo `08c7f7c` **en la rama vieja** — el pase a `main` NO se hizo |
+| Código | Sin cambios: cero commits de código hoy |
 
 ---
 
 ## 1. Lo que se cerró hoy
 
-### Merge de `feature/omitir-productos-monto-cero`
+### Push del handoff y borrado de la rama mergeada
 
-Fast-forward `e53b849..370e99a`, 5 commits, sin merge commit.
+Ambos hechos. Lo relevante no es el resultado sino **cómo**: se pusheó con el token `gho_` de
+`gh` a través de un credential helper efímero, sin PAT y sin persistir nada.
 
-Se eligió FF local + push por encima de squash o rebase **para preservar los SHAs**:
-producción corre exactamente `08c7f7c`, y reescribir hashes habría hecho desaparecer de
-`main` el commit desplegado. Con FF, `main` contiene literalmente el commit que corre.
+```bash
+git -c credential.helper='!f() { echo username=x-access-token; echo "password=$(gh auth token)"; }; f' push github main
+```
 
-GitHub detectó el push y marcó el PR #1 como MERGED por su cuenta.
+Esto **corrige una creencia previa** de los handoffs anteriores: se daba por hecho que el token de
+`gh` solo servía para la API (abrir PRs) y que para pushear hacía falta un PAT de la cuenta
+`MuCi-CV`. No es así — los tokens OAuth de `gh` se comportan como los clásicos. De acá en más,
+pushear no requiere ningún PAT.
 
-La **rama local se borró** (`git branch -d`). La **rama remota se dejó viva a propósito**:
-producción la tiene en checkout y trackea su upstream; borrarla ahora le rompe el remoto
-al servidor. Se borra recién después del punto 3 de "Para retomar".
+### Orden alterado en el borrado de la rama
 
-### Estado real del deploy (distinto de lo que decía el handoff anterior)
+El handoff del 18 pedía borrar la rama remota **después** de pasar producción a `main`. Se borró
+antes. Se verificó primero que su tip (`370e99a`) fuera ancestro de `main`, así que **ningún commit
+se perdió** — `main` los contiene a todos.
 
-El handoff del 13 daba el deploy como pendiente. **Ya estaba hecho**: producción venía en
-la rama desde el 13/08 17:40 UTC. Lo que importaba entonces no era el checkout sino si el
-proceso vivo había recargado el módulo. Verificado en el servidor:
+Consecuencia real, una sola: el servidor sigue con esa rama en checkout, y ahora un `git pull`
+pelado ahí falla con *"your configuration specifies to merge with the ref ... which does not
+exist"*. El deploy de abajo no se ve afectado porque arranca con `fetch --prune` + `checkout main`.
+Si por algún motivo hiciera falta revivirla:
 
-| Chequeo | Resultado |
+```bash
+git push github 370e99a:refs/heads/feature/omitir-productos-monto-cero
+```
+
+### Lo que NO se hizo, y por qué
+
+| Pendiente | Motivo |
 |---|---|
-| Código en disco | 5 líneas de `ZERO_PRICE_SKIP_REASON` en `services.py` + 2 de `DISCARDED_STATUSES` en `retryfaileds.py` |
-| Proceso vivo | checkout `13/08 17:40` vs `ActiveEnterTimestamp` `18/08 12:00` → **arrancó después, código nuevo cargado** |
-| Migraciones | 5/5, ninguna pendiente |
+| Pasar producción a `main` | **Sin acceso.** La clave `anthropic_readonly_muciserver` no es aceptada por `root@integrador.muci.org` (159.89.228.18): `Permission denied (publickey)`. Lo tiene que correr Carlos. |
+| Revocar el PAT | Decisión explícita de Carlos: no esta semana. |
+| Chequeos de `runretryfaileds.sh` | Postergado hasta terminar el objetivo en curso. |
 
-No hubo nada que reiniciar.
+**Deploy pendiente** (el `cp` no es opcional: `main` no trackea `bims_api.log`, así que el checkout
+lo borra del working tree, y sin reiniciar el proceso sigue escribiendo a un inodo borrado):
 
-**Matiz sobre la ventana de observación:** `ActiveEnterTimestamp` solo muestra el *último*
-arranque. No prueba desde cuándo está vivo el filtro — pudo reiniciarse el 13 justo tras el
-checkout, o haber corrido código viejo hasta hoy al mediodía. Para leer Sentry con certeza,
-**contá desde hoy 12:00 UTC**.
-
-### Higiene de seguridad
-
-| | |
-|---|---|
-| `core/views.sentry.py` | **Borrado**. Era el duplicado muerto de `SalesView`/`RefundView` con `bims.create_sale` sin ninguno de los filtros. Verificado: cero referencias, fuera de `core/urls.py`, no trackeado. La línea 9 del `.gitignore` queda como red por si reaparece. |
-| PAT en `origin` | **Eliminado** de la URL en `.git/config`. `~/.git-credentials` estaba vacío (0 bytes), no había copia. |
-| Dumps con datos | El `.gitignore` ya los cubría: `*.csv` (línea 25), `sentry-error-*.md` (31), los `.md` de apiary. Verificado con `git check-ignore`. |
+```bash
+cd /var/www/integrador
+cp bims_api.log /root/bims_api.log.bak-$(date +%F)
+git fetch origin --prune
+git checkout main && git pull origin main
+/root/.local/share/virtualenvs/integrador-ObaHlHmv/bin/python manage.py migrate
+systemctl restart mucintegrador.service
+systemctl is-active mucintegrador.service
+```
 
 ---
 
-## 2. Dos secuelas del apagón
+## 2. El próximo objetivo: preparar el integrador para el hub → CRM
 
-**El respaldo de `views.sentry.py` se perdió.** Estaba en el scratchpad de `/tmp`, que se
-limpió al reiniciar. Pero el archivo **es recuperable**: hay una copia en otro clon del
-proyecto, en `/home/vallory/code/crm/plugin/integrador-facturacion-electronica/core/views.sentry.py`
-(16632 bytes, rama `feature-sync`). Eso también significa que **la bomba dormida sigue
-existiendo en disco**, en ese otro checkout.
+Se abrió el diseño de lo que pide `/home/vallory/IA/arquitectura/integrador-facturacion-flujo.md`
+(el doc vive **fuera del repo**, no se carga solo). Clasificado como trabajo **arquitectural**:
+brainstorming → spec → plan. **No hay rama, ni spec, ni código todavía.**
 
-**El remoto `origin` quedó con refs viejas.** `origin` y `github` apuntan hoy a la misma
-URL (tras limpiar el PAT), pero `origin/main` sigue en `e53b849` porque nunca se le hizo
-fetch. Es solo una ref de tracking desactualizada, no un estado divergente. Un
-`git fetch origin` la alinea.
+### Descomposición en cinco sub-proyectos
+
+El objetivo es demasiado grande para una sola spec. Cada uno lleva su propio ciclo:
+
+| | Sub-proyecto | Depende de |
+|---|---|---|
+| **A** | Registro del evento al ingresar + estado por rama | — |
+| **B** | Modelo interno de pedido + cliente de origen tras una interfaz | — |
+| **C** | Rama CRM Krayin (pasos 1 y 4 del doc) | A |
+| **D** | Reintentos con backoff por rama | A |
+| **E** | Adaptador PrestaShop / Ticketera 2.0 | B |
+
+**Carlos eligió empezar por A**, porque es el único que arregla algo que ya está roto hoy y porque
+C y D se apoyan encima.
+
+### Los cuatro hallazgos que justifican A
+
+Verificados contra el código, no contra el doc:
+
+1. **`FailedOrder` no puede expresar el estado que el doc pide.** Un solo eje (`status`:
+   FAILED/COMPLETED, `models.py:29`) para toda la orden. No hay dónde escribir "BIMS ok, CRM
+   pendiente" — que es la primera fila de la tabla de errores del doc de arquitectura.
+2. **Nada se persiste al ingresar.** La primera escritura ocurre *después* de consultar WooCommerce
+   (`services.py:473`). Un crash antes de eso pierde el pedido sin dejar rastro.
+3. **El campo libre `message` ya funciona de canal de estado improvisado.**
+   `sync_bims_contacts.py:63` filtra por `message__startswith="Pausada: Esperando"`. Reformular ese
+   texto rompe el comando en silencio — el mismo tipo de trampa que ya vigilamos con
+   `ZERO_PRICE_SKIP_REASON`.
+4. **`order_id` no tiene constraint `unique`** (`models.py:28`). Dos webhooks simultáneos de la misma
+   orden pueden crear dos filas; desde ahí, todo `update_or_create` de esa orden explota con
+   `MultipleObjectsReturned`.
+
+Consumidores de `FailedOrder` que A va a tener que migrar: `services.py`, `admin.py` (dos vistas
+custom + una acción), `retryfaileds.py`, `sync_bims_contacts.py` y `tests.py`.
 
 ---
 
-## 3. Análisis del doc de arquitectura (hub → CRM)
+## 3. La pregunta que frenó la sesión
 
-Se revisó `/home/vallory/IA/arquitectura/integrador-facturacion-flujo.md` (6.7 KB, 27-jul)
-y se contrastó contra el código. El resto del directorio no tiene contenido: `.claude/`
-vacío y `.tokensave/` son artefactos de la herramienta.
+**¿El procesamiento sigue dentro del request HTTP, o pasa a 202 + worker diferido?**
 
-El doc diseña el middleware como **hub orquestador** en 4 pasos: lead+contacto al CRM
-Krayin inmediato → factura a BIMS → respuesta → enriquecimiento del contacto con datos de
-factura. El patrón es correcto y las razones que da son las buenas. Pero **describe un
-objetivo, no el estado actual**, y confundirlos lleva a subestimar el trabajo. Tres brechas
-verificadas:
+Carlos se inclina por async, pero le preocupa que **la cantidad de workers sea un limitante para la
+capacidad del servidor**. Decidió no resolverlo a ojo. Es la decisión correcta: no se resuelve
+opinando.
 
-1. **La rama del CRM no existe.** Cero referencias a `krayin`/`crm`/`lead` en el código.
-   Los pasos 1 y 4 —la mitad del flujo— están sin construir.
-2. **"Cambiar únicamente el adaptador de entrada" es falso.** `SalesView` recibe solo
-   `{"arg": order_id}` —un disparador—, y el middleware **consulta a WooCommerce durante
-   todo el flujo** (`services.py:384`, `services.py:471`, `views.py:49,60`, `admin.py:190,209`).
-   Para PrestaShop hace falta un **cliente de origen** con la superficie de
-   `core/woocommerce.py` detrás de una interfaz, no un normalizador de payload.
-3. **"Persistir cada evento entrante antes de procesar" no se cumple.** Nada se persiste al
-   ingresar; un crash antes de la primera escritura pierde el pedido.
+Persistir el evento antes de procesar funciona en los dos esquemas; lo que cambia es **quién
+procesa**. Hoy `SalesView.post()` espera a que `process_order` termine —Woo, BIMS, caché de
+contactos— antes de responder.
 
-Detalle completo en la memoria `project_arquitectura_hub_crm`.
+### Datos que hay que juntar para responderla
 
----
+En el servidor:
 
-## Trampas conocidas (siguen vigentes)
+```bash
+nproc; free -m
+systemctl cat mucintegrador.service | grep -i exec    # ¿cuántos workers hay hoy?
+```
 
-**`runretryfaileds.sh` puede no estar ejecutando nada.** El script hace
-`cd /var/www/integrador.muci.org/backend`, pero la app está en `/var/www/integrador`
-(confirmado por `ls`; el `backend/` de adentro solo tiene `runsyncstock.sh` y `staticfiles`).
-Esto pesa más de lo que parecía: sabemos que el arreglo del cron está en disco y no
-necesita reinicio, así que **si las órdenes descartadas igual se siguen acumulando, la
-única causa posible es que el script nunca llegue a ejecutar `manage.py`**.
-
-**La distinción esperado/fallo se hace por substring.** `ZERO_PRICE_SKIP_REASON = "precio 0"`
-(`services.py:355`) y `_all_skips_are_zero_price()` deciden si una orden vacía es descarte
-limpio o fallo comparando texto de mensajes. Sigue la convención preexistente de `"sin SKU"`,
-pero reformular un mensaje de omisión cambia el comportamiento en silencio. Lo vigila
-`test_omitido_por_negativo_no_cuenta_como_precio_cero`.
-
-**El repo es público.** Revisar el `.gitignore` antes de cualquier `git add .`.
+Y una pregunta que no es técnica: **¿quién llama a `/sales/` y qué hace con la respuesta?** Si es un
+webhook que ignora el body, pasar a 202 es gratis. Si del otro lado hay un plugin mostrándole el
+error a un cajero en el punto de venta, cambiar el contrato le rompe la pantalla a alguien.
 
 ---
 
 ## Para retomar
 
-1. **Revocar el PAT en GitHub.** Es lo único con filo que queda. El handoff del 13 lo daba
-   por muerto (401), pero **eso no se pudo reconfirmar**: el repo es público, así que
-   `git ls-remote` funciona anónimo y no prueba nada. **Asumilo vivo.**
-2. **Correr los chequeos de `runretryfaileds.sh`** en el servidor (ver Trampas). Nunca se
-   ejecutaron.
-3. **Pasar producción de la rama a `main`.** Ahora es barato y sin riesgo: el único cambio
-   entre lo que corre y `main` es `370e99a`, que solo agrega este archivo — cero código.
-   Deja los deploys futuros como un `git pull`.
-   ```bash
-   cd /var/www/integrador
-   git fetch origin
-   git checkout main
-   git pull origin main
-   systemctl restart mucintegrador.service
-   ```
-4. **Después de (3)**, borrar la rama remota `feature/omitir-productos-monto-cero`.
-5. **Vigilar Sentry** por warnings de `precio negativo` — el merge se hizo sin esa lectura,
-   así que la observación sigue viva. Si aparecen, hay descuentos mal armados en WooCommerce
-   que antes se facturaban mal en silencio. Contá desde hoy 12:00 UTC. En los logs,
-   `ignorada, todos los productos tienen precio 0` marca las órdenes descartadas enteras.
-6. **Sin tocar desde el 07/08:** el plan de detección de facturas duplicadas en
-   `feature/deteccion-venta-duplicada`. El análisis de arquitectura le **sube la prioridad**:
-   sumar el CRM multiplica las ramas que necesitan idempotencia.
-7. **Arquitectura:** responder primero las preguntas abiertas #1 y #3 del propio doc —cómo
-   se alimenta Krayin hoy y qué clave de correlación admite—, porque de eso depende si el
-   paso 1 es una integración nueva o una migración de algo existente. Y conviene **mover el
-   doc a `docs/` del repo**: dice servir de contexto base para Claude, pero al vivir afuera
-   no se carga solo ni está versionado.
+1. **Correr el deploy** de la sección 1 (necesita a Carlos en el servidor).
+2. **Juntar los datos de capacidad** de la sección 3. Con eso se destraba el diseño de A.
+3. **Retomar el brainstorming de A** desde esa pregunta. El resto del contexto está en la memoria
+   del proyecto (`project_preparacion_arquitectura_hub`).
+4. Sigue vivo de antes: **vigilar Sentry** por warnings de `precio negativo`, contando desde el
+   18/08 12:00 UTC. Y el **PAT sin revocar**, por decisión explícita, no por olvido.
