@@ -78,8 +78,16 @@ class BimsApi:
         self.primary_url = settings.BIMS_URL
         self.fallback_url = getattr(settings, "BIMS_FALLBACK_URL", None)
         self.ruc_url = getattr(settings, "RUC_URL", None)
-        self.sid = self.login()
+        self.api_key = getattr(settings, "BIMS_API_KEY", None)
         self.session = requests.Session()
+        if self.api_key:
+            # La key va cruda, sin prefijo de tenant: verificado contra la API
+            # viva el 2026-08-21. No hay login ni sesión que expire.
+            self.session.headers.update({"X-API-Key": self.api_key})
+            self.sid = None
+        else:
+            # Modo legacy por sesión. BIMS lo corta el 30/09/2026.
+            self.sid = self.login()
 
     def _alternate_base_url(self, url: str) -> Optional[str]:
         """
@@ -187,6 +195,12 @@ class BimsApi:
 
             # BIMS puede indicar sesión expirada via HTTP 401 o via JSON body code "401" (HTTP 200)
             if res.status_code == 401 or response_body.get("code") == "401":
+                if self.api_key:
+                    # Con API Key no hay sesión que renovar: el 401 es terminal.
+                    raise BimsBusinessError(
+                        f"BIMS denegó el acceso a {url} con API Key: "
+                        f"{response_body.get('message')} (code 401)"
+                    )
                 bims_logger.warning(
                     f"Session expired (HTTP {res.status_code} / body code {response_body.get('code')}) "
                     f"| Time: {elapsed:.2f}s | Attempting relogin..."
@@ -294,11 +308,12 @@ class BimsApi:
     def list_contacts(self, document_id: str, document_type: str):
         url = f"{self.base_url}/contacts/"
         params = {
-            "sid": self.sid,
             "document_id": document_id,
             "document_type": document_type,
         }
-        response_data = self._retry_request(requests.get, url, params=params)
+        if self.sid:
+            params["sid"] = self.sid
+        response_data = self._retry_request(self.session.get, url, params=params)
         if int(response_data.get("count")) > 0:
             return int(response_data.get("data")[0].get("Contact").get("id"))
         return None
@@ -311,11 +326,12 @@ class BimsApi:
         """
         url = f"{self.base_url}/contacts/"
         params = {
-            "sid": self.sid,
             "document_id": document_id,
             "document_type": document_type,
         }
-        response_data = self._retry_request(requests.get, url, params=params)
+        if self.sid:
+            params["sid"] = self.sid
+        response_data = self._retry_request(self.session.get, url, params=params)
         if int(response_data.get("count")) > 0:
             contact = response_data["data"][0]["Contact"]
             return {
@@ -336,6 +352,8 @@ class BimsApi:
             )
         url = f"{self.ruc_url}/contribuyente/"
         params = {"ruc": document_id}
+        # OJO: `requests.get` a propósito, NO `self.session.get`. turuc es un
+        # tercero y la sesión lleva el header con el API Key de BIMS.
         response_data = self._retry_request(requests.get, url, params=params)
         if int(response_data.get("count")) > 0:
             return response_data.get("data")[0].get("Contact").get("name")
@@ -344,12 +362,13 @@ class BimsApi:
     def find_contact_by_ruc(self, document_id: str, document_type: str):
         url = f"{self.base_url}/contacts/"
         params = {
-            "sid": self.sid,
             "document_id": document_id,
             "document_type": document_type,
         }
+        if self.sid:
+            params["sid"] = self.sid
 
-        response_data = self._retry_request(requests.get, url, params=params)
+        response_data = self._retry_request(self.session.get, url, params=params)
         if int(response_data.get("count")) > 0:
             return int(response_data.get("data")[0].get("Contact").get("id"))
         return None
@@ -357,11 +376,12 @@ class BimsApi:
     def find_contact_by_email(self, email: str):
         url = f"{self.base_url}/contacts/"
         params = {
-            "sid": self.sid,
             "email": email,
         }
+        if self.sid:
+            params["sid"] = self.sid
 
-        response_data = self._retry_request(requests.get, url, params=params)
+        response_data = self._retry_request(self.session.get, url, params=params)
         if int(response_data.get("count")) > 0:
             return int(response_data.get("data")[0].get("Contact").get("id"))
         return None
@@ -369,11 +389,12 @@ class BimsApi:
     def find_contact_by_name(self, name: str, email: str = None, document_id: str = None):
         url = f"{self.base_url}/contacts/"
         params = {
-            "sid": self.sid,
             "q": name,
         }
-        
-        response_data = self._retry_request(requests.get, url, params=params)
+        if self.sid:
+            params["sid"] = self.sid
+
+        response_data = self._retry_request(self.session.get, url, params=params)
 
         if not email and not document_id:
             raise ValueError("Debes proporcionar al menos el 'email' o el 'document_id' para validar el contacto.")
@@ -410,9 +431,11 @@ class BimsApi:
                 "emails": emails,
             }
         }
-        params = {"sid": self.sid}
+        params = {}
+        if self.sid:
+            params["sid"] = self.sid
         response_data = self._retry_request(
-            requests.post, url, json=body, params=params
+            self.session.post, url, json=body, params=params
         )
         return response_data.get("data").get("Contact").get("id")
 
@@ -438,10 +461,12 @@ class BimsApi:
                 "company_id": 1,
             }
         }
-        params = {"sid": self.sid}
+        params = {}
+        if self.sid:
+            params["sid"] = self.sid
         try:
             response_data = self._request_with_relogin(
-                requests.post, url, json=body, params=params
+                self.session.post, url, json=body, params=params
             )
             return response_data.get("status") == "ok"
         except Exception as e:
@@ -472,11 +497,13 @@ class BimsApi:
             "SalesProduct": sale_products,
             "SalesPaymentMethod": sales_payment_methods,
         }
-        params = {"sid": self.sid}
+        params = {}
+        if self.sid:
+            params["sid"] = self.sid
         response_data = self._retry_request(
-            requests.post, url, json=body, params=params
+            self.session.post, url, json=body, params=params
         )
-        
+
         data = response_data.get("data")
         if isinstance(data, dict) and data.get("Sale") and data["Sale"].get("id"):
             return data["Sale"]["id"], None
@@ -486,18 +513,21 @@ class BimsApi:
 
     def send_invoice(self, sale_id):
         url = f"{self.base_url}/sales/send/{sale_id}/"
-        params = {"sid": self.sid}
-        response_data = self._retry_request(requests.get, url, params=params)
+        params = {}
+        if self.sid:
+            params["sid"] = self.sid
+        response_data = self._retry_request(self.session.get, url, params=params)
         return "ok" if response_data.get("status") == "ok" else None
 
     def get_contacts(self, limit=500, offset=0):
         url = f"{self.base_url}/contacts/"
         params = {
-            "sid": self.sid,
             "limit": limit,
             "offset": offset,
         }
-        return self._retry_request(requests.get, url, params=params)
+        if self.sid:
+            params["sid"] = self.sid
+        return self._retry_request(self.session.get, url, params=params)
 
 
 bims = BimsApi()

@@ -1,3 +1,4 @@
+import json
 import requests
 from django.db import IntegrityError
 from unittest.mock import MagicMock, patch
@@ -1032,3 +1033,105 @@ class RetryFailedsCommandTest(TestCase):
 
         order.refresh_from_db()
         self.assertEqual(order.status, FailedOrder.FAILED)
+
+
+_TEST_API_KEY = "clave_de_prueba_123"
+
+
+class ApiKeyAuthTest(TestCase):
+    """
+    Autenticación por API Key en header vs. el modo legacy por sesión (?sid=).
+
+    BIMS corta el login por usuario+password el 30/09/2026. La key va cruda,
+    sin prefijo de tenant (verificado contra la API viva el 2026-08-21).
+
+    Los tests interceptan `requests.Session.send`, así que asertan sobre la
+    request realmente preparada —URL y headers— y no sobre mocks.
+    """
+
+    def _fake_send(self, captured, body):
+        """Intercepta el transporte, guarda la request real y devuelve `body`."""
+
+        def fake_send(session_self, request, **kwargs):
+            captured.append(request)
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(body).encode("utf-8")
+            response.request = request
+            return response
+
+        return fake_send
+
+    def _build_api(self):
+        """Instancia BimsApi sin dejar que un login real salga a la red."""
+        with patch.object(BimsApi, "login", return_value="sid_que_no_deberia_usarse"):
+            return BimsApi()
+
+    _CONTACT_OK = {"status": "ok", "count": 1, "data": [{"Contact": {"id": "7"}}]}
+
+    # ── Modo API Key ────────────────────────────────────────────────────────
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_con_api_key_no_hace_login(self):
+        with patch.object(BimsApi, "login") as mock_login:
+            api = BimsApi()
+        mock_login.assert_not_called()
+        self.assertIsNone(api.sid)
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_con_api_key_el_header_viaja_a_bims(self):
+        api = self._build_api()
+        captured = []
+        with patch.object(requests.Session, "send", self._fake_send(captured, self._CONTACT_OK)):
+            api.list_contacts("123456", "CI")
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].headers.get("X-API-Key"), _TEST_API_KEY)
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_con_api_key_la_url_no_lleva_sid(self):
+        api = self._build_api()
+        captured = []
+        with patch.object(requests.Session, "send", self._fake_send(captured, self._CONTACT_OK)):
+            api.list_contacts("123456", "CI")
+        self.assertNotIn("sid=", captured[0].url)
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    @patch("core.bims.time.sleep")
+    def test_con_api_key_un_401_es_terminal_y_no_relogea(self, mock_sleep):
+        """Sin sesión que renovar, un 401 es rechazo de negocio: ni relogin ni reintentos."""
+        api = self._build_api()
+        captured = []
+        body = {"status": "error", "code": "401", "message": "Unauthorized"}
+        with patch.object(BimsApi, "login") as mock_login:
+            with patch.object(requests.Session, "send", self._fake_send(captured, body)):
+                with self.assertRaises(BimsBusinessError):
+                    api.list_contacts("123456", "CI")
+        mock_login.assert_not_called()
+        self.assertEqual(len(captured), 1)
+        mock_sleep.assert_not_called()
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY, RUC_URL="https://turuc.test/api")
+    def test_la_consulta_de_ruc_no_filtra_el_api_key_de_bims(self):
+        """Guarda: turuc es un tercero, la credencial de BIMS no puede viajar ahí."""
+        api = self._build_api()
+        captured = []
+        body = {"status": "ok", "count": 1, "data": [{"Contact": {"name": "ACME SA"}}]}
+        with patch.object(requests.Session, "send", self._fake_send(captured, body)):
+            api.find_razon_social_by_ruc("80012345")
+        self.assertEqual(len(captured), 1)
+        self.assertIn("turuc.test", captured[0].url)
+        self.assertNotIn("X-API-Key", captured[0].headers)
+
+    # ── Modo sesión (legacy), debe seguir intacto ───────────────────────────
+
+    @override_settings(BIMS_API_KEY="")
+    def test_sin_api_key_sigue_usando_sid_y_sin_header(self):
+        with patch.object(BimsApi, "login", return_value="sid_legacy") as mock_login:
+            api = BimsApi()
+        mock_login.assert_called_once()
+        self.assertEqual(api.sid, "sid_legacy")
+        captured = []
+        with patch.object(requests.Session, "send", self._fake_send(captured, self._CONTACT_OK)):
+            api.list_contacts("123456", "CI")
+        self.assertIn("sid=sid_legacy", captured[0].url)
+        self.assertNotIn("X-API-Key", captured[0].headers)
