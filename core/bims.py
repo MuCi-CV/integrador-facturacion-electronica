@@ -2,6 +2,7 @@ import requests
 import logging
 import json
 from django.conf import settings
+from http import cookiejar
 from typing import Optional, Any
 import hashlib
 import time
@@ -72,6 +73,29 @@ class BimsBusinessError(BimsError):
     """
 
 
+class _BlockAllCookies(cookiejar.DefaultCookiePolicy):
+    """
+    Política que ni guarda ni envía cookies.
+
+    El cliente usa `requests.Session` solo por el keep-alive; el cookie jar vino
+    de arrastre y nunca fue intencional (hasta `81eb9ba` los métodos usaban
+    `requests.get/post` pelados, sin jar). Y no es inocuo: BIMS devuelve una
+    cookie de sesión y, si se la reenvía junto al header `X-API-Key`, rechaza el
+    request con `code: 401` ("Session ID no coincide con la cookie de sesión
+    activa"). Como en modo API Key un 401 es terminal, eso cortó la facturación
+    en producción el 2026-08-21 al segundo request de cada worker.
+
+    Nuestra autenticación viaja siempre explícita —header `X-API-Key` o `?sid=`—,
+    así que no hay nada que una cookie deba sostener.
+    """
+
+    def set_ok(self, cookie, request) -> bool:
+        return False
+
+    def return_ok(self, cookie, request) -> bool:
+        return False
+
+
 class BimsApi:
     def __init__(self) -> None:
         self.base_url = settings.BIMS_URL
@@ -80,6 +104,7 @@ class BimsApi:
         self.ruc_url = getattr(settings, "RUC_URL", None)
         self.api_key = getattr(settings, "BIMS_API_KEY", None)
         self.session = requests.Session()
+        self.session.cookies.set_policy(_BlockAllCookies())
         if self.api_key:
             # La key va cruda, sin prefijo de tenant: verificado contra la API
             # viva el 2026-08-21. No hay login ni sesión que expire.
