@@ -2,7 +2,7 @@ import urllib
 
 from woocommerce import API as WCAPI
 from django.conf import settings
-from typing import Union, List
+from typing import Union, List, Optional
 
 
 class WooCommerceAPI:
@@ -50,6 +50,34 @@ class WooCommerceAPI:
         if res.status_code == 200:
             return res.json()
         raise self.ServerException(res.text)
+
+    def get_customer(self, id, **kwargs) -> Optional[dict]:
+        """
+        Usuario de WordPress por id. Devuelve None si no existe.
+
+        Los cajeros de FooEvents POS son "customers" de wc/v3 con rol
+        `fooeventspos_cashier` (verificado el 2026-08-24: customers/729 ->
+        sancosmos@muci.org), así que no hace falta la API de WordPress.
+        """
+        res = self.wcapi.get(f"customers/{id}", params=kwargs)
+        if res.status_code == 200:
+            return res.json()
+        if res.status_code == 404:
+            return None
+        raise self.ServerException(res.text)
+
+    def find_customer_by_email(self, email: str) -> Optional[dict]:
+        """
+        Usuario de WordPress por email. Devuelve None si no hay coincidencia.
+
+        Hace falta `role=all`: sin eso wc/v3 solo devuelve los que tienen rol
+        `customer` y los cajeros quedan afuera.
+        """
+        res = self.wcapi.get("customers", params={"email": email, "role": "all"})
+        if res.status_code != 200:
+            raise self.ServerException(res.text)
+        encontrados = res.json()
+        return encontrados[0] if encontrados else None
 
     def refund_order(self, id, data, **kwargs):
         res = self.wcapi.post(f"orders/{id}/refunds", data={"data": data})

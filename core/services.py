@@ -15,11 +15,9 @@ from core.constants import (
     FLAT_PRICE_PRODUCT_IDS,
     FOOEVENTS_PAYMENT_METHOD_MAP,
     PAYMENT_METHOD_DEFAULT_ID,
-    POS_DEFAULT_POSALE_ID,
-    POS_USER_ID_TO_POSALE,
     TIP_BIMS_PRODUCT_ID,
-    WEB_POSALE_ID,
 )
+from core.sucursales import resolver_posale_de_cajero, resolver_posale_web
 
 logger = logging.getLogger(__name__)
 
@@ -100,20 +98,30 @@ def resolve_pos_and_payments(
     user_id_meta = _get_meta(meta_data, "_fooeventspos_user_id")
 
     if not user_id_meta:
-        # Orden web: punto de venta 6, pago en línea por el total
-        return WEB_POSALE_ID, [{"payment_method_id": PAYMENT_METHOD_DEFAULT_ID, "amount": total}]
+        # Orden web: pago en línea por el total.
+        posale_id = resolver_posale_web()
+        if posale_id is None:
+            logger.info(
+                "Orden web ignorada: la regla de órdenes web no tiene punto de venta."
+            )
+            return None
+        return posale_id, [{"payment_method_id": PAYMENT_METHOD_DEFAULT_ID, "amount": total}]
 
     user_id_value = int(user_id_meta["value"])
 
-    if user_id_value == 2:
-        logger.info("Orden ignorada: realizada desde la cuenta de administrador.")
+    # `None` = no facturar. Antes era un `if user_id_value == 2` hardcodeado;
+    # ahora cualquier cajero se da de baja dejándole el punto de venta vacío.
+    posale_id = resolver_posale_de_cajero(user_id_value)
+    if posale_id is None:
+        logger.info(
+            f"Orden ignorada: el cajero {user_id_value} no tiene punto de venta asignado."
+        )
         return None
 
     if payment_method_title == "Cortesía":
         logger.info("Orden ignorada: método de pago Cortesía.")
         return None
 
-    posale_id = POS_USER_ID_TO_POSALE.get(user_id_value, POS_DEFAULT_POSALE_ID)
     sales_payment_methods = _parse_pos_payments(meta_data, total)
     return posale_id, sales_payment_methods
 

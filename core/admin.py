@@ -6,7 +6,8 @@ from django.conf import settings
 from django.urls import path
 from django.http import HttpResponseRedirect
 from django.shortcuts import render
-from core.models import FailedOrder
+from core.models import FailedOrder, Sucursal
+from core.sucursales import completar_desde_woocommerce
 from core.woocommerce import wc_api
 
 
@@ -215,3 +216,55 @@ class FailedOrderAdmin(admin.ModelAdmin):
             "admin/search_order.html",
             {"order_data": order_data, "error": error},
         )
+
+
+@admin.register(Sucursal)
+class SucursalAdmin(admin.ModelAdmin):
+    """
+    Alta y edición de sucursales sin redesplegar.
+
+    El mapeo cajero POS → punto de venta de BIMS vivía en `core/constants.py`.
+    Acá se ve y se edita: cargás el email del cajero y `save_model` resuelve su
+    ID contra WooCommerce (o al revés, si cargás el ID).
+    """
+
+    list_display = (
+        "nombre",
+        "tipo",
+        "email",
+        "wp_user_id",
+        "punto_de_venta",
+        "updated_at",
+    )
+    list_display_links = ("nombre",)
+    list_filter = ("tipo",)
+    search_fields = ("nombre", "email", "wp_user_id")
+    ordering = ("tipo", "nombre")
+    fields = ("tipo", "nombre", "email", "wp_user_id", "bims_posale_id")
+
+    def punto_de_venta(self, obj):
+        """Un punto de venta vacío no es un dato faltante: significa no facturar."""
+        if obj.bims_posale_id is None:
+            return format_html(
+                '<span style="color: #F37043; font-weight: 600;">no facturar</span>'
+            )
+        return format_html(
+            '<span style="color: #00B26B; font-weight: 600;">{}</span>',
+            obj.bims_posale_id,
+        )
+
+    punto_de_venta.short_description = "Punto de venta BIMS"
+    punto_de_venta.admin_order_field = "bims_posale_id"
+
+    def save_model(self, request, obj, form, change):
+        """
+        Completa email ↔ ID contra WooCommerce antes de guardar.
+
+        `completar_desde_woocommerce` nunca lanza: si WooCommerce no responde,
+        guarda lo cargado y devuelve un aviso. Guardar no puede depender de que
+        WooCommerce esté arriba.
+        """
+        aviso = completar_desde_woocommerce(obj)
+        super().save_model(request, obj, form, change)
+        if aviso:
+            self.message_user(request, aviso, level=messages.WARNING)

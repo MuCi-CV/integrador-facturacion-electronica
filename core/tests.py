@@ -12,8 +12,14 @@ with patch("requests.post") as _mock_post:
     from core.services import _parse_pos_payments, build_sale_products, resolve_pos_and_payments
     from core.bims import BimsApi, BimsBusinessError, BimsTransientError
 
-from core.constants import FLAT_PRICE_PRODUCT_IDS
-from core.models import FailedOrder, RucCache
+from core.constants import (
+    FLAT_PRICE_PRODUCT_IDS,
+    POS_DEFAULT_POSALE_ID,
+    POS_USER_ID_TO_POSALE,
+    WEB_POSALE_ID,
+)
+from core.models import FailedOrder, RucCache, Sucursal
+from core.sucursales import completar_desde_woocommerce
 from django.test import TestCase, override_settings
 
 
@@ -1032,3 +1038,197 @@ class RetryFailedsCommandTest(TestCase):
 
         order.refresh_from_db()
         self.assertEqual(order.status, FailedOrder.FAILED)
+
+
+class SucursalResolucionTest(TestCase):
+    """
+    `resolve_pos_and_payments` resuelve el punto de venta leyendo la BD.
+
+    Antes vivía hardcodeado en `core/constants.py`, así que agregar una sucursal
+    exigía editar código y redesplegar. Las constantes quedan como red de
+    seguridad: si la tabla está vacía o la consulta falla se usan ellas, porque
+    una tabla nueva no puede tener el poder de frenar la facturación.
+    """
+
+    _PAGO_EFECTIVO = '[{"opmk": "fooeventspos_cash", "amount": 0}]'
+
+    def _pos_meta(self, user_id: int) -> list:
+        return [
+            {"key": "_fooeventspos_user_id", "value": str(user_id)},
+            {"key": "_fooeventspos_payments", "value": self._PAGO_EFECTIVO},
+        ]
+
+    # ── La siembra reproduce el estado previo al cambio ──────────────────────
+
+    def test_la_migracion_siembra_las_sucursales_actuales(self):
+        self.assertEqual(Sucursal.objects.get(wp_user_id=729).bims_posale_id, 4)
+        self.assertEqual(Sucursal.objects.get(wp_user_id=3).bims_posale_id, 1)
+        self.assertIsNone(Sucursal.objects.get(wp_user_id=2).bims_posale_id)
+        self.assertEqual(
+            Sucursal.objects.get(tipo=Sucursal.POS_SIN_MAPEO).bims_posale_id,
+            POS_DEFAULT_POSALE_ID,
+        )
+        self.assertEqual(
+            Sucursal.objects.get(tipo=Sucursal.WEB).bims_posale_id, WEB_POSALE_ID
+        )
+
+    # ── Resolución desde la BD ──────────────────────────────────────────────
+
+    def test_cajero_registrado_resuelve_su_punto_de_venta(self):
+        posale_id, _ = resolve_pos_and_payments(
+            self._pos_meta(729), total=30000, payment_method_title="Cash"
+        )
+        self.assertEqual(posale_id, 4)
+
+    def test_sucursal_nueva_cargada_en_la_bd_se_usa_sin_redesplegar(self):
+        """El objetivo del cambio: alta por pantalla, sin tocar código."""
+        Sucursal.objects.create(
+            tipo=Sucursal.CAJERO,
+            nombre="Sucursal Nueva",
+            email="nueva@muci.org",
+            wp_user_id=1500,
+            bims_posale_id=9,
+        )
+        posale_id, _ = resolve_pos_and_payments(
+            self._pos_meta(1500), total=30000, payment_method_title="Cash"
+        )
+        self.assertEqual(posale_id, 9)
+
+    def test_cajero_sin_punto_de_venta_no_se_factura(self):
+        """Reemplaza el `if user_id_value == 2` hardcodeado: ahora es dato."""
+        self.assertIsNone(
+            resolve_pos_and_payments(
+                self._pos_meta(2), total=30000, payment_method_title="Cash"
+            )
+        )
+
+    def test_cualquier_cajero_puede_marcarse_como_no_facturable(self):
+        Sucursal.objects.filter(wp_user_id=729).update(bims_posale_id=None)
+        self.assertIsNone(
+            resolve_pos_and_payments(
+                self._pos_meta(729), total=30000, payment_method_title="Cash"
+            )
+        )
+
+    def test_cajero_no_registrado_usa_la_fila_pos_sin_mapeo(self):
+        Sucursal.objects.filter(tipo=Sucursal.POS_SIN_MAPEO).update(bims_posale_id=99)
+        posale_id, _ = resolve_pos_and_payments(
+            self._pos_meta(4321), total=15000, payment_method_title="Cash"
+        )
+        self.assertEqual(posale_id, 99)
+
+    def test_orden_web_usa_la_fila_web(self):
+        Sucursal.objects.filter(tipo=Sucursal.WEB).update(bims_posale_id=88)
+        posale_id, _ = resolve_pos_and_payments(
+            [], total=30000, payment_method_title="Credit Card"
+        )
+        self.assertEqual(posale_id, 88)
+
+    # ── Red de seguridad ────────────────────────────────────────────────────
+
+    def test_tabla_vacia_cae_a_las_constantes(self):
+        Sucursal.objects.all().delete()
+        posale_pos, _ = resolve_pos_and_payments(
+            self._pos_meta(729), total=30000, payment_method_title="Cash"
+        )
+        self.assertEqual(posale_pos, POS_USER_ID_TO_POSALE[729])
+        posale_web, _ = resolve_pos_and_payments(
+            [], total=30000, payment_method_title="Credit Card"
+        )
+        self.assertEqual(posale_web, WEB_POSALE_ID)
+
+    def test_tabla_vacia_el_administrador_sigue_sin_facturarse(self):
+        """`POS_USER_ID_TO_POSALE[2]` es None: un `.get()` ingenuo lo trataría
+        como 'no encontrado' y le asignaría el punto de venta por defecto."""
+        Sucursal.objects.all().delete()
+        self.assertIsNone(
+            resolve_pos_and_payments(
+                self._pos_meta(2), total=30000, payment_method_title="Cash"
+            )
+        )
+
+    def test_cortesia_sigue_ignorandose(self):
+        self.assertIsNone(
+            resolve_pos_and_payments(
+                self._pos_meta(729), total=30000, payment_method_title="Cortesía"
+            )
+        )
+
+
+class SucursalDatosWooTest(TestCase):
+    """
+    Completar email ↔ id de cajero contra WooCommerce.
+
+    Verificado contra la API viva el 2026-08-24: `customers/729` devuelve
+    `sancosmos@muci.org` con rol `fooeventspos_cashier`, y la búsqueda por email
+    devuelve exactamente un resultado. Las dos direcciones funcionan, así que
+    alcanza con cargar una de las dos.
+    """
+
+    def _sucursal(self, **kwargs):
+        base = dict(tipo=Sucursal.CAJERO, nombre="Prueba")
+        base.update(kwargs)
+        return Sucursal(**base)
+
+    @patch("core.sucursales.wc_api")
+    def test_completa_el_id_del_cajero_a_partir_del_email(self, mock_wc):
+        mock_wc.find_customer_by_email.return_value = {
+            "id": 1500,
+            "email": "nueva@muci.org",
+            "role": "fooeventspos_cashier",
+        }
+        sucursal = self._sucursal(email="nueva@muci.org")
+        aviso = completar_desde_woocommerce(sucursal)
+        self.assertIsNone(aviso)
+        self.assertEqual(sucursal.wp_user_id, 1500)
+
+    @patch("core.sucursales.wc_api")
+    def test_completa_el_email_a_partir_del_id(self, mock_wc):
+        mock_wc.get_customer.return_value = {
+            "id": 729,
+            "email": "sancosmos@muci.org",
+            "role": "fooeventspos_cashier",
+        }
+        sucursal = self._sucursal(wp_user_id=729)
+        aviso = completar_desde_woocommerce(sucursal)
+        self.assertIsNone(aviso)
+        self.assertEqual(sucursal.email, "sancosmos@muci.org")
+
+    @patch("core.sucursales.wc_api")
+    def test_avisa_si_el_email_no_existe_en_woocommerce(self, mock_wc):
+        mock_wc.find_customer_by_email.return_value = None
+        sucursal = self._sucursal(email="fantasma@muci.org")
+        aviso = completar_desde_woocommerce(sucursal)
+        self.assertIn("fantasma@muci.org", aviso)
+        self.assertIsNone(sucursal.wp_user_id)
+
+    @patch("core.sucursales.wc_api")
+    def test_avisa_si_el_usuario_no_es_cajero_pero_igual_lo_carga(self, mock_wc):
+        """No lo rechazamos: el rol puede cambiar y no queremos bloquear el alta."""
+        mock_wc.find_customer_by_email.return_value = {
+            "id": 55,
+            "email": "alguien@muci.org",
+            "role": "customer",
+        }
+        sucursal = self._sucursal(email="alguien@muci.org")
+        aviso = completar_desde_woocommerce(sucursal)
+        self.assertIn("customer", aviso)
+        self.assertEqual(sucursal.wp_user_id, 55)
+
+    @patch("core.sucursales.wc_api")
+    def test_si_woocommerce_falla_avisa_y_no_lanza(self, mock_wc):
+        """El alta no puede depender de que WooCommerce esté arriba."""
+        mock_wc.find_customer_by_email.side_effect = requests.ConnectionError("down")
+        sucursal = self._sucursal(email="nueva@muci.org")
+        aviso = completar_desde_woocommerce(sucursal)
+        self.assertIn("WooCommerce", aviso)
+        self.assertIsNone(sucursal.wp_user_id)
+
+    @patch("core.sucursales.wc_api")
+    def test_no_consulta_woocommerce_para_filas_sin_cajero(self, mock_wc):
+        """Las filas `web` y `pos_sin_mapeo` no tienen usuario que resolver."""
+        for tipo in (Sucursal.WEB, Sucursal.POS_SIN_MAPEO):
+            sucursal = Sucursal(tipo=tipo, nombre="Regla", bims_posale_id=6)
+            self.assertIsNone(completar_desde_woocommerce(sucursal))
+        mock_wc.get_customer.assert_not_called()
+        mock_wc.find_customer_by_email.assert_not_called()

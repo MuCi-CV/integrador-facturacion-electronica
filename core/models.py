@@ -41,6 +41,83 @@ class FailedOrder(models.Model):
         return f"Orden {self.order_id}"
 
 
+class Sucursal(models.Model):
+    """
+    Mapeo cajero POS de WordPress → punto de venta de BIMS.
+
+    Vivía hardcodeado en `core/constants.py`, así que agregar una sucursal
+    exigía editar código y redesplegar. Se edita desde el admin.
+
+    Hay tres tipos: los `CAJERO` apuntan a un usuario concreto de WordPress; los
+    otros dos son **reglas por defecto** y no tienen usuario ni email —
+    `POS_SIN_MAPEO` cubre a cualquier cajero no registrado y `WEB` a las órdenes
+    que llegan sin cajero. Esos dos son fila única.
+
+    `bims_posale_id` vacío significa **no facturar**: es como se representa la
+    cuenta de administrador, y sirve para dar de baja cualquier cajero sin
+    borrarlo.
+    """
+
+    CAJERO = "cajero"
+    POS_SIN_MAPEO = "pos_sin_mapeo"
+    WEB = "web"
+    TIPO_CHOICES = (
+        (CAJERO, "Cajero POS"),
+        (POS_SIN_MAPEO, "Regla: cualquier otro cajero POS"),
+        (WEB, "Regla: órdenes web"),
+    )
+    TIPOS_SIN_USUARIO = (POS_SIN_MAPEO, WEB)
+
+    tipo = models.CharField(
+        verbose_name="Tipo",
+        max_length=20,
+        choices=TIPO_CHOICES,
+        default=CAJERO,
+        db_index=True,
+    )
+    nombre = models.CharField(verbose_name="Nombre", max_length=100)
+    email = models.EmailField(
+        verbose_name="Email del cajero en WordPress",
+        blank=True,
+        help_text="Cargá el email o el ID; el integrador completa el otro contra WooCommerce.",
+    )
+    wp_user_id = models.PositiveIntegerField(
+        verbose_name="ID del cajero en WordPress",
+        unique=True,
+        null=True,
+        blank=True,
+    )
+    bims_posale_id = models.PositiveIntegerField(
+        verbose_name="Punto de venta en BIMS",
+        null=True,
+        blank=True,
+        help_text="Vacío = no facturar las órdenes de esta sucursal.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Sucursal"
+        verbose_name_plural = "Sucursales"
+        ordering = ("tipo", "nombre")
+
+    def __str__(self):
+        return self.nombre
+
+    def clean(self):
+        """Impide dos filas del mismo tipo único: la resolución sería ambigua."""
+        from django.core.exceptions import ValidationError
+
+        if self.tipo in self.TIPOS_SIN_USUARIO:
+            hermanas = Sucursal.objects.filter(tipo=self.tipo).exclude(pk=self.pk)
+            if hermanas.exists():
+                raise ValidationError(
+                    {"tipo": "Ya existe una fila de tipo '{}'. Editá la que hay.".format(
+                        self.get_tipo_display()
+                    )}
+                )
+
+
 class RucCache(models.Model):
     ruc = models.CharField(
         verbose_name="RUC", max_length=20, unique=True, db_index=True
