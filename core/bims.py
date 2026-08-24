@@ -544,6 +544,34 @@ class BimsApi:
         response_data = self._retry_request(self.session.get, url, params=params)
         return "ok" if response_data.get("status") == "ok" else None
 
+    def get_posales(self):
+        """
+        Puntos de venta de BIMS, como lista de `(id, nombre)` ordenada por id.
+
+        BIMS es dueño del `posale_id`: WooCommerce y FooEvents no lo conocen.
+        Esto permite que el admin ofrezca la lista real en vez de dejar escribir
+        un número que recién falla al facturar.
+
+        Verificado contra la API viva el 2026-08-24: responde `/posales/` (sin
+        sufijo `.json`) con la convención CakePHP `data: [{"Posale": {...}}]`, y
+        **los ids vienen como strings** — se convierten a int para que casen con
+        `Sucursal.bims_posale_id`. Devolvió 4: 1 Caja Tatakualab, 4 Caja San
+        Cosmos, 6 Caja WEB, 7 Caja Fund MuCi.
+        """
+        url = f"{self.base_url}/posales/"
+        params = {}
+        if self.sid:
+            params["sid"] = self.sid
+        response_data = self._retry_request(self.session.get, url, params=params)
+
+        posales = []
+        for fila in response_data.get("data") or []:
+            posale = fila.get("Posale") or {}
+            if posale.get("id") is None:
+                continue
+            posales.append((int(posale["id"]), posale.get("name") or "(sin nombre)"))
+        return sorted(posales)
+
     def get_contacts(self, limit=500, offset=0):
         url = f"{self.base_url}/contacts/"
         params = {

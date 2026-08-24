@@ -22,7 +22,8 @@ from core.constants import (
     WEB_POSALE_ID,
 )
 from core.models import FailedOrder, RucCache, Sucursal
-from core.sucursales import completar_desde_woocommerce
+from core.forms import SucursalForm
+from core.sucursales import completar_desde_woocommerce, opciones_de_punto_de_venta
 from django.test import TestCase, override_settings
 
 
@@ -1422,3 +1423,142 @@ class SessionCookiesTest(TestCase):
         self.assertEqual(len(captured), 2)
         self.assertNotIn("Cookie", captured[1].headers)
         self.assertEqual(len(api.session.cookies), 0)
+
+
+_POSALES_OK = {
+    "code": "200",
+    "status": "ok",
+    "count": "4",
+    "data": [
+        {"Posale": {"id": "6", "name": "Caja WEB", "bill_code": "003", "company_id": "1"}},
+        {"Posale": {"id": "4", "name": "Caja San Cosmos", "bill_code": "002", "company_id": "1"}},
+        {"Posale": {"id": "1", "name": "Caja Tatakualab", "bill_code": "001", "company_id": "1"}},
+        {"Posale": {"id": "7", "name": "Caja Fund MuCi", "bill_code": "004", "company_id": "1"}},
+    ],
+}
+
+
+class GetPosalesTest(TestCase):
+    """
+    `BimsApi.get_posales()` lista los puntos de venta de BIMS.
+
+    Payload verificado contra la API viva el 2026-08-24: responde `/posales/`
+    (sin sufijo `.json`) con la convención CakePHP `data: [{"Posale": {...}}]`,
+    y **los ids vienen como strings**.
+    """
+
+    def _fake_send(self, captured, body):
+        def fake_send(session_self, request, **kwargs):
+            captured.append(request)
+            response = requests.Response()
+            response.status_code = 200
+            response._content = json.dumps(body).encode("utf-8")
+            response.request = request
+            return response
+
+        return fake_send
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_devuelve_pares_id_nombre_con_el_id_como_entero(self):
+        with patch.object(BimsApi, "login", return_value="no-deberia-usarse"):
+            api = BimsApi()
+        with patch.object(requests.Session, "send", self._fake_send([], _POSALES_OK)):
+            posales = api.get_posales()
+        self.assertEqual(
+            posales,
+            [
+                (1, "Caja Tatakualab"),
+                (4, "Caja San Cosmos"),
+                (6, "Caja WEB"),
+                (7, "Caja Fund MuCi"),
+            ],
+        )
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_pega_contra_la_ruta_posales(self):
+        with patch.object(BimsApi, "login", return_value="x"):
+            api = BimsApi()
+        captured = []
+        with patch.object(requests.Session, "send", self._fake_send(captured, _POSALES_OK)):
+            api.get_posales()
+        self.assertIn("/posales/", captured[0].url)
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_ignora_filas_sin_id(self):
+        cuerpo = {"status": "ok", "data": [{"Posale": {"name": "Sin id"}}, {"Posale": {"id": "3", "name": "Buena"}}]}
+        with patch.object(BimsApi, "login", return_value="x"):
+            api = BimsApi()
+        with patch.object(requests.Session, "send", self._fake_send([], cuerpo)):
+            self.assertEqual(api.get_posales(), [(3, "Buena")])
+
+
+class OpcionesPuntoDeVentaTest(TestCase):
+    """`opciones_de_punto_de_venta()` nunca lanza: el admin no puede depender de BIMS."""
+
+    @patch("core.sucursales._bims")
+    def test_con_bims_ok_devuelve_las_opciones_sin_aviso(self, mock_bims):
+        mock_bims.return_value.get_posales.return_value = [(4, "Caja San Cosmos")]
+        opciones, aviso = opciones_de_punto_de_venta()
+        self.assertEqual(opciones, [(4, "Caja San Cosmos")])
+        self.assertIsNone(aviso)
+
+    @patch("core.sucursales._bims")
+    def test_con_bims_caido_devuelve_lista_vacia_y_aviso(self, mock_bims):
+        mock_bims.return_value.get_posales.side_effect = BimsTransientError("sin respuesta")
+        opciones, aviso = opciones_de_punto_de_venta()
+        self.assertEqual(opciones, [])
+        self.assertIn("BIMS", aviso)
+
+
+class SucursalFormTest(TestCase):
+    """
+    El punto de venta se elige de la lista de BIMS, no se escribe a mano.
+
+    Escribirlo a mano permitía cargar un ID inexistente, y la factura fallaba
+    recién en la venta. Con la lista disponible, un ID inválido es imposible.
+    """
+
+    _OPCIONES = [(1, "Caja Tatakualab"), (4, "Caja San Cosmos"), (7, "Caja Fund MuCi")]
+
+    def _datos(self, **extra):
+        base = {"tipo": Sucursal.CAJERO, "nombre": "Nueva", "email": "", "wp_user_id": 1500}
+        base.update(extra)
+        return base
+
+    @patch("core.forms.opciones_de_punto_de_venta")
+    def test_el_campo_es_un_desplegable_con_las_opciones_de_bims(self, mock_op):
+        mock_op.return_value = (self._OPCIONES, None)
+        form = SucursalForm()
+        etiquetas = dict(form.fields["bims_posale_id"].choices)
+        self.assertIn("4 — Caja San Cosmos", etiquetas.values())
+        self.assertEqual(len(etiquetas), len(self._OPCIONES) + 1)  # + la opcion vacia
+
+    @patch("core.forms.opciones_de_punto_de_venta")
+    def test_un_id_fuera_de_la_lista_se_rechaza(self, mock_op):
+        mock_op.return_value = (self._OPCIONES, None)
+        form = SucursalForm(data=self._datos(bims_posale_id=99))
+        self.assertFalse(form.is_valid())
+        self.assertIn("bims_posale_id", form.errors)
+
+    @patch("core.forms.opciones_de_punto_de_venta")
+    def test_un_id_de_la_lista_se_acepta(self, mock_op):
+        mock_op.return_value = (self._OPCIONES, None)
+        form = SucursalForm(data=self._datos(bims_posale_id=4))
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["bims_posale_id"], 4)
+
+    @patch("core.forms.opciones_de_punto_de_venta")
+    def test_la_opcion_vacia_significa_no_facturar(self, mock_op):
+        mock_op.return_value = (self._OPCIONES, None)
+        form = SucursalForm(data=self._datos(bims_posale_id=""))
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIsNone(form.cleaned_data["bims_posale_id"])
+
+    @patch("core.forms.opciones_de_punto_de_venta")
+    def test_con_bims_caido_degrada_a_numerico_y_deja_guardar(self, mock_op):
+        """Si BIMS no responde, el alta no se bloquea: se carga a mano y se avisa."""
+        mock_op.return_value = ([], "No se pudo traer la lista de BIMS (timeout).")
+        form = SucursalForm(data=self._datos(bims_posale_id=99))
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["bims_posale_id"], 99)
+        self.assertIn("BIMS", form.aviso_bims)

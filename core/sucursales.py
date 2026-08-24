@@ -102,6 +102,42 @@ def _posale_de_constantes(wp_user_id: int) -> Optional[int]:
     return POS_DEFAULT_POSALE_ID
 
 
+def _bims():
+    """
+    Devuelve el cliente de BIMS, importándolo **en la llamada** y no arriba.
+
+    A propósito: `core.bims` instancia `BimsApi()` en el import y en modo sesión
+    eso hace un login contra BIMS. Importarlo arriba haría que abrir el admin
+    dependiera de que BIMS esté arriba, que es justo lo que queremos evitar.
+    """
+    from core.bims import bims
+
+    return bims
+
+
+def opciones_de_punto_de_venta():
+    """
+    Puntos de venta de BIMS para armar el desplegable del admin.
+
+    Devuelve `(opciones, aviso)`: `opciones` es una lista de `(id, nombre)`, y
+    `aviso` es un texto para mostrarle al usuario o `None` si todo salió bien.
+    **Nunca lanza**: si BIMS no responde se devuelve la lista vacía y el
+    formulario cae al campo numérico. Editar una sucursal no puede depender de
+    que BIMS esté disponible.
+    """
+    from core.bims import BimsError
+
+    try:
+        return _bims().get_posales(), None
+    except (BimsError, requests.RequestException) as e:
+        logger.warning(f"No se pudo traer los puntos de venta de BIMS: {e}")
+        return (
+            [],
+            f"No se pudo traer la lista de puntos de venta de BIMS ({e}). Cargá el "
+            f"número a mano; ojo que no se puede validar contra BIMS.",
+        )
+
+
 def completar_desde_woocommerce(sucursal: Sucursal) -> Optional[str]:
     """
     Completa email ↔ `wp_user_id` consultando WooCommerce.

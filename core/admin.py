@@ -6,6 +6,7 @@ from django.conf import settings
 from django.urls import path
 from django.http import HttpResponseRedirect
 from django.shortcuts import render
+from core.forms import SucursalForm
 from core.models import FailedOrder, Sucursal
 from core.sucursales import completar_desde_woocommerce
 from core.woocommerce import wc_api
@@ -236,8 +237,11 @@ class SucursalAdmin(admin.ModelAdmin):
         "punto_de_venta",
         "updated_at",
     )
+    form = SucursalForm
     list_display_links = ("nombre",)
-    list_filter = ("tipo",)
+    # Varios cajeros pueden compartir un punto de venta, así que filtrar por él
+    # es la forma de ver todas las cajas de una misma sucursal.
+    list_filter = ("tipo", "bims_posale_id")
     search_fields = ("nombre", "email", "wp_user_id")
     ordering = ("tipo", "nombre")
     fields = ("tipo", "nombre", "email", "wp_user_id", "bims_posale_id")
@@ -264,7 +268,8 @@ class SucursalAdmin(admin.ModelAdmin):
         guarda lo cargado y devuelve un aviso. Guardar no puede depender de que
         WooCommerce esté arriba.
         """
-        aviso = completar_desde_woocommerce(obj)
+        avisos = [completar_desde_woocommerce(obj), getattr(form, "aviso_bims", None)]
         super().save_model(request, obj, form, change)
-        if aviso:
-            self.message_user(request, aviso, level=messages.WARNING)
+        for aviso in avisos:
+            if aviso:
+                self.message_user(request, aviso, level=messages.WARNING)
