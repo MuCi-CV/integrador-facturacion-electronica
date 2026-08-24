@@ -13,7 +13,14 @@ with patch("requests.post") as _mock_post:
         json=lambda: {"status": "ok", "data": {"Session": {"id": "mock_sid"}}},
     )
     from core.services import _parse_pos_payments, build_sale_products, resolve_pos_and_payments
-    from core.bims import BimsApi, BimsBusinessError, BimsTransientError
+    from core.bims import (
+        BimsApi,
+        BimsBusinessError,
+        BimsTransientError,
+        PRESUPUESTO_REINTENTOS,
+        TIMEOUT_CONEXION,
+        TIMEOUT_LECTURA,
+    )
 
 from core.constants import (
     FLAT_PRICE_PRODUCT_IDS,
@@ -23,6 +30,7 @@ from core.constants import (
 )
 from core.models import FailedOrder, RucCache, Sucursal
 from core.forms import SucursalForm
+from core.woocommerce import TIMEOUT_WOOCOMMERCE, WooCommerceAPI
 from core.sucursales import completar_desde_woocommerce, opciones_de_punto_de_venta
 from django.test import TestCase, override_settings
 
@@ -1562,3 +1570,162 @@ class SucursalFormTest(TestCase):
         self.assertTrue(form.is_valid(), form.errors)
         self.assertEqual(form.cleaned_data["bims_posale_id"], 99)
         self.assertIn("BIMS", form.aviso_bims)
+
+
+class TimeoutsBimsTest(TestCase):
+    """
+    Toda llamada a BIMS lleva timeout, y los reintentos tienen presupuesto.
+
+    Antes solo `login()` tenía timeout: las otras 12 llamadas usaban
+    `self.session.get/post` sin él, así que un BIMS que acepta la conexión y no
+    responde bloqueaba un worker **sin límite**. Con `--workers 3`, tres de esas
+    y el integrador dejaba de atender — el motivo por el que existe el reinicio
+    cada 6 horas en el cron.
+
+    Y un timeout por request no alcanza: 5 reintentos más la conmutación de host
+    pueden pasar los `--timeout 120` de gunicorn, que mata al worker **por
+    señal**. Un worker matado por señal no ejecuta el `except` que graba el
+    `FailedOrder`, así que la orden desaparece sin factura y sin registro. De ahí
+    el presupuesto global.
+
+    Los tests interceptan `HTTPAdapter.send`, que es donde `timeout` llega de
+    verdad: no viaja dentro de la PreparedRequest.
+    """
+
+    _CONTACTO_OK = {"status": "ok", "count": 1, "data": [{"Contact": {"id": "7"}}]}
+
+    def _api(self):
+        with patch.object(BimsApi, "login", return_value="sid"):
+            return BimsApi()
+
+    def _send_ok(self, capturados):
+        def fake_send(adapter_self, request, **kwargs):
+            capturados.append(kwargs.get("timeout"))
+            respuesta = requests.Response()
+            respuesta.status_code = 200
+            respuesta._content = json.dumps(self._CONTACTO_OK).encode("utf-8")
+            respuesta.request = request
+            return respuesta
+
+        return fake_send
+
+    def _escenario_sin_respuesta(self, capturados, paso=15.0):
+        """
+        Cada intento consume `paso` segundos de reloj y falla por red.
+
+        El reloj lo mueven el propio envío y el `sleep` parcheado, así que el
+        presupuesto se agota igual que en producción pero sin esperar de verdad.
+        """
+        reloj = {"t": 0.0}
+
+        def monotonic():
+            return reloj["t"]
+
+        def dormir(segundos):
+            reloj["t"] += segundos
+
+        def fake_send(adapter_self, request, **kwargs):
+            capturados.append(kwargs.get("timeout"))
+            reloj["t"] += paso
+            raise requests.ConnectionError("BIMS no responde")
+
+        return monotonic, dormir, fake_send
+
+    # ── Timeout por request ─────────────────────────────────────────────────
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_toda_llamada_a_bims_lleva_timeout(self):
+        api = self._api()
+        capturados = []
+        with patch.object(requests.adapters.HTTPAdapter, "send", self._send_ok(capturados)):
+            api.list_contacts("123456", "CI")
+        self.assertEqual(capturados, [(TIMEOUT_CONEXION, TIMEOUT_LECTURA)])
+
+    @override_settings(BIMS_API_KEY="")
+    def test_el_login_lleva_timeout_de_conexion_y_de_lectura(self):
+        """Antes tenía `timeout=30`: un número solo, sin límite de conexión."""
+        capturados = []
+        cuerpo = {"status": "ok", "data": {"Session": {"id": "sid"}}}
+
+        def fake_send(adapter_self, request, **kwargs):
+            capturados.append(kwargs.get("timeout"))
+            respuesta = requests.Response()
+            respuesta.status_code = 200
+            respuesta._content = json.dumps(cuerpo).encode("utf-8")
+            respuesta.request = request
+            return respuesta
+
+        with patch.object(requests.adapters.HTTPAdapter, "send", fake_send):
+            BimsApi()
+        self.assertEqual(capturados, [(TIMEOUT_CONEXION, TIMEOUT_LECTURA)])
+
+    # ── Presupuesto global ──────────────────────────────────────────────────
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_el_presupuesto_corta_los_reintentos_y_falla_limpio(self):
+        """
+        Falla con `BimsTransientError` en vez de agotar los 5 intentos: eso es lo
+        que permite que `process_order` grabe el `FailedOrder`.
+        """
+        api = self._api()
+        capturados = []
+        monotonic, dormir, fake_send = self._escenario_sin_respuesta(capturados)
+        with patch("core.bims.time.monotonic", monotonic), patch(
+            "core.bims.time.sleep", dormir
+        ), patch.object(requests.adapters.HTTPAdapter, "send", fake_send):
+            with self.assertRaises(BimsTransientError):
+                api.list_contacts("123456", "CI")
+        # 40 s de presupuesto y 17 s por vuelta (15 de request + 2 de espera):
+        # entran 3 intentos, no los 5 de max_retries.
+        self.assertEqual(len(capturados), 3)
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_el_timeout_de_lectura_se_recorta_al_presupuesto_restante(self):
+        """
+        Sin esto el presupuesto sería decorativo: un intento que arranca a los
+        39 s podría correr hasta los 69.
+        """
+        api = self._api()
+        capturados = []
+        monotonic, dormir, fake_send = self._escenario_sin_respuesta(capturados)
+        with patch("core.bims.time.monotonic", monotonic), patch(
+            "core.bims.time.sleep", dormir
+        ), patch.object(requests.adapters.HTTPAdapter, "send", fake_send):
+            with self.assertRaises(BimsTransientError):
+                api.list_contacts("123456", "CI")
+        self.assertEqual(capturados, [(5, 30), (5, 23), (5, 6)])
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_la_conmutacion_de_host_comparte_el_presupuesto(self):
+        """No recibe un presupuesto nuevo: si se agotó, no se prueba el otro host."""
+        api = self._api()
+        api.fallback_url = "http://otro.bims.test.local"
+        capturados = []
+        monotonic, dormir, fake_send = self._escenario_sin_respuesta(capturados)
+        with patch("core.bims.time.monotonic", monotonic), patch(
+            "core.bims.time.sleep", dormir
+        ), patch.object(requests.adapters.HTTPAdapter, "send", fake_send):
+            with self.assertRaises(BimsTransientError):
+                api.list_contacts("123456", "CI")
+        self.assertEqual(len(capturados), 3)
+
+    def test_el_presupuesto_entra_en_la_ventana_de_gunicorn(self):
+        """Con 2-3 llamadas a BIMS por orden, tiene que quedar margen bajo 120 s."""
+        self.assertLessEqual(PRESUPUESTO_REINTENTOS * 3, 120)
+        self.assertGreater(TIMEOUT_LECTURA, 12.47)  # el request legítimo más lento medido
+
+
+class TimeoutWooCommerceTest(TestCase):
+    """
+    El timeout de WooCommerce tiene que ser menor al de gunicorn.
+
+    Estaba en 480 s — cuatro veces los 120 s de gunicorn, así que cualquier
+    llamada lenta hacía que gunicorn matara al worker en el medio, perdiendo la
+    orden sin grabar el `FailedOrder`.
+    """
+
+    def test_es_menor_al_timeout_de_gunicorn(self):
+        self.assertLess(TIMEOUT_WOOCOMMERCE, 120)
+
+    def test_el_cliente_se_construye_con_ese_timeout(self):
+        self.assertEqual(WooCommerceAPI().wcapi.timeout, TIMEOUT_WOOCOMMERCE)

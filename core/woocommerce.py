@@ -5,6 +5,15 @@ from django.conf import settings
 from typing import Union, List, Optional
 
 
+# Estaba en 480 s: cuatro veces los `--timeout 120` de gunicorn. Cualquier
+# llamada que pasara los 120 s hacía que gunicorn matara al worker POR SEÑAL, y
+# un worker matado por señal no ejecuta el `except` que graba el FailedOrder: la
+# orden se perdía sin factura y sin registro. Ojo que `get_product` se llama una
+# vez por ítem de la orden, así que este valor se multiplica por la cantidad de
+# ítems; WooCommerce vive en el mismo servidor y responde rápido.
+TIMEOUT_WOOCOMMERCE = 30
+
+
 class WooCommerceAPI:
     """
     Provides services to interact with a WooCommerce website
@@ -30,7 +39,7 @@ class WooCommerceAPI:
 
         verify_ssl = getattr(settings, "WOOCOMMERCE_VERIFY_SSL", True)
         self.wcapi = WCAPI(
-            url, key, secret, version="wc/v3", timeout=480, verify_ssl=verify_ssl
+            url, key, secret, version="wc/v3", timeout=TIMEOUT_WOOCOMMERCE, verify_ssl=verify_ssl
         )
 
     def get_products(self, **kwargs):

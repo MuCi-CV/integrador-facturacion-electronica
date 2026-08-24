@@ -18,6 +18,29 @@ logging.basicConfig(
 # Logger dedicado para comunicación con BIMS API
 bims_logger = logging.getLogger("bims_api")
 
+# ── Límites de tiempo ────────────────────────────────────────────────────────
+# Antes solo `login()` tenía timeout. Las otras 12 llamadas iban sin ninguno, así
+# que un BIMS que acepta la conexión y no responde bloqueaba un worker de
+# gunicorn para siempre. Con `--workers 3`, tres de esas y el integrador dejaba
+# de atender: es la causa del reinicio cada 6 horas que hay en el cron.
+TIMEOUT_CONEXION = 5
+# 30 s es 2,4× el request legítimo más lento medido en producción (12,47 s en un
+# `create_sale` el 2026-08-24).
+TIMEOUT_LECTURA = 30
+
+# Presupuesto total de UNA llamada, reintentos y conmutación de host incluidos.
+#
+# Un timeout por request no alcanza: 5 intentos de 30 s más la conmutación
+# llegarían a ~316 s, y gunicorn corre con `--timeout 120`. Al pasarse, gunicorn
+# mata al worker **por señal**, y un worker matado por señal no ejecuta el
+# `except` que graba el `FailedOrder`: la orden desaparece sin factura y sin
+# rastro. Con 40 s, dos o tres llamadas a BIMS por orden entran cómodas.
+#
+# Ojo: el presupuesto es por LLAMADA, no por orden. Un presupuesto por orden
+# habría que pasarlo desde la vista y toca services.py y views.py; con este
+# margen no hace falta.
+PRESUPUESTO_REINTENTOS = 40
+
 
 def _get_caller_name():
     """Obtiene el nombre del método que originó la llamada a BIMS."""
@@ -162,7 +185,9 @@ class BimsApi:
 
         start_time = time.time()
         try:
-            res = requests.post(url=url, json=body, timeout=30)
+            res = requests.post(
+                url=url, json=body, timeout=(TIMEOUT_CONEXION, TIMEOUT_LECTURA)
+            )
             elapsed = time.time() - start_time
 
             try:
@@ -191,6 +216,10 @@ class BimsApi:
             raise e
 
     def _request_with_relogin(self, method, url, **kwargs):
+        # Único embudo de las 12 llamadas a BIMS: garantiza que ninguna salga sin
+        # timeout. `_retry_loop` ya lo fija recortado al presupuesto restante;
+        # este default cubre a quien llame acá directo, sin pasar por el retry.
+        kwargs.setdefault("timeout", (TIMEOUT_CONEXION, TIMEOUT_LECTURA))
         caller = _get_caller_name()
         method_name = method.__name__.upper()
         params = kwargs.get("params", {})
@@ -282,8 +311,11 @@ class BimsApi:
 
 
     def _retry_request(self, method, url, max_retries=5, retry_delay=2, **kwargs):
+        # Se calcula UNA vez: la conmutación de host comparte este presupuesto en
+        # vez de recibir uno nuevo, o el peor caso se duplicaría.
+        limite = time.monotonic() + PRESUPUESTO_REINTENTOS
         try:
-            return self._retry_loop(method, url, max_retries, retry_delay, **kwargs)
+            return self._retry_loop(method, url, max_retries, retry_delay, limite, **kwargs)
         except BimsTransientError:
             alternate_url = self._alternate_base_url(url)
             if alternate_url is None:
@@ -294,11 +326,22 @@ class BimsApi:
             )
             bims_logger.warning("══════ BIMS FALLBACK ══════")
             bims_logger.warning(f"Conmutando a URL alternativa: {alternate_url}")
-            return self._retry_loop(method, alternate_url, max_retries, retry_delay, **kwargs)
+            return self._retry_loop(
+                method, alternate_url, max_retries, retry_delay, limite, **kwargs
+            )
 
-    def _retry_loop(self, method, url, max_retries, retry_delay, **kwargs):
+    def _retry_loop(self, method, url, max_retries, retry_delay, limite, **kwargs):
         last_error_details = None
         for attempt in range(1, max_retries + 1):
+            restante = limite - time.monotonic()
+            if restante <= 0:
+                raise BimsTransientError(
+                    f"Presupuesto de {PRESUPUESTO_REINTENTOS}s agotado para {url} "
+                    f"tras {attempt - 1} intentos. Last error: {last_error_details}"
+                )
+            # Recortar la lectura al restante: sin esto el presupuesto sería
+            # decorativo, porque un intento que arranca al límite correría entero.
+            kwargs["timeout"] = (TIMEOUT_CONEXION, min(TIMEOUT_LECTURA, restante))
             try:
                 response_data = self._request_with_relogin(method, url, **kwargs)
             except BimsBusinessError:
