@@ -1,150 +1,169 @@
-# Handoff — sesión del 2026-08-19
+# Handoff — sesión del 2026-08-24
 
-> Sesión corta y de dos mitades: se cerró la limpieza pendiente del merge anterior y se arrancó
-> el diseño del próximo objetivo grande. El diseño **se frenó a propósito** en su primera
-> pregunta, porque depende de un dato que no teníamos a mano.
+> Sesión de diagnóstico y arreglo. Se buscó la causa del corte de facturación del viernes, se
+> descartó una primera hipótesis con evidencia, se encontró la verdadera —una cookie— y se arregló,
+> validó contra la API viva y desplegó el mismo día. La migración a API Key vuelve a estar en
+> producción, esta vez con los tres agujeros conocidos cerrados.
 
 ## Estado al cierre
 
 | | |
 |---|---|
-| Rama activa | `main` — working tree limpio |
-| Remoto | `github/main` sincronizado (el handoff del 18 se pusheó: `370e99a..bd5a3d2`) |
-| Ramas remotas | `feature/omitir-productos-monto-cero` **borrada** |
-| Producción | Sigue corriendo `08c7f7c` **en la rama vieja** — el pase a `main` NO se hizo |
-| Código | Sin cambios: cero commits de código hoy |
+| Rama activa | `feature/migracion-api-key` — pusheada a `origin` |
+| Commit del fix | `41a1f86` |
+| **Producción** | Rama `feature/migracion-api-key`, **modo API Key**, reiniciada 13:56:20 UTC |
+| `.env` de producción | `BIMS_URL=in.bims.app` · **`BIMS_FALLBACK_URL` comentada** |
+| Tests | **88/88 en verde**; `core/bims.py` compila en el Python 3.7.17 del servidor |
+| Validación contra la API viva | ✅ 5 requests consecutivos, jar vacío |
+| Validación con órdenes reales | ⏳ **pendiente** — el lunes no hay ventas |
 
 ---
 
-## 1. Lo que se cerró hoy
+## 1. La causa del corte del viernes: una cookie
 
-### Push del handoff y borrado de la rama mergeada
+**Síntoma reportado:** los pedidos no llegaban a BIMS y no se generaban facturas.
 
-Ambos hechos. Lo relevante no es el resultado sino **cómo**: se pusheó con el token `gho_` de
-`gh` a través de un credential helper efímero, sin PAT y sin persistir nada.
+**El error real, en el host correcto:**
 
-```bash
-git -c credential.helper='!f() { echo username=x-access-token; echo "password=$(gh auth token)"; }; f' push github main
+```
+BIMS denegó el acceso a https://in.bims.app/api/contacts/ con API Key:
+Session ID no coincide con la cookie de sesión activa. (code 401)
 ```
 
-Esto **corrige una creencia previa** de los handoffs anteriores: se daba por hecho que el token de
-`gh` solo servía para la API (abrir PRs) y que para pushear hacía falta un PAT de la cuenta
-`MuCi-CV`. No es así — los tokens OAuth de `gh` se comportan como los clásicos. De acá en más,
-pushear no requiere ningún PAT.
+**Causa raíz:** `81eb9ba` cambió los 10 métodos de `requests.get/post` (sin estado) a
+`self.session.get/post` para ganar keep-alive, y con eso heredó un **cookie jar que nunca fue
+intencional**. BIMS devuelve una cookie de sesión; desde el segundo request esa cookie viaja junto al
+header `X-API-Key` y BIMS rechaza la combinación con `code: 401`. Como en modo API Key un 401 es
+`BimsBusinessError` **terminal**, la orden muere sin reintento.
 
-### Orden alterado en el borrado de la rama
+**La firma que lo prueba — 3 workers, 3 éxitos, después nada.** `gunicorn --workers 3`, cada worker con
+su propio singleton `bims = BimsApi()` y su propio jar. El primer request de cada worker sale con jar
+vacío:
 
-El handoff del 18 pedía borrar la rama remota **después** de pasar producción a `main`. Se borró
-antes. Se verificó primero que su tip (`370e99a`) fuera ancestro de `main`, así que **ningún commit
-se perdió** — `main` los contiene a todos.
-
-Consecuencia real, una sola: el servidor sigue con esa rama en checkout, y ahora un `git pull`
-pelado ahí falla con *"your configuration specifies to merge with the ref ... which does not
-exist"*. El deploy de abajo no se ve afectado porque arranca con `fetch --prune` + `checkout main`.
-Si por algún motivo hiciera falta revivirla:
-
-```bash
-git push github 370e99a:refs/heads/feature/omitir-productos-monto-cero
-```
-
-### Lo que NO se hizo, y por qué
-
-| Pendiente | Motivo |
-|---|---|
-| Pasar producción a `main` | **Sin acceso.** La clave `anthropic_readonly_muciserver` no es aceptada por `root@integrador.muci.org` (159.89.228.18): `Permission denied (publickey)`. Lo tiene que correr Carlos. |
-| Revocar el PAT | Decisión explícita de Carlos: no esta semana. |
-| Chequeos de `runretryfaileds.sh` | Postergado hasta terminar el objetivo en curso. |
-
-**Deploy pendiente** (el `cp` no es opcional: `main` no trackea `bims_api.log`, así que el checkout
-lo borra del working tree, y sin reiniciar el proceso sigue escribiendo a un inodo borrado):
-
-```bash
-cd /var/www/integrador
-cp bims_api.log /root/bims_api.log.bak-$(date +%F)
-git fetch origin --prune
-git checkout main && git pull origin main
-/root/.local/share/virtualenvs/integrador-ObaHlHmv/bin/python manage.py migrate
-systemctl restart mucintegrador.service
-systemctl is-active mucintegrador.service
-```
-
----
-
-## 2. El próximo objetivo: preparar el integrador para el hub → CRM
-
-Se abrió el diseño de lo que pide `/home/vallory/IA/arquitectura/integrador-facturacion-flujo.md`
-(el doc vive **fuera del repo**, no se carga solo). Clasificado como trabajo **arquitectural**:
-brainstorming → spec → plan. **No hay rama, ni spec, ni código todavía.**
-
-### Descomposición en cinco sub-proyectos
-
-El objetivo es demasiado grande para una sola spec. Cada uno lleva su propio ciclo:
-
-| | Sub-proyecto | Depende de |
+| Orden | Hora (log, UTC−3) | Resultado |
 |---|---|---|
-| **A** | Registro del evento al ingresar + estado por rama | — |
-| **B** | Modelo interno de pedido + cliente de origen tras una interfaz | — |
-| **C** | Rama CRM Krayin (pasos 1 y 4 del doc) | A |
-| **D** | Reintentos con backoff por rama | A |
-| **E** | Adaptador PrestaShop / Ticketera 2.0 | B |
+| 200350 | 16:02 | ✅ Sale 31235 ← *la orden "de validación" del viernes* |
+| 200353 | 16:04 | ✅ Sale 31236 |
+| 200359 | 16:57 | ✅ Sale 31237 |
+| 200361 | 17:00 | ❌ 401 cookie |
+| 200365 | 17:04 | ❌ 401 cookie |
+| 200373 | 17:51 | ❌ 401 cookie |
 
-**Carlos eligió empezar por A**, porque es el único que arregla algo que ya está roto hoy y porque
-C y D se apoyan encima.
+**Alcance real: 3 órdenes, todas recuperadas.** El reproceso las levantó el sábado 03:13–03:14 →
+Sales **31244, 31245, 31246**. Cero facturas perdidas. El sábado 22 hubo 18 ventas y 0 errores.
 
-### Los cuatro hallazgos que justifican A
+**Corrección de la cronología:** el rollback a `main` se hizo el **viernes 21:53 UTC**, no el sábado.
+La ventana rota fue de ~1 hora; cuando llegó el reporte ya estaba revertido.
 
-Verificados contra el código, no contra el doc:
-
-1. **`FailedOrder` no puede expresar el estado que el doc pide.** Un solo eje (`status`:
-   FAILED/COMPLETED, `models.py:29`) para toda la orden. No hay dónde escribir "BIMS ok, CRM
-   pendiente" — que es la primera fila de la tabla de errores del doc de arquitectura.
-2. **Nada se persiste al ingresar.** La primera escritura ocurre *después* de consultar WooCommerce
-   (`services.py:473`). Un crash antes de eso pierde el pedido sin dejar rastro.
-3. **El campo libre `message` ya funciona de canal de estado improvisado.**
-   `sync_bims_contacts.py:63` filtra por `message__startswith="Pausada: Esperando"`. Reformular ese
-   texto rompe el comando en silencio — el mismo tipo de trampa que ya vigilamos con
-   `ZERO_PRICE_SKIP_REASON`.
-4. **`order_id` no tiene constraint `unique`** (`models.py:28`). Dos webhooks simultáneos de la misma
-   orden pueden crear dos filas; desde ahí, todo `update_or_create` de esa orden explota con
-   `MultipleObjectsReturned`.
-
-Consumidores de `FailedOrder` que A va a tener que migrar: `services.py`, `admin.py` (dos vistas
-custom + una acción), `retryfaileds.py`, `sync_bims_contacts.py` y `tests.py`.
+> **La hipótesis que se descartó:** se sospechó primero de la conmutación *sticky* de
+> `_alternate_base_url` hacia un host donde la key es inválida. La evidencia la mató: el 401 venía de
+> `in.bims.app`, sin ninguna conmutación en el log. **El riesgo igual existe** — ver §4.
 
 ---
 
-## 3. La pregunta que frenó la sesión
+## 2. Por qué la validación del viernes no lo detectó
 
-**¿El procesamiento sigue dentro del request HTTP, o pasa a 202 + worker diferido?**
+Dos razones, y las dos son lecciones de método:
 
-Carlos se inclina por async, pero le preocupa que **la cantidad de workers sea un limitante para la
-capacidad del servidor**. Decidió no resolverlo a ojo. Es la decisión correcta: no se resuelve
-opinando.
+1. **Se validó con una sola orden**, inmediatamente después del reinicio: jar vacío, siempre pasa. Una
+   orden nunca alcanza para validar un cambio de transporte **con estado**. El mínimo es
+   `workers + 1`, porque recién ahí un worker atiende su segunda orden.
+2. **El deploy escalonado no podía agarrarlo.** La etapa con `BIMS_API_KEY` vacía ejercitó
+   `self.session` en **modo sesión**, donde el `?sid=` y la cookie coinciden. Solo rompe
+   **API Key + cookie**.
 
-Persistir el evento antes de procesar funciona en los dos esquemas; lo que cambia es **quién
-procesa**. Hoy `SalesView.post()` espera a que `process_order` termine —Woo, BIMS, caché de
-contactos— antes de responder.
+> **Lección de test más importante de la sesión:** los 6 tests de `81eb9ba` pasaban con el bug puesto
+> porque parchean **`requests.Session.send`**, y la extracción de cookies vive **dentro** de
+> `Session.send`. Parchear ahí saltea el cookie jar por completo. Para cualquier test de transporte
+> HTTP hay que interceptar **`HTTPAdapter.send`**, un nivel más abajo.
 
-### Datos que hay que juntar para responderla
+---
 
-En el servidor:
+## 3. El fix (`41a1f86`)
 
-```bash
-nproc; free -m
-systemctl cat mucintegrador.service | grep -i exec    # ¿cuántos workers hay hoy?
+**3 líneas de código productivo.** `_BlockAllCookies(cookiejar.DefaultCookiePolicy)` con `set_ok` y
+`return_ok` en `False`, aplicada con `self.session.cookies.set_policy(...)` en el `__init__`.
+
+Va en **los dos modos**, a propósito: la `Session` se adoptó solo por el keep-alive, y hasta `81eb9ba`
+los métodos usaban `requests` pelado —sin jar—, que es como `main` factura desde meses. "Sin cookies"
+es la configuración probada, no una nueva. La autenticación viaja siempre explícita (header o `?sid=`),
+así que ninguna cookie sostiene nada.
+
+**3 tests nuevos**, escritos primero y vistos fallar con el síntoma exacto de producción
+(`'Cookie' unexpectedly found in {..., 'X-API-Key': ..., 'Cookie': 'CAKEPHP=...'}`): que no se guarde
+la cookie, que el segundo request no la reenvíe, y que el modo sesión tampoco la acarree.
+
+**Validación contra la API viva**, 5 `get_contacts` consecutivos sobre una misma instancia:
+
+```
+sid: None | header X-API-Key: True
+1 ok | cookies en el jar: 0     ← acá moría el viernes
+2..5 ok | cookies en el jar: 0
 ```
 
-Y una pregunta que no es técnica: **¿quién llama a `/sales/` y qué hace con la respuesta?** Si es un
-webhook que ignora el body, pasar a 202 es gratis. Si del otro lado hay un plugin mostrándole el
-error a un cajero en el punto de venta, cambiar el contrato le rompe la pantalla a alguien.
+---
+
+## 4. El deploy de hoy, y el tercer agujero cerrado sin código
+
+Se aprovechó la trampa del `.env` a favor: se dejó la rama en disco **sin reiniciar**, así que
+producción siguió facturando con `main` mientras se validaba el código nuevo en un proceso aparte.
+Recién con las 5 respuestas `ok` se reinició.
+
+**El sticky fallback se cerró desde el `.env`, sin tocar código.** Como la API Key **solo es válida en
+`in.bims.app`**, el fallback a `bims.app` no puede ayudar, solo dañar: un hipo transitorio conmutaba el
+worker de forma *sticky* a un host donde la key da 401 terminal, y no volvía nunca. Con
+`BIMS_FALLBACK_URL` comentada, `_alternate_base_url` corta en su primera guarda y **nunca llega a
+mutar `self.base_url`**: la conmutación deja de ser improbable y pasa a ser inalcanzable.
+
+El costo: ante un hipo real, la orden falla tras los 5 reintentos en vez de conmutar. Queda en
+`FailedOrder`, Sentry lo recibe (`event_level=logging.ERROR`) y el reproceso la levanta. Ese camino ya
+estaba cubierto por `test_sin_secundaria_configurada_mantiene_comportamiento_actual`.
+
+**Pendiente:** el hazard sigue en el código para quien vuelva a poblar la variable. Falta la guarda
+por código (no conmutar cuando hay API Key) o, como mínimo, la advertencia en `.env.example`.
 
 ---
 
-## Para retomar
+## 5. Para mañana
 
-1. **Correr el deploy** de la sección 1 (necesita a Carlos en el servidor).
-2. **Juntar los datos de capacidad** de la sección 3. Con eso se destraba el diseño de A.
-3. **Retomar el brainstorming de A** desde esa pregunta. El resto del contexto está en la memoria
-   del proyecto (`project_preparacion_arquitectura_hub`).
-4. Sigue vivo de antes: **vigilar Sentry** por warnings de `precio negativo`, contando desde el
-   18/08 12:00 UTC. Y el **PAT sin revocar**, por decisión explícita, no por olvido.
+1. **Validar con 4+ órdenes facturables** (`workers + 1`). Buscar en `bims_api.log`: cero
+   `Caller: login`, cero `BIMS FALLBACK`, cero reintentos, tiempos cerca de **9 s** (no 42).
+2. **Recién entonces, mergear la rama a `main`** y devolver producción a `main`. El orden importa:
+   `checkout main` **antes** de borrar la rama.
+3. **`crontab -l` de root** — ver §6, es lo más urgente de los hallazgos.
+4. **`.env.example`**: documentar que `BIMS_FALLBACK_URL` es peligrosa en modo API Key.
+5. **Las tres preguntas para BIMS:** host canónico después del 30/09; el `openapi.json` documenta un
+   header que no funciona; y por qué `X-API-Key` + cookie de sesión da 401 en vez de que gane la key.
+
+---
+
+## 6. Hallazgos laterales
+
+- **⚠️ `runretryfaileds.sh` está roto y algo no documentado hace su trabajo.** El script hace
+  `cd /var/www/integrador.muci.org/backend`, ruta que **no existe** en el servidor: el `cd` falla, el
+  `source .venv/bin/activate` falla y `python manage.py retryfaileds` corre sin `manage.py` a la vista.
+  Pero el reproceso del sábado **sí ocurrió** (lote secuencial 03:13:57 / 03:14:26 / 03:14:39). Hoy la
+  recuperación de facturas depende de un mecanismo invisible, con un script en el repo que *parece* ser
+  el responsable y no lo es. **Revisar `crontab -l` de root.**
+- **Trampa de husos al leer logs:** el shell del servidor está en **UTC**, pero Django corre con
+  `TIME_ZONE = "America/Asuncion"` (**UTC−3**), así que los timestamps *dentro* de los `.log` están 3 h
+  atrás. Cruzar `ActiveEnterTimestamp` (UTC) contra el contenido de un log sin restar 3 h lleva a
+  conclusiones falsas — pasó en esta sesión.
+- **La rotación de `bims_api.log` se comió la evidencia del viernes.** Rota por tamaño con
+  `backupCount=3` (~3 MB); una corrida de `get_contacts` paginando 18.000 contactos escribe ~10 MB y
+  **quema las 4 ventanas en un minuto** (pasó el 23/08 a las 21:03). El histórico largo de órdenes
+  sobrevive solo en `bims_sync.log`. Vale bajarle el nivel de log a ese dump.
+- **Nombres deformados en el reproceso:** las 3 órdenes recuperadas crearon contactos nuevos
+  (18140–18142) con nombres tipo `C L A R I C E C O M P A S S O O M P A S S O` — letras espaciadas y un
+  fragmento duplicado. Bug independiente, sin diagnosticar, y ensucia BIMS con duplicados.
+- **Acceso SSH:** la vía vieja (`root@159.89.228.18` con `anthropic_readonly_muciserver`) **dejó de
+  funcionar**; el server rechaza la clave. La vigente es
+  `ssh -i ~/.ssh/muci anthropic_readonly@muci.org`. Ese usuario **no puede leer el `.env`** ni
+  `journalctl`, y `git` necesita `-c safe.directory=/var/www/integrador`.
+- **El push pelado funciona:** `git push origin <rama>` entró sin PAT ni credential helper efímero.
+  Antes se creía necesario armar el helper a mano.
+- **`.env.local` no estaba en `.gitignore`** (la regla era `.env` exacto). Corregido con `.env.*` +
+  `!.env.example`. Tenía `SECRET_KEY`, `DB_PASSWORD`, `WOOCOMMERCE_SECRET`, `BIMS_PASSWORD`,
+  `POS_LOOKUP_TOKEN` y la `BIMS_API_KEY`; un `git add -A` las publicaba.
+- Sigue vivo: **PAT sin revocar**, por decisión explícita de Carlos.
+- Sigue sin revisar: **201 `FailedOrder` en FAILED**, backlog viejo.

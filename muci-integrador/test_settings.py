@@ -28,6 +28,7 @@ WOOCOMMERCE_SECRET = "test_secret"
 WOOCOMMERCE_VERIFY_SSL = False
 BIMS_URL = "http://bims.test.local"
 BIMS_FALLBACK_URL = None
+BIMS_API_KEY = ""  # vacío => modo sesión (?sid=), que es el default de los tests
 BIMS_USER = "test_user"
 BIMS_PASSWORD = "test_password"
 BIMS_TENANT = "test_tenant"
