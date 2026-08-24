@@ -11,7 +11,12 @@ core/views.sentry.py
 *.pyc
 env.json
 
+# Variables de entorno: solo la plantilla se versiona.
+# `.env.*` cubre las variantes locales (.env.local, .env.bak, .env.prod...), que
+# llevan credenciales reales. La negacion va DESPUES o se pierde .env.example.
 .env
+.env.*
+!.env.example
 post.py
 app.log
 .aider*
