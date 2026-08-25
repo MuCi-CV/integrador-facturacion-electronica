@@ -2,7 +2,7 @@
 
 **Fecha:** 2026-08-25
 **Rama:** `feature/presupuesto-por-orden`
-**Estado:** Diseño aprobado en sus dos decisiones de fondo (contextvar; alcance BIMS + WooCommerce). Pendiente de revisión antes de implementar.
+**Estado:** ✅ **Aprobado para implementar** (2026-08-25). Decisiones cerradas: transporte por `contextvar`; alcance BIMS + WooCommerce; `PRESUPUESTO_ORDEN` = 90 s; `ContactLookupView` fuera de alcance.
 **Origen:** hallazgo 1 de la revisión de `feature/timeouts-bims`, desplegada el 2026-08-25.
 
 ## Problema
@@ -122,9 +122,8 @@ finally:
 Cubre también el botón de reintento del admin, que hace `POST` a `/sales/` y termina en
 `SalesView` → `process_order`.
 
-`ContactLookupView` recibe el mismo tratamiento con un presupuesto más corto (30 s): también
-corre bajo gunicorn y también puede colgar un worker. La diferencia es que si la matan no se
-pierde nada — es una consulta, no una escritura.
+**Es el único lugar donde se fija el deadline.** Las otras entradas HTTP quedan afuera; ver
+"Fuera de alcance".
 
 ### Integración en `bims.py`
 
@@ -186,7 +185,6 @@ quedar registrada como fallida y reintentable desde el admin.**
 | `PRESUPUESTO_ORDEN` | **90 s** | deja 30 s de margen para grabar el `FailedOrder` y responder |
 | `PRESUPUESTO_REINTENTOS` | 40 s | se mantiene como tope secundario por llamada |
 | `TIMEOUT_LECTURA` / `TIMEOUT_CONEXION` | 30 / 5 s | se mantienen |
-| Presupuesto de `ContactLookupView` | 30 s | es una consulta, no necesita más |
 
 El peor caso real queda en ~95 s (90 más un connect que arranque justo en el límite), bien
 por debajo de 120. Una orden normal tarda 10-20 s, así que el presupuesto **no debería
@@ -203,6 +201,14 @@ elegante al `ContextVar`.
 
 ## Fuera de alcance y por qué
 
+- **`ContactLookupView` y las demás entradas HTTP.** Se evaluó darles su propio presupuesto
+  —también corren bajo gunicorn y también pueden colgar un worker— y **se decidió dejarlas
+  afuera** (Carlos, 2026-08-25). La diferencia con la facturación es cualitativa: si a una
+  consulta la mata gunicorn **no se pierde nada**, porque no escribe. El daño que motiva
+  esta spec es la orden que desaparece sin `FailedOrder`, y eso solo pasa en
+  `process_order`. Mantener el alcance en un solo punto de entrada hace el cambio más chico
+  y más fácil de verificar. Si más adelante se quiere extender, el mecanismo ya está: es
+  llamar a `deadline.iniciar()` en la vista que corresponda.
 - **Hallazgo 3** (el `login()` del relogin usa 30 s fuera del presupuesto): solo ocurre en
   modo sesión, y producción corre en modo API Key desde el 2026-08-24. Se arregla cuando y
   si se vuelve a modo sesión.
