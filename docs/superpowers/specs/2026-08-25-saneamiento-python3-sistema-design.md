@@ -321,9 +321,14 @@ de menor a mayor riesgo. De los 105 paquetes de origen Ubuntu:
 
 | Tanda | Contenido | Estado |
 |---|---|---|
-| **A** | 60 paquetes sin librerías compartidas ni kernel (vim, curl, perl, snapd, cloud-init, `libmysqlclient21`…) | ✅ **aplicada** |
-| **B** | `openssl`, `libssl3`, `libpam*`, `libnss*`, `python3.10`, `libcurl`, `libkrb5` | ⏳ pendiente |
-| **C** | kernel (`linux-image-virtual`), `libc6`, `systemd` | ⏳ pendiente, **exige reboot** |
+| **A** | 60 paquetes sin librerías compartidas ni kernel (vim, curl, perl, snapd, cloud-init, `libmysqlclient21`…) | ✅ aplicada |
+| **B** | `openssl`, `libssl3`, `libpam*`, `libnss*`, `python3.10`, `libcurl`, `libkrb5` | ✅ aplicada |
+| **C** | kernel (`linux-image-virtual`), `libc6`, `systemd` | ✅ aplicada + reboot |
+
+**✅ Cerrado el 2026-08-25 ~21:00 UTC.** Las 105 actualizaciones de origen Ubuntu quedaron
+aplicadas y el servidor reinició con kernel `5.15.0-190-generic`. `apt-check` ya no reporta
+**ninguna** actualización de seguridad estándar (eran 91). Ver "Resultado de la ventana de
+parches" más abajo.
 
 La tanda A se aplicó con `NEEDRESTART_MODE=l` (instala pero **no** reinicia servicios) y
 `-o Dpkg::Options::=--force-confold` (conserva los archivos de configuración). Simulacro
@@ -342,7 +347,54 @@ php-fpm arriba = errores), y **`dbus`, `logind` y `user@0` no se pueden reinicia
 caliente** — `needrestart` los difiere a propósito. Un reboot los resuelve todos en orden y
 además activa el kernel nuevo.
 
-### ⚠️ El timer quedó deshabilitado
+### Resultado de la ventana de parches (2026-08-25, ~20:30–21:00 UTC)
+
+Se ejecutó con **muci.org en modo mantenimiento** (503 a nivel nginx, que no depende de que
+PHP ni WordPress estén vivos). Antes de empezar se verificó que no hubiera órdenes en vuelo:
+las dos de la última hora eran de monto 0 y ya estaban descartadas.
+
+**Respaldos tomados:**
+
+- `mysqldump` de las 4 bases en `/root/bk/db.sql.gz` — 221 MB, verificado íntegro por la
+  línea `-- Dump completed on 2026-08-25 20:38:25`.
+- **Snapshot del droplet** con la máquina apagada, tomado **antes** de aplicar B y C — para
+  que sirva como punto de retorno si los parches impidieran arrancar.
+
+**Se hizo en dos fases, una variable por vez** (mismo criterio que el saneamiento):
+
+1. **Arranque de prueba sin parches.** El servidor llevaba **12 semanas y 1 día** sin
+   reiniciar, así que primero se apagó, se tomó el snapshot y se encendió **sin parches
+   nuevos**. Volvió sano: 33 servicios, cero unidades en `failed`. Eso descartó "las 12
+   semanas" como causa antes de introducir la segunda variable.
+2. **Parches y reboot.** `45 upgraded, 4 newly installed, 0 to remove` (los 4 nuevos son las
+   imágenes del kernel 190). `dpkg --audit` limpio antes de reiniciar.
+
+**Estado final verificado:**
+
+| | |
+|---|---|
+| Kernel | `5.15.0-190-generic` |
+| Actualizaciones de seguridad estándar | **0** (eran 91) |
+| Unidades en `failed` | ninguna |
+| Servicios | mucintegrador, nginx, mariadb, supervisor, php8.1/8.2/8.4-fpm, redis → `active` |
+| Sitios | muci.org, integrador, bot → **200** |
+| Webhook `Venta Entrada` | **`active`, 0 fallas** |
+| `unattended-upgrade --dry-run` | **`rc=0`** |
+
+**El webhook merece su propio párrafo.** WooCommerce **deshabilita solo** los webhooks que
+acumulan 5 fallas consecutivas — y hay prueba viva en este mismo sistema: el webhook 2
+(`Refund order`) está `disabled` con `failure_count 6`. Si durante la ventana el webhook 1
+(`Venta Entrada`) hubiera acumulado 5 fallas, **la facturación se habría cortado en silencio**
+hasta que alguien lo reactivara a mano. El modo mantenimiento lo evitó: sin órdenes nuevas no
+hay entregas que fallar. **En cualquier ventana futura, verificar ese webhook es obligatorio.**
+(El webhook 2 debe quedar `disabled`: apunta a una URL de staging y está obsoleto.)
+
+**Lo que queda pendiente y por qué no se tocó:** 67 actualizaciones de repos de terceros
+(MariaDB desde `dlm.mariadb.com`, PHP desde sury.org, netdata) y 12 de ESM Apps que requieren
+suscripción a Ubuntu Pro. `unattended-upgrades` no las alcanza porque `Allowed-Origins` solo
+cubre orígenes Ubuntu. Son decisiones aparte.
+
+### ⚠️ El timer quedó deshabilitado — ✅ y se rehabilitó al cerrar
 
 ```
 systemctl disable --now apt-daily-upgrade.timer
@@ -351,10 +403,11 @@ systemctl disable --now apt-daily-upgrade.timer
 Se hizo para que `unattended-upgrades` no aplicara las tandas B y C **solo, a las 03:53 de
 Asunción**, reiniciando mariadb, php-fpm, el integrador y dbus sin nadie mirando.
 
-> **Rehabilitarlo es obligatorio apenas termine la ventana de B, C y el reboot:**
+> **✅ Rehabilitado el 2026-08-25 al cerrar la ventana**, y verificado en `enabled`:
 > ```
 > systemctl enable --now apt-daily-upgrade.timer
 > ```
+> Se deja escrito igual porque la regla vale para cualquier ventana futura.
 > Si se olvida, el servidor vuelve a quedar sin actualizaciones automáticas de seguridad
 > — el mismo problema que motivó esta spec, pero **sin el síntoma visible** que permitió
 > detectarlo (`unattended-upgrades` en `failed`). Es la deuda más fácil de olvidar y la más
