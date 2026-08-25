@@ -2,8 +2,10 @@
 
 **Fecha:** 2026-08-25
 **Rama:** `fix/saneamiento-python3-sistema`
-**Estado:** Aprobado para ejecución. Pre-vuelo verificado en verde el 2026-08-25.
-**Ejecuta:** Carlos, manualmente, en una ventana elegida (prevista 13:00 hora de Asunción).
+**Estado:** ✅ **EJECUTADO el 2026-08-25 ~18:20 UTC** (15:20 Asunción). Ver
+"Resultado de la ejecución" al final: salió bien, con **un imprevisto** que hubo que
+arreglar en caliente (pipenv).
+**Ejecutó:** Carlos, manualmente.
 **Relación con otros proyectos:** es **prerrequisito** de la migración del integrador a
 Python 3.12 + Django 5.2 (proyecto B, sin spec todavía).
 
@@ -161,8 +163,17 @@ paginados de **solo lectura** contra BIMS, tarda un par de minutos y es idempote
 ### 5. Confirmar lo que se quería arreglar
 
 ```
-python3 -c "import apt_pkg; print('ok')"; /usr/lib/update-notifier/apt-check --human-readable; pro --version; systemctl start unattended-upgrades; systemctl is-failed unattended-upgrades
+python3 -c "import apt_pkg; print('ok')"; /usr/lib/update-notifier/apt-check --human-readable; pro --version
 ```
+
+> ⚠️ **NO arrancar `unattended-upgrades` acá.** La versión original de este runbook decía
+> `systemctl start unattended-upgrades`, y era un error: con parches acumulados, arrancarlo
+> los aplica en el acto, reinicia servicios y puede pedir reboot. La verificación segura es
+> en seco:
+>
+> ```
+> systemctl reset-failed unattended-upgrades; unattended-upgrade --dry-run --debug 2>&1 | tail -15
+> ```
 
 ### 6. Confirmar que nada más se cayó
 
@@ -211,3 +222,108 @@ paquetes.
   parches.
 - **Ventana horaria.** 13:00 de Asunción queda a dos horas del reinicio automático
   anterior (09:00) y dos del siguiente (15:00). Margen cómodo por ambos lados.
+
+---
+
+## Resultado de la ejecución (2026-08-25, ~18:20 UTC)
+
+Ejecutado a las 15:20 de Asunción, no a las 13:00. Quedó mejor: el reinicio automático de
+las 15:00 acababa de pasar, así que hubo ~5h40 de margen hasta el siguiente.
+
+### Lo que salió como se esperaba
+
+| Verificación | Antes | Después |
+|---|---|---|
+| `python3` | 3.7.17 | **3.10.12** |
+| `import apt_pkg` / `import gi` | rotos | **OK** |
+| `apt-check` | reventaba | **funciona** |
+| `pro --version` | `ModuleNotFoundError` | `37.2ubuntu~22.04` |
+| `mucintegrador` | active | **active**, reinicio limpio |
+| Venv del integrador | 3.7.17 | **3.7.17** (intacto, como se predijo) |
+| `supervisor` + worker bot-whatsapp | active / RUNNING | **active / RUNNING** |
+
+El análisis de aislamiento se confirmó: el venv del integrador es inmune porque
+`bin/python → /usr/bin/python3.7m` es absoluto.
+
+### El imprevisto: pipenv se rompió
+
+**`/usr/bin/pipenv` dejó de funcionar bajo Python 3.10.**
+
+```
+File "/usr/lib/python3/dist-packages/pipenv/vendor/requests/cookies.py", line 172
+  class RequestsCookieJar(cookielib.CookieJar, collections.MutableMapping):
+AttributeError: module 'collections' has no attribute 'MutableMapping'
+```
+
+Causa: el paquete de Ubuntu es **pipenv 11.9.0** (de 2018) y vendoriza un `requests` viejo
+que usa `collections.MutableMapping`, alias que **Python 3.10 eliminó**. El shebang de
+`/usr/bin/pipenv` es `#!/usr/bin/python3`, así que al girar las alternatives pasó a correr
+bajo 3.10 y murió.
+
+**Por qué no lo detectó el análisis de aislamiento:** se verificó con
+`python3.10 -c "import pipenv"`, que dio OK. Pero importar el paquete de nivel superior no
+ejercita `pipenv.core` → `pipenv.vendor.requests`, que es donde está la ruptura. **Lección:
+para verificar una herramienta CLI hay que ejecutarla, no importarla.** El mismo criterio
+que ya está anotado para los tests de transporte HTTP en el proyecto: hay que interceptar
+al nivel correcto.
+
+Impacto: el cron nocturno `sync_bims_contacts` habría fallado a las 00:00 UTC. No es
+crítico para facturación —solo llena `ContactCache`— pero habría quedado roto en silencio
+salvo por el log.
+
+### El arreglo aplicado
+
+Anclar pipenv a 3.7 en el crontab, igual que el venv está anclado a su intérprete:
+
+```
+0 0 * * * cd /var/www/integrador && /usr/bin/python3.7 /usr/bin/pipenv run python manage.py sync_bims_contacts >> /var/www/integrador/bims_sync.log 2>&1
+```
+
+Backup del crontab previo en `/root/crontab.bak-2026-08-25`.
+
+Validado corriendo el sync completo a mano: **38 páginas, `Total guardados: 17303`**, sin
+errores. Es la misma verificación fuerte que cerró el bug de la cookie de BIMS.
+
+Se evaluó la alternativa de sacar pipenv del camino llamando directo al `bin/python` del
+venv. **Se descartó**: congela una ruta que el proyecto B va a invalidar al reconstruir el
+venv, y si el venv viejo queda en disco el cron seguiría usándolo **en silencio**. Anclar
+pipenv falla ruidosamente, que es preferible.
+
+### Consecuencia para los despliegues
+
+**`pipenv install` también falla bajo 3.10.** Todo uso manual de pipenv necesita el prefijo:
+
+```
+cd /var/www/integrador && /usr/bin/python3.7 /usr/bin/pipenv install
+```
+
+### El backlog destapado
+
+Con `apt-check` funcionando por primera vez en mucho tiempo:
+
+```
+168 updates can be applied immediately.
+91 of these updates are standard security updates.
+```
+
+**91 actualizaciones de seguridad sin aplicar.** Es el costo acumulado del bug, medible
+recién ahora. Aplicarlas sigue siendo un no-objetivo de esta spec: es otra ventana, y
+algunas van a querer reboot.
+
+`unattended-upgrades` quedó en `failed` por la corrida anterior; hay que hacerle
+`reset-failed` y verificarlo **en seco** (`--dry-run`) antes de decidir la ventana de
+parches.
+
+## Deuda que hereda el proyecto B
+
+Ítems bloqueantes para la migración a Python 3.12 + Django 5.2:
+
+1. **Revisar el cron del sync.** Tiene `/usr/bin/python3.7` hardcodeado. Cuando B
+   reconstruya el venv hay que actualizarlo, y ahí conviene evaluar reemplazar pipenv por
+   una herramienta de este siglo.
+2. **No quitar `python3.7` del sistema** hasta que el punto 1 esté hecho, o el cron muere.
+3. **`python3` se queda en 3.10.** Ver "Regla permanente".
+4. **Decidir la ventana de los 91 parches**, idealmente antes de empezar B, para no mezclar
+   dos fuentes de cambio.
+5. **`cryptography` avisa que va a dejar de soportar Python 3.7.** Cuando eso pase, un
+   `pipenv install` puede dejar el venv irreconstruible. Es el reloj real del proyecto B.
