@@ -314,6 +314,73 @@ algunas van a querer reboot.
 `reset-failed` y verificarlo **en seco** (`--dry-run`) antes de decidir la ventana de
 parches.
 
+## Estado del backlog de parches (2026-08-25)
+
+Los 91 parches de seguridad que destapó `apt-check` se empezaron a aplicar **por tandas**,
+de menor a mayor riesgo. De los 105 paquetes de origen Ubuntu:
+
+| Tanda | Contenido | Estado |
+|---|---|---|
+| **A** | 60 paquetes sin librerías compartidas ni kernel (vim, curl, perl, snapd, cloud-init, `libmysqlclient21`…) | ✅ **aplicada** |
+| **B** | `openssl`, `libssl3`, `libpam*`, `libnss*`, `python3.10`, `libcurl`, `libkrb5` | ⏳ pendiente |
+| **C** | kernel (`linux-image-virtual`), `libc6`, `systemd` | ⏳ pendiente, **exige reboot** |
+
+La tanda A se aplicó con `NEEDRESTART_MODE=l` (instala pero **no** reinicia servicios) y
+`-o Dpkg::Options::=--force-confold` (conserva los archivos de configuración). Simulacro
+previo: `60 upgraded, 0 newly installed, 0 to remove`. Ningún servicio se reinició y todos
+siguieron `active`.
+
+### Por qué B y C exigen reboot y no reinicios sueltos
+
+`needrestart -b` reporta **23 servicios** corriendo con librerías viejas: `mariadb`,
+`mucintegrador`, `php8.1/8.2/8.4-fpm`, `redis-server` (×2), `supervisor`, `netdata`,
+`dbus`, `polkit`, `logind`, `packagekit`, `irqbalance`, `multipathd`, `user@0` y toda la
+familia `systemd-*`. (`nginx` no está en la lista.)
+
+Reiniciarlos a mano es peor que un reboot: habría que orquestar el orden (mariadb abajo con
+php-fpm arriba = errores), y **`dbus`, `logind` y `user@0` no se pueden reiniciar en
+caliente** — `needrestart` los difiere a propósito. Un reboot los resuelve todos en orden y
+además activa el kernel nuevo.
+
+### ⚠️ El timer quedó deshabilitado
+
+```
+systemctl disable --now apt-daily-upgrade.timer
+```
+
+Se hizo para que `unattended-upgrades` no aplicara las tandas B y C **solo, a las 03:53 de
+Asunción**, reiniciando mariadb, php-fpm, el integrador y dbus sin nadie mirando.
+
+> **Rehabilitarlo es obligatorio apenas termine la ventana de B, C y el reboot:**
+> ```
+> systemctl enable --now apt-daily-upgrade.timer
+> ```
+> Si se olvida, el servidor vuelve a quedar sin actualizaciones automáticas de seguridad
+> — el mismo problema que motivó esta spec, pero **sin el síntoma visible** que permitió
+> detectarlo (`unattended-upgrades` en `failed`). Es la deuda más fácil de olvidar y la más
+> cara.
+
+`apt-daily.timer` se dejó **habilitado** a propósito: solo refresca las listas, no instala
+nada, y mantiene honesto a `apt-check`.
+
+### Runbook de la ventana pendiente
+
+1. Confirmar acceso a la **consola web de DigitalOcean** y backup reciente de las bases.
+2. Aplicar los 45 restantes con `NEEDRESTART_MODE=l`.
+3. **Bajar MariaDB a mano y esperar** (`systemctl stop mariadb`). Si el flush del buffer
+   pool tarda más que `TimeoutStopSec` (90 s), systemd la mata con SIGKILL y el cierre
+   termina siendo sucio aunque el reboot sea "limpio".
+4. `reboot` por SSH.
+5. Verificar que vuelven: nginx, mariadb, los php-fpm, redis, supervisor, mucintegrador, y
+   los sitios.
+6. **Rehabilitar `apt-daily-upgrade.timer`.**
+7. Verificar `unattended-upgrade --dry-run` y que `apt-check` dé cero.
+
+> **Consola web ≠ Power Cycle.** Escribir `reboot` en la consola web de DigitalOcean es un
+> apagado limpio, igual que por SSH. **"Power Cycle" corta la corriente**: InnoDB arranca en
+> recuperación de crash y se pueden perder escrituras. Es solo para cuando la máquina está
+> colgada.
+
 ## Deuda que hereda el proyecto B
 
 Ítems bloqueantes para la migración a Python 3.12 + Django 5.2:
