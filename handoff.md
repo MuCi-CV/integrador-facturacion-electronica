@@ -1,242 +1,225 @@
-# Handoff — sesión del 2026-08-24
+# Handoff sesión del 2026-08-25
 
-> Sesión larga y de cuatro actos. Se diagnosticó el corte de facturación del viernes —**descartando una
-> primera hipótesis con evidencia**—, se arregló, se validó contra la API viva y se desplegó. Se
-> construyó y desplegó la gestión de sucursales, que era el pedido nuevo del día. Y al final, tirando
-> del hilo de "¿por qué el servicio se reinicia solo?", se encontró y arregló la causa de los cuelgues
-> que el integrador tenía hasta mediados de año.
+> Sesión larga. Empezó revisando dos features para mergear y terminó arreglando un problema
+> de seguridad del servidor que nadie sabía que existía. Tres cosas entraron a producción:
+> el merge de sucursales + API Key, el saneamiento del `python3` del sistema con 91 parches
+> de seguridad y un reboot, y el despliegue de los timeouts de BIMS.
 
 ## Estado al cierre
 
 | | |
 |---|---|
-| **Producción** | `feature/gestion-sucursales` (`bfdad62`), **modo API Key**, reiniciada 19:21 UTC |
-| `.env` de producción | `BIMS_URL=in.bims.app` · **`BIMS_FALLBACK_URL` comentada** |
-| BD de producción | tabla `core_sucursal` creada y sembrada (migraciones 0006/0007 aplicadas) |
-| Rama con todo | `feature/timeouts-bims` (`ffef255`) — **sin desplegar** |
-| `main` | `0e87826` — **sin tocar en todo el día** |
-| Tests | **122/122** en verde en la punta |
-| Validación pendiente | **4+ órdenes facturables**; al cierre pasó **una** |
+| **Producción** | rama **`main`**, commit `3b9773c` — ya no sigue una rama de feature |
+| Python del sistema | **3.10.12** (era 3.7.17) |
+| Venv del integrador | 3.7.17 + Django 3.2.25 (**sin cambios**) |
+| Kernel | **5.15.0-190-generic** |
+| Parches de seguridad estándar | **0 pendientes** (eran 91) |
+| Tests | **122/122**, verificados por primera vez **sobre el stack real** |
+| Ramas abiertas | `fix/saneamiento-python3-sistema`, `feature/presupuesto-por-orden` |
 
-### Las cuatro ramas y cómo se contienen
-
-```
-main 0e87826
- ├── feature/migracion-api-key  1754190   (fix del cookie + handoff)
- └── feature/gestion-sucursales bfdad62   ← EN PRODUCCIÓN (mergeó api-key adentro)
-      └── feature/timeouts-bims ffef255   ← la punta, contiene todo
-```
-
-`feature/timeouts-bims` contiene absolutamente todo lo del día, así que desplegarla no pierde nada.
-
----
-
-## 1. El corte del viernes: era una cookie
-
-**Síntoma:** los pedidos no llegaban a BIMS. **Error real, en el host correcto:**
+### Las ramas
 
 ```
-BIMS denegó el acceso a https://in.bims.app/api/contacts/ con API Key:
-Session ID no coincide con la cookie de sesión activa. (code 401)
+main 3b9773c ← EN PRODUCCIÓN (sucursales + API Key + timeouts)
+├── fix/saneamiento-python3-sistema  ac0d34d  (spec del saneamiento, ejecutado)
+└── feature/presupuesto-por-orden    2a22286  (spec aprobada, sin implementar)
 ```
 
-**Causa raíz:** `81eb9ba` cambió los 10 métodos de `requests.get/post` (sin estado) a
-`self.session.get/post` para ganar keep-alive, y heredó un **cookie jar que nunca fue intencional**.
-BIMS devuelve una cookie de sesión; desde el segundo request esa cookie viaja junto al header
-`X-API-Key` y BIMS rechaza la combinación. Como en modo API Key un 401 es terminal, la orden muere sin
-reintento.
-
-**La firma que lo prueba — 3 workers, 3 éxitos, después nada.** Cada worker tiene su propio singleton
-`bims = BimsApi()` y su propio jar; el primer request de cada uno sale con jar vacío:
-
-| Orden | Hora (log) | Resultado |
-|---|---|---|
-| 200350 | 16:02 | ✅ Sale 31235 ← *la orden "de validación" del viernes* |
-| 200353 | 16:04 | ✅ Sale 31236 |
-| 200359 | 16:57 | ✅ Sale 31237 |
-| 200361 / 200365 / 200373 | 17:00 / 17:04 / 17:51 | ❌ 401 cookie |
-
-**Alcance real: 3 órdenes, todas recuperadas** el sábado → Sales 31244, 31245, 31246. El rollback a
-`main` se hizo el **viernes 21:53 UTC**, no el sábado: la ventana rota fue de ~1 hora y ya estaba
-revertida cuando llegó el reporte.
-
-> **La hipótesis que se descartó:** se sospechó primero de la conmutación *sticky* de
-> `_alternate_base_url` hacia un host donde la key es inválida. La evidencia la mató — el 401 venía de
-> `in.bims.app`, sin conmutación alguna. El riesgo igual era real y **se cerró desde el `.env`**
-> comentando `BIMS_FALLBACK_URL`: sin secundaria, `_alternate_base_url` corta en su primera guarda y
-> nunca llega a mutar `self.base_url`.
-
-### Por qué la validación del viernes no lo detectó
-
-1. **Se validó con una sola orden**, justo después del reinicio: jar vacío, siempre pasa. Una orden no
-   alcanza para validar un cambio de transporte **con estado**. El mínimo es `workers + 1`.
-2. **El deploy escalonado no podía agarrarlo:** la etapa con `BIMS_API_KEY` vacía ejercitó
-   `self.session` en modo sesión, donde el `?sid=` y la cookie coinciden. Solo rompe API Key + cookie.
-
-> **Lección de test más importante del día:** los 6 tests de `81eb9ba` pasaban con el bug puesto porque
-> parchean **`requests.Session.send`**, y la extracción de cookies vive **dentro** de `Session.send`.
-> Para cualquier test de transporte HTTP hay que interceptar **`HTTPAdapter.send`**, un nivel más abajo.
-> Lo mismo aplica a `timeout`, que tampoco viaja en la `PreparedRequest`.
-
-**El fix (`41a1f86`):** `_BlockAllCookies` con `set_ok`/`return_ok` en `False`, aplicada en el
-`__init__` para **los dos modos** — la `Session` se adoptó solo por el keep-alive y el jar nunca se
-quiso. Validado contra la API viva con 5 `get_contacts` seguidos sobre una misma instancia: `sid: None`,
-header presente, 5× `ok` con jar vacío.
+`feature/gestion-sucursales`, `feature/migracion-api-key` y `feature/timeouts-bims` ya están
+todas contenidas en `main` y se pueden borrar.
 
 ---
 
-## 2. Gestión de sucursales (`f45d7f0` + `bfdad62`)
+## 1. El merge de sucursales y API Key
 
-El mapeo cajero POS → punto de venta vivía hardcodeado en `POS_USER_ID_TO_POSALE`. Ahora es la tabla
-`Sucursal`, editable desde el Django admin.
+Se revisaron las dos features y se mergearon a `main` (fast-forward). Antes de mergear se
+verificó cómo se había comportado producción desde el despliegue del día anterior.
 
-**Tres tipos de fila:** los `cajero` apuntan a un usuario concreto de WordPress; `pos_sin_mapeo` y `web`
-son **reglas por defecto** sin usuario ni email, de fila única (lo garantiza `clean()`).
-**`bims_posale_id` vacío significa NO FACTURAR** — eso reemplaza el `if user_id_value == 2` que estaba
-hardcodeado y permite dar de baja cualquier cajero sin borrarlo.
+**Solo hubo una orden facturable en 18 horas** (200949 → Sale 31266). Las otras tres con
+monto > 0 eran: una anterior al despliegue y **dos canceladas automáticamente por falta de
+pago**, que el integrador nunca vio — y correctamente. Las ~70 restantes eran de monto 0 (el
+evento gratuito del Eclipse Lunar) y se descartan antes de tocar el código de sucursales.
 
-**Las constantes quedan como red de seguridad:** si la tabla está vacía o la consulta falla, se usan
-ellas y se loguea el desvío. Una tabla nueva no puede tener el poder de frenar la facturación.
+**El bug de la cookie quedó cerrado, con evidencia mejor que 4 órdenes.** El cron
+`sync_bims_contacts` hizo **38 requests secuenciales paginados sobre una sola instancia
+`BimsApi`** en modo API Key y terminó con "Total guardados: 17300", cero errores. Con el bug
+puesto, el request #2 habría muerto. Los 6 `401` de cookie que hay en el log son todos del
+2026-08-21.
 
-**El alta resuelve datos contra WooCommerce:** cargás el email y `save_model` trae el `wp_user_id` (o al
-revés). Los cajeros POS **son "customers" de `wc/v3`** con rol `fooeventspos_cashier` — no hace falta la
-API de WordPress. Ojo: **`role=all` es obligatorio** al buscar, o `wc/v3` solo devuelve los `customer`.
+> **Lección reutilizable:** el cron nocturno de contactos es el mejor banco de pruebas del
+> proyecto para cualquier cosa con estado en el transporte HTTP — 38 requests sobre una
+> instancia reusada, gratis, todas las noches. Vale más que esperar órdenes reales.
 
-**Y el punto de venta se elige de una lista traída de BIMS**, no se escribe. Escribirlo a mano permitía
-cargar un ID inexistente cuyo error aparecía recién al facturar. Sin caché: se consulta al abrir el
-formulario, así que tarda unos segundos; si BIMS no responde, degrada al campo numérico con un aviso.
+**El camino de cajero se validó aparte**, porque no hubo ni una venta POS en 18 horas. Se
+corrió el código real contra una copia exacta de la tabla `core_sucursal` de producción:
+6/6 casos correctos, ninguno cayendo a las constantes. Y se verificó que la semilla de la
+migración 0007 coincide exacto con lo que está vivo.
 
-> **Detalle no obvio:** `core/sucursales.py` importa `core.bims` **dentro** de la función, no arriba.
-> Ese módulo instancia `BimsApi()` en el import y en modo sesión eso hace login; importarlo arriba haría
-> que **abrir el admin dependiera de que BIMS esté arriba**.
-
-### Quién define el `posale_id`
-
-| Sistema | Dueño de | Ejemplo |
-|---|---|---|
-| WordPress / WooCommerce | el usuario cajero: id, email, rol | `729`, sancosmos@muci.org, `fooeventspos_cashier` |
-| FooEvents POS | qué cajero hizo la venta | `_fooeventspos_user_id: "729"` |
-| **BIMS** | **el punto de venta y su id** | `4` = Caja San Cosmos |
-| El integrador | la traducción | `729 → 4` |
-
-Los 4 puntos de venta que tiene BIMS (`GET /posales/`, ids como **strings**):
-
-| ID | Nombre en BIMS | `bill_code` |
-|---|---|---|
-| 1 | Caja Tatakualab | 001 |
-| 4 | Caja San Cosmos | 002 |
-| 6 | Caja WEB | 003 |
-| 7 | **Caja Fund MuCi** | 004 |
-
-**El `7` no es un cajón genérico:** es un punto de venta real. Las ventas de cajeros no registrados se
-facturan a nombre de Fund MuCi. Y **no hay ninguno libre** — para una sucursal nueva hay que crear el
-punto de venta en BIMS primero (`POST /api/posales/add.json`).
-
-**Varios cajeros pueden compartir un punto de venta** y el modelo ya lo soportaba: `wp_user_id` es
-`unique`, `bims_posale_id` no.
-
-**Verificado en producción sin desplegar**, con un worktree aparte + symlink al `.env`: 6 de 6, con
-resolución `729→4`, `3→1`, `2→None`, `99999→7`, `web→6` y las dos direcciones de WooCommerce contra la
-tienda real.
+**Bonus no planificado:** Carlos había dado de alta "Giftshop Movil" desde el admin dos
+minutos después del reinicio. O sea que el formulario, el desplegable de puntos de venta de
+BIMS y la resolución email ↔ ID contra WooCommerce funcionaron contra producción real.
+(Apunta al posale 1, Caja Tatakualab, **a propósito**.)
 
 ---
 
-## 3. Timeouts y presupuesto de reintentos (`ffef255`, sin desplegar)
+## 2. El desfase de stacks
 
-Tirando del hilo "¿por qué hay un cron que reinicia el servicio cada 6 horas?", salió esto:
+Al mirar por qué producción corría Python 3.7 apareció algo que invalida una suposición
+usada muchas veces:
 
-**Solo `login()` tenía timeout.** Las otras 12 llamadas usaban `self.session.get/post` sin ninguno, así
-que un BIMS que acepta la conexión y no responde bloqueaba un worker **sin límite**. Con `--workers 3`,
-tres de esas y el integrador deja de atender. (`core/ruc.py` sí tenía `timeout=5`, y el `CLAUDE.md` lo
-exige: era un olvido, no una decisión.)
-
-**Y un timeout por request no alcanzaba.** 5 intentos × 30 s + la conmutación de host ≈ **316 s**,
-contra los **`--timeout 120`** de gunicorn. Al pasarse, gunicorn mata al worker **por señal**, y un
-worker matado por señal **no ejecuta el `except` que graba el `FailedOrder`**: la orden desaparece sin
-factura y sin registro.
-
-Lo implementado: timeout inyectado en `_request_with_relogin` (el embudo de las 12 llamadas, una línea
-en vez de 12 ediciones), conexión 5 s / lectura 30 s, y un **presupuesto de 40 s por llamada** con tres
-detalles que lo hacen real — no se arranca un intento nuevo si se agotó; el timeout de lectura **se
-recorta al restante** o el presupuesto sería decorativo; y la conmutación de host **comparte** el
-presupuesto. WooCommerce pasa de 480 s a 30 s. El presupuesto es por **llamada**, no por orden: uno por
-orden habría que pasarlo desde la vista y toca `services.py` y `views.py`.
-
-### La historia de los cuelgues
-
-Carlos: el integrador se colgaba seguido hasta ~mayo–julio y "si nadie lo reiniciaba quedaba colgado
-para siempre". Sospechaba de productos sin SKU o precio 0 — **falso**, esos son caminos en memoria que
-terminan en un `ValueError` → 400 en milisegundos. Los tres commits que atacaron la zona real:
-
-| Fecha | Commit | Qué arregló |
+| | Local | Producción |
 |---|---|---|
-| 13/05 | `b3cf2aa` | `res.json()` sin proteger → `ValueError` no capturado ante un 502/504 en HTML |
-| 29/06 | `e7a9911` | 401/403 permanente se reintentaba 5 veces, con relogin en cada vuelta |
-| 08/07 | `4fb3524` | **le puso `timeout=30` al login** |
+| Python | 3.12 | **3.7.17** |
+| Django | 6.0.3 | **3.2.25** |
 
-**El tercero explica el "para siempre":** `bims = BimsApi()` llama a `login()` **en el import del
-módulo**, o sea durante el arranque del worker. Sin timeout, el worker se bloqueaba antes de entrar al
-loop; gunicorn lo mataba, levantaba otro, y el nuevo se bloqueaba igual. Servicio arriba, ningún worker
-capaz de atender. `ffef255` cierra la pieza que faltaba: las llamadas de facturación.
+**Los "122/122 en verde" nunca probaron nada sobre producción.** El `Pipfile` pinea
+`django = "~=3.2.7"`, pero el `.venv` local se hizo con `python3 -m venv` ignorando el
+Pipfile. Y el encabezado "Generated by Django 6.0.3" de las migraciones engaña: refleja la
+máquina que las generó.
+
+**Se cerró ese hueco.** Ahora la suite se puede correr sobre el stack real con un worktree
+en el servidor, sin desplegar y sin tocar nada (`test_settings` usa SQLite en memoria):
+
+```
+git -C /var/www/integrador fetch origin <rama>
+git -C /var/www/integrador worktree add /root/wt-tb origin/<rama>
+cd /root/wt-tb && /root/.local/share/virtualenvs/integrador-ObaHlHmv/bin/python \
+    manage.py test core/ --settings=muci-integrador.test_settings
+git -C /var/www/integrador worktree remove /root/wt-tb
+```
+
+Invocar el `bin/python` del venv por ruta absoluta, **no** `pipenv run`: desde otro
+directorio pipenv busca otro venv por hash y no lo encuentra. Resultado con
+`feature/timeouts-bims`: **122/122 sobre Python 3.7.17 + Django 3.2.25**.
 
 ---
 
-## 4. Para mañana
+## 3. El saneamiento del `python3` del sistema
 
-1. **Cerrar la validación: 4+ órdenes facturables.** Al cierre pasó **una** (200707 → Sale 31264,
-   `Params: {}` sin `sid`, 8,55 s, `posale_id: 4` resuelto de la BD). Una sola no prueba nada — es
-   exactamente la trampa del viernes. Buscar en `bims_api.log`: cero `Caller: login`, cero
-   `BIMS FALLBACK`, cero reintentos, tiempos cerca de 8-9 s.
-2. **Después: mergear a `main`.** El orden natural es `timeouts-bims` → `main` (contiene todo), y
-   limpiar las otras tres ramas. `checkout main` **antes** de borrar cualquier rama.
-3. **Desplegar `ffef255`** una vez que la validación cierre. Sin migraciones nuevas propias.
-4. **Renombrar la fila del `7`** a `Caja Fund MuCi` desde el admin. Hoy dice "Cualquier otro cajero POS",
-   que oculta que esas ventas se facturan a Fund MuCi. Es dato de Carlos, no se cambió por código.
-5. **Decidir el agujero de las órdenes fallidas** — ver abajo, es lo más importante que queda abierto.
+Spec completa en `docs/superpowers/specs/2026-08-25-saneamiento-python3-sistema-design.md`.
+
+`/usr/bin/python3` estaba bajo `update-alternatives` **en modo manual** apuntando a 3.7,
+cuando la nativa de Ubuntu 22.04 es 3.10. Eso rompió en silencio todo el tooling Python de
+la distro. **El problema de seguridad no era el EOL de 3.7: era que el servidor no podía
+aplicar parches** — `unattended-upgrades` estaba en `failed` y sin logs.
+
+Antes de tocar se verificó componente por componente que nada dejara de andar. El venv del
+integrador resultó inmune porque `bin/python → /usr/bin/python3.7m` es absoluto y no pasa
+por las alternatives. Se ejecutó y todo siguió en pie.
+
+### El imprevisto: pipenv
+
+**`/usr/bin/pipenv` se rompió bajo 3.10.** El paquete de Ubuntu es pipenv 11.9.0 (2018) y
+vendoriza un `requests` que usa `collections.MutableMapping`, alias que 3.10 eliminó.
+
+> **El análisis previo no lo detectó** porque verificó con `python3.10 -c "import pipenv"`,
+> y eso no ejercita `pipenv.core`. **Para verificar una herramienta CLI hay que ejecutarla,
+> no importarla.** Es el mismo error de nivel que ya había mordido con los tests de
+> transporte HTTP.
+
+Arreglo: anclar pipenv a 3.7 en el crontab. **Todo uso de pipenv necesita ese prefijo,
+incluido `pipenv install` al desplegar:**
+
+```
+cd /var/www/integrador && /usr/bin/python3.7 /usr/bin/pipenv install
+```
+
+**Regla permanente: `python3` se queda en 3.10** aunque después se instale 3.12. Los
+`dist-packages` del sistema están compilados para 3.10.
 
 ---
 
-## 5. Hallazgos laterales
+## 4. Los 91 parches y el reboot
 
-- **⚠️ NO existe reproceso automático de órdenes fallidas.** El crontab de root **no tiene nada que
-  corra `retryfaileds`**, y `runretryfaileds.sh` no está referenciado en ningún lado: es código muerto
-  además de roto (hace `cd` a una ruta inexistente). Lo único que reintenta es `sync_bims_contacts`, y
-  **solo** órdenes con `message__startswith="Pausada: Esperando"`. **Corrección a lo que se afirmó
-  durante la sesión:** las órdenes fallidas *no* "se recuperan en el reproceso" — hoy quedan falladas
-  hasta que un humano entre al admin. Eso explica las **201 en FAILED** acumuladas. Las 3 del viernes
-  probablemente se recuperaron con el botón del admin; **sin confirmar con Carlos**.
-- **El cron que quema los logs:** `0 0 * * * ... sync_bims_contacts` pagina 18.000 contactos y cada
-  llamada escribe en `bims_api.log`, que rota por tamaño con `backupCount=3`. **Quema las 4 ventanas en
-  un minuto** — eso borró la evidencia del viernes antes de poder leerla. El histórico largo sobrevive
-  solo en `bims_sync.log`.
-- **Reinicio automático cada 6 horas** (`0 */6`, o sea 00/06/12/18 UTC, **4 veces al día**). Es un parche
-  al síntoma de los cuelgues. Con `ffef255` estable se puede discutir sacarlo — hoy corta una
-  facturación por la mitad 4 veces al día. **Y invalida una suposición usada dos veces hoy:** dejar
-  código nuevo en disco sin reiniciar **no es un estado estable**, aguanta como máximo ~6 h. Para
-  validar sin activar, usar un **worktree aparte**.
-- **Trampa de husos:** el shell del servidor está en **UTC**, pero Django corre con
-  `TIME_ZONE = "America/Asuncion"` (**UTC−3**), así que los timestamps *dentro* de los `.log` están 3 h
-  atrás. Cruzar `ActiveEnterTimestamp` contra el contenido de un log sin restar 3 h lleva a conclusiones
-  falsas — pasó en esta sesión.
-- **Acceso SSH:** la vía vieja (`root@159.89.228.18` con `anthropic_readonly_muciserver`) **dejó de
-  funcionar**. La vigente es `ssh -i ~/.ssh/muci anthropic_readonly@muci.org`. Ese usuario **no puede
-  leer el `.env`** ni `journalctl`, y `git` necesita `-c safe.directory=/var/www/integrador`.
-- **Comandos multilínea con heredoc se rompen al pegarlos** en la terminal: dos espacios de indentación
-  invalidan el terminador (`PY`/`OUTER` debe ir en columna 0), y las rutas largas hacen que la línea se
-  corte y se pierda el `<`. Lo que funciona: `scp` de un script corto + un `ssh` de una línea de ~115
-  caracteres o menos.
-- **`.env.local` no estaba en `.gitignore`** (la regla era `.env` exacto). Corregido con `.env.*` +
-  `!.env.example`. Tenía `SECRET_KEY`, `DB_PASSWORD`, `WOOCOMMERCE_SECRET`, `BIMS_PASSWORD`,
-  `POS_LOOKUP_TOKEN` y la `BIMS_API_KEY`.
-- **El push pelado funciona:** `git push origin <rama>` entra sin PAT ni credential helper efímero.
-- **Nombres deformados en el reproceso:** las 3 órdenes recuperadas crearon contactos nuevos
-  (18140–18142) con nombres tipo `C L A R I C E C O M P A S S O O M P A S S O`. Bug independiente, sin
-  diagnosticar, y ensucia BIMS con duplicados.
-- **Quirk de logging preexistente:** el logger `core` tiene `propagate: True` y sus mismos handlers están
-  en el root, así que todo `core.*` sale **duplicado en stdout** (no en `bims_sync.log`, verificado).
-- **Tres preguntas para BIMS:** ¿host canónico del tenant después del 30/09? El `openapi.json` documenta
-  un formato de header que no funciona. Y ¿por qué `X-API-Key` + cookie de sesión devuelve 401 en vez de
-  que gane la key?
-- **Decisión abierta:** si las reglas `web` y `pos_sin_mapeo` deberían poder quedar sin punto de venta.
-  Hoy se pueden vaciar, y eso significa que esas órdenes no se facturan.
-- Sigue vivo de antes: **PAT sin revocar**, por decisión explícita de Carlos.
+Aplicados **por tandas**, de menor a mayor riesgo, con `NEEDRESTART_MODE=l` para que nada se
+reiniciara solo. `needrestart` reportaba **23 servicios** con librerías viejas —incluidos
+mariadb, los tres php-fpm, redis, el integrador y dbus—, así que el reboot era inevitable:
+`dbus`, `logind` y `user@0` no se pueden reiniciar en caliente.
+
+**Se hizo en dos fases para aislar variables.** El servidor llevaba **12 semanas** sin
+reiniciar, así que primero se apagó, se tomó el snapshot y se encendió **sin parches
+nuevos**. Volvió sano. Recién entonces se aplicaron los parches y se reinició de nuevo.
+
+Respaldos: `mysqldump` de las 4 bases en `/root/bk/db.sql.gz` (221 MB, íntegro) y snapshot
+del droplet apagado **antes** de los parches.
+
+**El hallazgo más reutilizable fue el webhook.** WooCommerce **deshabilita solo** los
+webhooks con 5 fallas consecutivas, y hay prueba viva: el webhook `Refund order` está
+`disabled` con `failure_count 6`. Si `Venta Entrada` se hubiera caído así, **la facturación
+se cortaba en silencio**. El modo mantenimiento lo evitó. **Verificarlo es obligatorio en
+cualquier ventana futura** (el de `Refund order` debe quedar `disabled`: apunta a staging).
+
+Quedan 67 actualizaciones de repos de terceros (MariaDB, PHP de sury, netdata) y 12 de ESM
+Apps que requieren Ubuntu Pro. Son decisiones aparte.
+
+---
+
+## 5. Los timeouts, desplegados
+
+`feature/timeouts-bims` se mergeó a `main` y se desplegó, después de confirmar 122/122 en el
+stack real. Sin dependencias nuevas ni migraciones.
+
+**Producción pasó a seguir `main`** en vez de `feature/gestion-sucursales`. Ojo con el
+comando: producción tenía una rama local `main` vieja, así que `git checkout main` a secas
+la habría hecho **retroceder**. Lo correcto es `git checkout -B main origin/main`.
+
+### Los 5 hallazgos de la revisión
+
+1. **El presupuesto es por llamada, no por orden.** Tres llamadas lentas llegan a 123 s
+   contra los 120 de gunicorn → worker matado por señal → **el `FailedOrder` no se graba**.
+   Tiene spec aprobada, sin implementar.
+2. `TIMEOUT_CONEXION` no se recorta al restante (hasta 5 s de exceso).
+3. El `login()` del relogin usa 30 s fuera del presupuesto — solo en modo sesión.
+4. Si el presupuesto se agota y hay fallback configurada, el error pierde la causa real.
+5. La conmutación de host solo sirve ante fallas rápidas.
+
+**El reinicio cada 6 horas se queda** hasta cerrar el hallazgo 1.
+
+---
+
+## 6. Spec del presupuesto por orden
+
+`docs/superpowers/specs/2026-08-25-presupuesto-por-orden-design.md`, **aprobada para
+implementar**, en `feature/presupuesto-por-orden`.
+
+`contextvars.ContextVar` en un módulo nuevo `core/deadline.py` (no en `bims.py`, porque
+`woocommerce.py` también lo necesita). `PRESUPUESTO_ORDEN` = 90 s. Alcance: BIMS **y**
+WooCommerce, donde `get_product` se llama una vez por ítem y hoy escala sin techo. Se fija
+**solo en `process_order`**.
+
+Que `restante()` devuelva `None` sin presupuesto es la pieza central: `sync_bims_contacts`
+hace 38 llamadas secuenciales, nunca fija deadline, y sigue funcionando **sin tocar ese
+archivo**.
+
+---
+
+## Lo primero que hay que mirar mañana
+
+**Cómo salió el sync nocturno de las 00:00 UTC.** Fue la primera corrida del código de
+timeouts recién desplegado, con 38 llamadas a BIMS. En `bims_sync.log`:
+
+- `Sincronización completa. Total guardados: ~17300` → el plumbing anda
+- Cualquier `Presupuesto de 40s agotado` → el presupuesto es demasiado ajustado
+- Cualquier `ReadTimeout` / `ConnectTimeout` nuevo → BIMS más lento de lo estimado
+
+Y si apareció alguna **orden facturable real**, cierra la validación punta a punta.
+
+## Pendientes
+
+- **Implementar el presupuesto por orden.** Spec lista, siguiente paso es el plan con TDD.
+- **⚠️ Backups de las bases.** No hay credencial de root de MariaDB, `/root/.my.cnf` no
+  existe y `debian.cnf` no funciona. **Es probable que no haya backup automático.** Más
+  grave que los parches: un parche faltante es riesgo de intrusión, la falta de backup es
+  riesgo de **pérdida total** de 2,6 GB. El workaround que funciona está en la spec del
+  saneamiento.
+- **201 órdenes en FAILED** sin reproceso automático. `runretryfaileds.sh` es código muerto
+  y además roto.
+- **Los logs de BIMS se pierden ~12 h por día.** `RotatingFileHandler` no es multiproceso:
+  cuando el cron nocturno rota, los workers siguen escribiendo en un inode desvinculado.
+- **Spec del proyecto B** (integrador a Python 3.12 + Django 5.2 LTS). Ahora desbloqueada
+  porque `add-apt-repository` volvió a funcionar. Ojo: el cron tiene `python3.7`
+  hardcodeado y hay que revisarlo ahí.
+- **Ventana para los 67 parches de terceros** y decidir sobre Ubuntu Pro.
+- Renombrar la fila del posale 7 a "Caja Fund MuCi" desde el admin.
+- Nombres deformados tipo `C L A R I C E` en el reproceso, sin diagnosticar.
+- Borrar las tres ramas ya contenidas en `main`.
