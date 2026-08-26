@@ -1,45 +1,95 @@
 # Handoff sesión del 2026-08-26
 
-> Sesión de dos actos: se validó el despliegue de timeouts del día anterior y se implementó
-> entera la feature del presupuesto por orden, que es lo que cierra el hallazgo 1. **Nada se
-> desplegó.** Producción sigue en `main` (`3b9773c`) todo el tiempo.
+> Tres actos: se validó el despliegue de timeouts del día anterior, se implementó entero el
+> presupuesto por orden, y se retomó la arquitectura del hub hasta dejar una propuesta lista
+> para presentar. **Nada se desplegó.** Producción siguió en `main` (`3b9773c`) todo el día.
 
 ## Estado al cierre
 
 | | |
 |---|---|
-| **Producción** | rama `main`, commit `3b9773c` — **sin cambios en toda la sesión** |
-| Rama de trabajo | `feature/presupuesto-por-orden` @ `13af3b8`, pusheada |
-| Tests | **152/152** en local (3.12 + Django 6) **y** en el stack de producción (3.7.17 + Django 3.2.18) |
+| **Producción** | `main` @ `3b9773c` — **sin cambios en toda la sesión** |
+| Rama de trabajo | `feature/presupuesto-por-orden` @ `f07e79d`, pusheada |
+| Tests | **152/152** en local (3.12 + Django 6) **y** sobre el stack de producción (3.7.17 + Django 3.2.18) |
 | Servicio | último arranque 12:00 UTC — el reinicio programado, anterior a esta sesión |
-| Falta para desplegar | smoke test contra BIMS real; ver "Lo que sigue" |
+| Propuesta de donaciones | publicada, **esperando que Carlos la presente** |
 
 ---
 
-## 1. El sync nocturno salió limpio y cerró la validación de los timeouts
+# ⚠️ LO QUE QUEDÓ SIN COMPROBAR
 
-Primera corrida del código de timeouts desplegado el 25/08, con 38 llamadas a BIMS:
+Esto es lo primero de mañana. Todo lo demás de este documento es contexto.
 
-- `Total guardados: 17.304`
-- **0** `Presupuesto de 40s agotado`, **0** `ReadTimeout`, **0** `ConnectTimeout`
-- Ninguna orden pausada, ningún error nuevo
+### 1. El nombre del fee de la propina — **puede haber plata sin facturar**
 
-Y hubo orden facturable real: **201219 → BIMS Sale 31271**, en ~10 s. Van 5 órdenes facturadas
-desde el deploy (31267 a 31271) sin un solo fallo. **El presupuesto de 40 s no hay que
-ajustarlo.**
+`services.py:455` solo reconoce la propina si el cargo se llama **exactamente `Tip`**. Otro
+nombre → no se factura y **no se loguea nada**.
 
-**Confirmado de paso un pendiente:** `bims_api.log.1`, `.2` y `.3` están los tres fechados
-00:03. El cron nocturno quema las 4 ventanas de rotación en tres minutos, **todas las noches**.
-Ya no es hipótesis.
+Lo que se buscó y lo que dio:
 
----
+| Búsqueda | Muestra | Resultado |
+|---|---|---|
+| `product_id: 100` en payloads a BIMS | 13 ventas (`bims_api.log*` + `.bak`) | **0** |
+| Ventas con más de un ítem | esas 13 | **0** |
+| La palabra "propina" en `bims_sync.log` | 5,5 meses (13-mar a 26-ago) | **0** |
 
-## 2. El presupuesto por orden, implementado
+**No concluye nada, y por qué:** los tres escenarios —no hay propinas, funcionan, se
+pierden— producen el mismo silencio. Una propina exitosa no escribe log; una perdida
+tampoco. El código es inobservable justo en el modo de falla que importa.
 
-Spec: `docs/superpowers/specs/2026-08-25-presupuesto-por-orden-design.md`
-Plan: `docs/superpowers/plans/2026-08-26-presupuesto-por-orden.md`
+**Cómo cerrarlo, dos caminos:**
+
+- **Barato y definitivo en días:** una línea que loguee todo fee cuyo nombre no se reconoce.
+- **Definitivo ya, necesita root** (el `.env` no lo lee `anthropic_readonly`):
 
 ```
+ssh root@muci.org "cd /var/www/integrador && /root/.local/share/virtualenvs/integrador-ObaHlHmv/bin/python -c \"
+from dotenv import dotenv_values; from woocommerce import API; from collections import Counter
+c = dotenv_values('.env')
+w = API(url=c['WOOCOMMERCE_URL'], consumer_key=c['WOOCOMMERCE_KEY'], consumer_secret=c['WOOCOMMERCE_SECRET'], version='wc/v3', timeout=30)
+r = w.get('orders', params={'per_page':100,'status':'any'}).json()
+n = Counter(f['name'] for o in r for f in o.get('fee_lines',[]))
+print('ordenes revisadas:', len(r)); print('nombres de fee:', dict(n) or 'NINGUNO')
+\""
+```
+
+### 2. Smoke test contra el BIMS real — **bloquea el despliegue**
+
+Nunca se corrió. Es lo único que probaría que la tupla `(connect, read)` que introdujo esta
+rama viaja bien contra la API de verdad. **Necesita root** (lee el `.env`).
+
+### 3. Django 3.2.18 vs 3.2.25
+
+La suite se validó sobre el `python3.7` **del sistema**, que trae Django **3.2.18**. El venv
+de producción tiene **3.2.25** — 7 releases de parche dentro de la misma minor. Prueba
+compatibilidad con 3.7 y con la API de 3.2; no prueba el venv exacto. Cerrarlo necesita root.
+
+### 4. ¿Hay `order_id` duplicados en producción?
+
+Bloquea el `unique` que pide el sub-proyecto A: si los hay, **la migración falla**. Hay que
+contarlos antes de escribir la migración.
+
+### 5. Que WooCommerce le hable hoy directo al CRM
+
+Afirmado por Carlos (tras `wc-completed`), **nunca verificado** contra Woo ni Krayin. Toda la
+propuesta de donaciones se apoya en esto.
+
+---
+
+## 1. El sync nocturno validó el deploy de timeouts
+
+17.304 contactos, **0** presupuestos agotados, **0** timeouts en 38 llamadas. Y 5 órdenes
+facturadas sin fallos desde el deploy (Sale 31267 a 31271), la última en ~10 s. **El
+presupuesto de 40 s no hay que ajustarlo.**
+
+Confirmado de paso: `bims_api.log.1/.2/.3` los tres fechados 00:03 — el cron quema las 4
+ventanas de rotación cada noche. Es la razón de que la muestra del punto 1 sea de 13 ventas.
+
+## 2. Presupuesto por orden, implementado
+
+```
+f07e79d chore: script de verificacion sobre el stack real de produccion
+1b006d1 docs: handoff (reemplazado por este)
 13af3b8 docs: encabezados Task N en el plan
 4de77a4 fix: 4 hallazgos del review final de la rama
 b2baa85 feat(services): presupuesto por orden y FailedOrder al leer productos
@@ -49,111 +99,85 @@ c22b9c4 feat(woocommerce): recortar el timeout al restante de la orden
 69cadfd feat(deadline): modulo del presupuesto por orden con ContextVar
 ```
 
-`core/deadline.py` lleva el límite en un `contextvars.ContextVar`. `PRESUPUESTO_ORDEN = 90`.
-Lo fija **solo** `process_order`, con `try/finally`. `bims.py` y `woocommerce.py` recortan sus
-timeouts al mínimo entre el propio y el restante de la orden. Quien no fija presupuesto —el
-cron `sync_bims_contacts`— recibe `None` de `restante()` y **no requirió tocar ese archivo**.
+`core/deadline.py` lleva el límite en un `contextvars.ContextVar`, `PRESUPUESTO_ORDEN = 90`,
+fijado **solo** en `process_order` con `try/finally`. `sync_bims_contacts` recibe `None` de
+`restante()` y **no requirió tocarse**.
 
-### Una brecha que la spec daba por inexistente
+**Brecha cerrada que la spec daba por inexistente:** `build_sale_products` no estaba envuelta
+en ningún `try/except`, así que un fallo en el `get_product` por ítem se escapaba **sin grabar
+`FailedOrder`**. Era un bug preexistente.
 
-La spec afirmaba que `process_order` ya grababa `FailedOrder` ante cualquier excepción. **Es
-falso.** Tiene cuatro `try/except` separados y la llamada a `build_sale_products` no estaba en
-ninguno — justo donde vive el `get_product` por ítem, el tramo que escala con el tamaño de la
-orden. Una excepción ahí se escapaba **sin registro**.
+**Dos defectos que introdujo el plan**, encontrados por la revisión final y ya arreglados:
+`_alternate_base_url` conmutaba el host de forma pegajosa sin mandar request ni loguear; y un
+timeout escalar en `requests` aplica a conexión **y** lectura, así que el peor caso llegaba a
+~115 s contra los 120 de gunicorn — el margen de 30 s que promete la spec no existía.
 
-Ya estaba roto antes de esta rama: una `ServerException` de WooCommerce en ese bucle se perdía
-igual. Cerrado en `b2baa85`.
+**Se decidió NO subir el `--timeout` de gunicorn a 180.** No compra nada (el presupuesto de 90
+corta primero; peor caso del diseño ≈105 s) y cuesta: un worker colgado queda atado 50% más.
+Si hace falta margen, la palanca es **bajar `PRESUPUESTO_ORDEN`**.
 
-### Dos defectos que el plan introdujo, encontrados por la revisión final
+**Herramienta nueva:** `./verificar-en-stack-produccion.sh` corre la suite sobre el stack real
+sin tocar producción. Documentado en `CLAUDE.md`.
 
-Ninguno lo habría visto una revisión por tarea. Los dos ya están arreglados en `4de77a4`.
+## 3. Arquitectura del hub, reactivada
 
-1. **`_alternate_base_url` no es una consulta pura.** Muta `self.base_url` de forma pegajosa y
-   *después* devuelve la URL. La guardia nueva lo llamaba primero y abandonaba después, así que
-   con el presupuesto agotado la instancia quedaba apuntando a `BIMS_FALLBACK_URL` **sin mandar
-   un request y sin loguearlo** — el `warning` estaba debajo de la guardia. Producción tiene la
-   fallback configurada: era routing real.
-2. **Un timeout escalar en `requests` aplica a conexión Y lectura por separado.** El
-   `_timeout_efectivo` de WooCommerce devolvía un escalar, así que una llamada recortada a N
-   podía gastar 2N. Peor caso ~115 s contra los 120 de gunicorn: **el margen de 30 s que
-   promete la spec no existía.** Es el mismo defecto que el hallazgo 2 obligó a arreglar del
-   lado de BIMS, repetido del lado de WooCommerce. Arreglado con tupla `(connect, read)`.
+Propuesta publicada: **https://claude.ai/code/artifact/1142a0c2-3c6a-4184-9089-c4769e703cd9**
+(privada hasta que Carlos la comparta). **Esperando que la presente y decidan.**
 
----
+Recomienda que las **donaciones manuales entren por Krayin/Fundraising** en vez de por
+WooCommerce, porque es la única opción donde el conjunto completo de donaciones existe **por
+construcción** y no por acuerdo.
 
-## 3. Verificado sobre el stack real
+**Corrección importante:** BIMS y el CRM **no deben comunicarse entre sí**. El integrador es
+el único que ve los dos lados. Eso disuelve la incógnita original.
 
-152/152 con **Python 3.7.17 + Django 3.2.18**, y los 5 archivos tocados compilan en 3.7.
+**La pregunta que frenó el proyecto el 21/08 está respondida:** a `/sales/` le pega un webhook
+de Woo y nadie lee el body — pero Woo **sí cuenta los no-2xx y deshabilita el webhook a las 5
+fallas**. `SalesView` devuelve 503 ante cualquier excepción, así que **una caída de BIMS de 5
+órdenes corta la facturación en silencio**. Ya le pasó a `Refund order`.
 
-**Cómo, porque el método del plan no se pudo usar.** `anthropic_readonly` no puede leer `/root`
-(donde vive el venv), ni escribir en `/var/www/integrador/.git` (así que no hay `worktree add`),
-ni ejecutar el intérprete del venv. Lo que sí funciona:
+**Decisiones de diseño tomadas** (detalle en la memoria del proyecto): A incluye el async y
+responde 202; cola en **MariaDB + cron con `flock`** (Redis existe pero `db0` tiene 270.862
+claves de otro sistema); latencia aceptable hasta ~1 min; **extender `FailedOrder` en su
+lugar**, sin renombrar hasta que haya backups; alertas de pedido a **Slack** vía Incoming
+Webhook, dejando Sentry para problemas de código.
 
-```
-git archive --format=tar HEAD | ssh ... 'mkdir -p ~/wt && tar -x -C ~/wt'
-cd ~/wt && /usr/bin/python3.7 manage.py test core/ --settings=muci-integrador.test_settings
-```
-
-El `python3.7` del sistema tiene Django 3.2.18, `requests` 2.25.1, `woocommerce` 3.0.0,
-`sentry_sdk`, `dotenv` y DRF 3.15.1.
-
-⚠️ **Salvedad:** eso es Django **3.2.18**, no el **3.2.25** exacto del venv de producción — 7
-releases de parche dentro de la misma minor. Prueba compatibilidad con 3.7 y con la API de
-Django 3.2; no prueba el venv exacto. **La corrida contra el venv real necesita root.**
-
-El único warning en la salida es un `CryptographyDeprecationWarning` de `pymysql`, preexistente
-y ajeno a esta rama.
-
----
+⚠️ **Ojo con Sentry:** `settings.py:14-17` usa `LoggingIntegration(event_level=ERROR)`, así que
+**todo `logger.error()` es un evento**. `bims.py` loguea uno por reintento. Separar los canales
+exige además **bajar a `warning` los fallos de negocio esperados**, o la falla queda en los dos
+lados.
 
 ## Lo que sigue, en orden
 
-1. **Smoke test de solo lectura contra el BIMS real**, desde el servidor, con el deadline
-   fijado a mano: verificar que la tupla `(connect, read)` viaja bien y que `get_contacts`
-   responde. **Bloqueado para `anthropic_readonly`**: necesita leer el `.env`. Lo tiene que
-   correr alguien con root.
-2. **Opcional pero barato:** correr la suite con el venv real (`/root/.local/share/virtualenvs/integrador-ObaHlHmv/bin/python`)
-   para cerrar la salvedad de 3.2.18 vs 3.2.25. También necesita root.
-3. **Desplegar**, y mirar la corrida del cron de las 00:00 UTC como canario — 38 llamadas
-   secuenciales es el mejor banco de pruebas del proyecto para cualquier cosa del transporte HTTP.
-4. **Recién con eso estable unos días, discutir sacar el reinicio cada 6 horas.**
+1. Cerrar los 5 puntos de arriba (el 1 y el 2 necesitan root).
+2. Desplegar el presupuesto por orden y mirar el cron de las 00:00 UTC como canario.
+3. Que Carlos presente la propuesta de donaciones.
+4. **A′** — guardar el `sale_id`: no depende de ninguna decisión pendiente, se puede escribir ya.
+5. Spec del sub-proyecto A, ya diseñado.
 
-## Lo que NO cubre esta rama
+## Pendientes de antes, sin cambios
 
-- **Nada acota una respuesta que gotea bytes.** El read timeout de `requests` es por lectura de
-  socket, no por respuesta. Un BIMS que manda un byte cada 20 s pasa todos los recortes y
-  revienta los 120 s igual. El presupuesto defiende contra el silencio, no contra la lentitud
-  con pulso. **Si siguen apareciendo signal-kills después del deploy, mirar acá primero.**
-- **`get_razon_social` es una tercera llamada externa dentro de la orden que nadie recorta.**
-  `ruc.py:39` usa `timeout=5` escalar (hasta ~10 s), una vez por orden con RUC. Es fail-safe,
-  entra en el margen, pero la aritmética de la spec no la contempla.
-
-### Se decidió NO subir el `--timeout` de gunicorn
-
-Se evaluó pasarlo a 180 s. **No compra nada:** el presupuesto de 90 s corta primero, así que
-ninguna orden real llega a 120 hoy (peor caso del diseño ≈ 105 s). Solo ensancha la red para el
-caso del goteo, que es ilimitado igual. Y cuesta: un worker realmente colgado queda atado 180 s
-en vez de 120, y con `--workers 3` son tres minutos sin atender en vez de dos. Si alguna vez
-hace falta más margen, la palanca correcta es **bajar `PRESUPUESTO_ORDEN`**, no subir gunicorn.
-
-## Pendientes que vienen de antes (sin cambios)
-
-- **⚠️ Backups de las bases.** Sigue sin resolverse. Más grave que cualquier parche.
-- **201 órdenes en FAILED** sin reproceso automático; `runretryfaileds.sh` es código muerto y roto.
-- **Los logs de BIMS se pierden ~12 h por día** (confirmado otra vez esta sesión).
-- **Spec del proyecto B** (Python 3.12 + Django 5.2 LTS).
-- **Ventana para los 67 parches de terceros** y decidir sobre Ubuntu Pro.
+- **⚠️ Backups de las bases.** El más grave del proyecto. Sigue sin resolverse.
+- **201 órdenes en FAILED** sin reproceso; `runretryfaileds.sh` es código muerto y roto. El
+  drenador del sub-proyecto A lo reemplaza y lo vuelve obsoleto.
+- **Los logs de BIMS se pierden ~12 h por día** (confirmado otra vez hoy, y es lo que redujo la
+  muestra del punto 1 a 13 ventas).
+- Spec del proyecto B (Python 3.12 + Django 5.2 LTS).
+- Ventana para los 67 parches de terceros y decidir sobre Ubuntu Pro.
 - Renombrar la fila del posale 7 a "Caja Fund MuCi" desde el admin.
-- Nombres deformados tipo `C L A R I C E` en el reproceso, sin diagnosticar.
-- Borrar `feature/gestion-sucursales`, `feature/migracion-api-key` y `feature/timeouts-bims`
-  (ya contenidas en `main`).
+- Nombres deformados tipo `C L A R I C E`, sin diagnosticar.
+- Borrar `feature/gestion-sucursales`, `feature/migracion-api-key` y `feature/timeouts-bims`.
 
 ## Menores anotados y no arreglados
 
-Del review final, todos evaluados y parkeados a propósito: el mensaje de agotamiento reporta
+Del review final de la rama, todos evaluados y parkeados: el mensaje de agotamiento reporta
 `PRESUPUESTO_ORDEN` en vez del presupuesto en efecto si alguien pasa uno custom; un intento
 fútil de ~2 s cuando queda una fracción de segundo; dos handlers de `FailedOrder` sin `status`
 explícito (`services.py:504,540`); `resolve_pos_and_payments` sin envolver (no puede lanzar
-excepciones de presupuesto, pero sí `ValueError`/`KeyError`); y dos cosas dormidas que solo
-aplican en modo sesión —el relogin duplica el gasto de un intento, y `str(e)` puede arrastrar
-un `?sid=` a la base—. Producción corre en modo API Key desde el 24/08.
+excepciones de presupuesto, pero sí `ValueError`/`KeyError`); el mensaje "excedido por -0.0s"
+si `restante` cae exactamente en 0; y dos cosas dormidas de modo sesión —el relogin duplica el
+gasto de un intento, y `str(e)` puede arrastrar un `?sid=` a la base—. Producción corre en modo
+API Key desde el 24/08.
+
+Fuera de alcance pero anotado: `traces_sample_rate` y `profiles_sample_rate` están al **1.0**
+en producción, y el DSN de Sentry está hardcodeado en `settings.py` en vez del `.env`.
