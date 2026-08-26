@@ -1717,6 +1717,195 @@ class TimeoutsBimsTest(TestCase):
         self.assertGreater(TIMEOUT_LECTURA, 12.47)  # el request legítimo más lento medido
 
 
+class PresupuestoOrdenBimsTest(TestCase):
+    """
+    El presupuesto de la orden se impone por encima del de cada llamada.
+
+    Hoy `PRESUPUESTO_REINTENTOS` es por LLAMADA: una orden hace 2-3 llamadas y
+    3 x 41 s = 123 s > los 120 s de gunicorn. Al pasarse, gunicorn mata al worker
+    por señal y el `FailedOrder` no se graba.
+    """
+
+    _CONTACTO_OK = {"status": "ok", "count": 1, "data": [{"Contact": {"id": "7"}}]}
+
+    def _api(self):
+        with patch.object(BimsApi, "login", return_value="sid"):
+            return BimsApi()
+
+    def _reloj_y_send(self, capturados, paso=15.0, responder_ok=False):
+        """
+        Reloj falso compartido por core.bims y core.deadline.
+
+        Devuelve (monotonic, dormir, fake_send). Cada envío consume `paso`
+        segundos; si `responder_ok`, responde 200 en vez de fallar por red.
+        """
+        reloj = {"t": 1000.0}
+
+        def monotonic():
+            return reloj["t"]
+
+        def dormir(segundos):
+            reloj["t"] += segundos
+
+        def fake_send(adapter_self, request, **kwargs):
+            capturados.append(kwargs.get("timeout"))
+            reloj["t"] += paso
+            if responder_ok:
+                respuesta = requests.Response()
+                respuesta.status_code = 200
+                respuesta._content = json.dumps(self._CONTACTO_OK).encode("utf-8")
+                respuesta.request = request
+                return respuesta
+            raise requests.ConnectionError("BIMS no responde")
+
+        return monotonic, dormir, fake_send
+
+    # ── Sin presupuesto: nada cambia ────────────────────────────────────────
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_sin_presupuesto_de_orden_el_timeout_es_el_de_siempre(self):
+        """
+        Protege a `sync_bims_contacts`: 38 llamadas secuenciales sin deadline.
+        """
+        api = self._api()
+        capturados = []
+        with patch.object(requests.adapters.HTTPAdapter, "send", self._send_ok_simple(capturados)):
+            api.list_contacts("123456", "CI")
+        self.assertEqual(capturados, [(TIMEOUT_CONEXION, TIMEOUT_LECTURA)])
+
+    def _send_ok_simple(self, capturados):
+        def fake_send(adapter_self, request, **kwargs):
+            capturados.append(kwargs.get("timeout"))
+            respuesta = requests.Response()
+            respuesta.status_code = 200
+            respuesta._content = json.dumps(self._CONTACTO_OK).encode("utf-8")
+            respuesta.request = request
+            return respuesta
+
+        return fake_send
+
+    # ── Con presupuesto: se recorta ──────────────────────────────────────────
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_el_timeout_se_recorta_al_restante_de_la_orden(self):
+        """
+        Con 8 s de orden restantes, la lectura no puede ser de 30 s aunque el
+        presupuesto de la llamada tenga 40 s enteros.
+        """
+        api = self._api()
+        capturados = []
+        monotonic, dormir, fake_send = self._reloj_y_send(capturados, responder_ok=True)
+        with patch("core.bims.time.monotonic", monotonic), patch(
+            "core.deadline.time.monotonic", monotonic
+        ), patch("core.bims.time.sleep", dormir), patch.object(
+            requests.adapters.HTTPAdapter, "send", fake_send
+        ):
+            token = deadline.iniciar(8)
+            try:
+                api.list_contacts("123456", "CI")
+            finally:
+                deadline.restaurar(token)
+        self.assertEqual(capturados, [(5, 8)])
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_el_timeout_de_conexion_tambien_se_recorta(self):
+        """
+        Hallazgo 2 de la revisión: hoy solo se recorta la lectura, así que un
+        intento que arranca al límite puede excederse hasta 5 s por la conexión.
+        Con el presupuesto de orden en juego ese exceso deja de ser cosmético.
+        """
+        api = self._api()
+        capturados = []
+        monotonic, dormir, fake_send = self._reloj_y_send(capturados, responder_ok=True)
+        with patch("core.bims.time.monotonic", monotonic), patch(
+            "core.deadline.time.monotonic", monotonic
+        ), patch("core.bims.time.sleep", dormir), patch.object(
+            requests.adapters.HTTPAdapter, "send", fake_send
+        ):
+            token = deadline.iniciar(3)
+            try:
+                api.list_contacts("123456", "CI")
+            finally:
+                deadline.restaurar(token)
+        self.assertEqual(capturados, [(3, 3)])
+
+    # ── Agotado: corta seco ──────────────────────────────────────────────────
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_presupuesto_agotado_lanza_la_excepcion_propia(self):
+        api = self._api()
+        capturados = []
+        monotonic, dormir, fake_send = self._reloj_y_send(capturados)
+        with patch("core.bims.time.monotonic", monotonic), patch(
+            "core.deadline.time.monotonic", monotonic
+        ), patch("core.bims.time.sleep", dormir), patch.object(
+            requests.adapters.HTTPAdapter, "send", fake_send
+        ):
+            token = deadline.iniciar(10)
+            try:
+                with self.assertRaises(deadline.PresupuestoOrdenAgotado):
+                    api.list_contacts("123456", "CI")
+            finally:
+                deadline.restaurar(token)
+        # Un solo intento: consume los 15 s del envío más 2 de espera, así que el
+        # segundo arranca con el presupuesto de orden (10 s) ya en negativo. El de
+        # la llamada todavía tendría 23 s — la orden es la que corta.
+        self.assertEqual(len(capturados), 1)
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_presupuesto_agotado_no_conmuta_de_host(self):
+        """No queda tiempo para probar el otro host."""
+        api = self._api()
+        api.fallback_url = "http://otro.bims.test.local"
+        capturados = []
+        monotonic, dormir, fake_send = self._reloj_y_send(capturados)
+        with patch("core.bims.time.monotonic", monotonic), patch(
+            "core.deadline.time.monotonic", monotonic
+        ), patch("core.bims.time.sleep", dormir), patch.object(
+            requests.adapters.HTTPAdapter, "send", fake_send
+        ):
+            token = deadline.iniciar(10)
+            try:
+                with self.assertRaises(deadline.PresupuestoOrdenAgotado):
+                    api.list_contacts("123456", "CI")
+            finally:
+                deadline.restaurar(token)
+        # Con fallback configurada seguiría habiendo un solo envío: agotado el
+        # presupuesto de la orden no se prueba el otro host.
+        self.assertEqual(len(capturados), 1)
+
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_el_error_conserva_la_causa_real(self):
+        """
+        Hallazgo 4: al agotarse el presupuesto de la LLAMADA con fallback
+        configurada, se reentraba al loop con el mismo límite y el segundo loop
+        fallaba de inmediato con `Last error: None`, perdiendo la causa.
+        """
+        api = self._api()
+        api.fallback_url = "http://otro.bims.test.local"
+        capturados = []
+        monotonic, dormir, fake_send = self._reloj_y_send(capturados)
+        with patch("core.bims.time.monotonic", monotonic), patch(
+            "core.deadline.time.monotonic", monotonic
+        ), patch("core.bims.time.sleep", dormir), patch.object(
+            requests.adapters.HTTPAdapter, "send", fake_send
+        ):
+            with self.assertRaises(BimsTransientError) as ctx:
+                api.list_contacts("123456", "CI")
+        self.assertNotIn("Last error: None", str(ctx.exception))
+        self.assertIn("BIMS no responde", str(ctx.exception))
+
+    # ── La garantía agregada ──────────────────────────────────────────────────
+
+    def test_tres_llamadas_no_superan_el_presupuesto_de_la_orden(self):
+        """
+        El cálculo que motiva la spec: 3 x 41 s = 123 s > 120 de gunicorn. Con el
+        presupuesto de orden, el techo agregado es PRESUPUESTO_ORDEN, no 3 x 41.
+        """
+        self.assertLess(deadline.PRESUPUESTO_ORDEN, 120)
+        self.assertGreater(PRESUPUESTO_REINTENTOS * 3, deadline.PRESUPUESTO_ORDEN)
+
+
 class TimeoutWooCommerceTest(TestCase):
     """
     El timeout de WooCommerce tiene que ser menor al de gunicorn.

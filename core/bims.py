@@ -9,6 +9,8 @@ import time
 import sentry_sdk
 import inspect
 
+from core import deadline
+
 logging.basicConfig(
     filename="app.log",
     level=logging.ERROR,
@@ -303,6 +305,11 @@ class BimsApi:
                 bims_logger.error(f"Status: {e.response.status_code}")
                 bims_logger.error(f"Response: {e.response.text}")
             else:
+                # Sin `e.response` (error de red: conexión, timeout, DNS) la única
+                # causa real es `str(e)`; sin incluirla acá el mensaje quedaba
+                # genérico y esa causa solo sobrevivía en el log, no en la
+                # excepción que ve `FailedOrder` (hallazgo 4).
+                error_msg += f" Error: {str(e)}"
                 bims_logger.error("══════ BIMS ERROR ══════")
                 bims_logger.error(f"{method_name} {url} | Time: {elapsed:.2f}s | Error: {str(e)}")
             logging.error(error_msg)
@@ -318,7 +325,11 @@ class BimsApi:
             return self._retry_loop(method, url, max_retries, retry_delay, limite, **kwargs)
         except BimsTransientError:
             alternate_url = self._alternate_base_url(url)
-            if alternate_url is None:
+            # Si el presupuesto de LLAMADA ya se agotó, reentrar al loop con el
+            # mismo límite hacía que el segundo loop fallara de inmediato con
+            # `Last error: None`, tapando la causa real (hallazgo 4). Y no tiene
+            # sentido: no queda tiempo para probar el otro host.
+            if alternate_url is None or time.monotonic() >= limite:
                 raise
             logging.warning(
                 f"BIMS sin respuesta en {url} tras {max_retries} intentos; "
@@ -334,14 +345,32 @@ class BimsApi:
         last_error_details = None
         for attempt in range(1, max_retries + 1):
             restante = limite - time.monotonic()
+            # El presupuesto de la ORDEN manda por encima del de esta llamada: es
+            # el que gunicorn realmente mide. Se chequea primero porque agotarlo
+            # es terminal — no se reintenta ni se conmuta de host.
+            restante_orden = deadline.restante()
+            if restante_orden is not None and restante_orden <= 0:
+                raise deadline.PresupuestoOrdenAgotado(
+                    f"Presupuesto de orden de {deadline.PRESUPUESTO_ORDEN}s agotado "
+                    f"para {url} tras {attempt - 1} intentos. "
+                    f"Last error: {last_error_details}"
+                )
             if restante <= 0:
                 raise BimsTransientError(
                     f"Presupuesto de {PRESUPUESTO_REINTENTOS}s agotado para {url} "
                     f"tras {attempt - 1} intentos. Last error: {last_error_details}"
                 )
-            # Recortar la lectura al restante: sin esto el presupuesto sería
-            # decorativo, porque un intento que arranca al límite correría entero.
-            kwargs["timeout"] = (TIMEOUT_CONEXION, min(TIMEOUT_LECTURA, restante))
+            if restante_orden is not None:
+                restante = min(restante, restante_orden)
+            # Recortar al restante: sin esto el presupuesto sería decorativo,
+            # porque un intento que arranca al límite correría entero. Se
+            # recorta también la CONEXIÓN (hallazgo 2): dejarla fija en
+            # TIMEOUT_CONEXION permitía que un intento se excediera hasta 5 s
+            # sobre el presupuesto restante.
+            kwargs["timeout"] = (
+                min(TIMEOUT_CONEXION, restante),
+                min(TIMEOUT_LECTURA, restante),
+            )
             try:
                 response_data = self._request_with_relogin(method, url, **kwargs)
             except BimsBusinessError:
