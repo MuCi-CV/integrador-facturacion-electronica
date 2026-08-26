@@ -12,7 +12,12 @@ with patch("requests.post") as _mock_post:
         status_code=200,
         json=lambda: {"status": "ok", "data": {"Session": {"id": "mock_sid"}}},
     )
-    from core.services import _parse_pos_payments, build_sale_products, resolve_pos_and_payments
+    from core.services import (
+        _parse_pos_payments,
+        build_sale_products,
+        process_order,
+        resolve_pos_and_payments,
+    )
     from core.bims import (
         BimsApi,
         BimsBusinessError,
@@ -2106,3 +2111,101 @@ class DeadlineOrdenTest(TestCase):
         """
         self.assertTrue(issubclass(deadline.PresupuestoOrdenAgotado, Exception))
         self.assertFalse(issubclass(deadline.PresupuestoOrdenAgotado, BimsError))
+
+
+class PresupuestoOrdenProcessOrderTest(TestCase):
+    """
+    `process_order` es el único que fija el presupuesto, y la garantía central es
+    que agotarlo termine en un `FailedOrder` grabado — nunca en una orden que
+    desaparece.
+    """
+
+    def _orden(self, items=1):
+        return {
+            "total": "40000.00",
+            "discount_total": "0.00",
+            "meta_data": [],
+            "billing": {"email": "cliente@example.com", "first_name": "Ana", "last_name": "Diaz"},
+            "shipping": {},
+            "line_items": [
+                {"product_id": 100, "quantity": 1, "total": "40000.00", "sku": "SKU1"}
+                for _ in range(items)
+            ],
+        }
+
+    def test_process_order_fija_el_presupuesto(self):
+        """`process_order` fija el presupuesto antes de llamar a `_process_order`."""
+        visto = {}
+
+        def _capturar(order_id):
+            visto["restante"] = deadline.restante()
+            return {"status": "ok"}
+
+        with patch("core.services._process_order", side_effect=_capturar):
+            process_order(1)
+        self.assertIsNotNone(visto["restante"])
+        self.assertLessEqual(visto["restante"], deadline.PRESUPUESTO_ORDEN)
+        self.assertGreater(visto["restante"], deadline.PRESUPUESTO_ORDEN - 5)
+
+    def test_el_finally_restaura_el_contexto_aunque_la_orden_falle(self):
+        """
+        Sin el `finally`, el presupuesto de esta orden se filtraría a la próxima
+        request que atienda el mismo worker de gunicorn.
+        """
+        with patch("core.services._process_order", side_effect=ValueError("boom")):
+            with self.assertRaises(ValueError):
+                process_order(1)
+        self.assertIsNone(deadline.restante())
+
+    def test_el_finally_restaura_el_contexto_en_el_camino_feliz(self):
+        with patch("core.services._process_order", return_value={"status": "ok"}):
+            process_order(1)
+        self.assertIsNone(deadline.restante())
+
+    def test_presupuesto_agotado_creando_contacto_graba_failed_order(self):
+        """Es el caso central de la spec."""
+        with patch("core.services.wc_api.get_order", return_value=self._orden()), patch(
+            "core.services.resolve_pos_and_payments", return_value=(6, [])
+        ), patch(
+            "core.services.resolve_contact_id",
+            side_effect=deadline.PresupuestoOrdenAgotado("sin tiempo"),
+        ):
+            with self.assertRaises(deadline.PresupuestoOrdenAgotado):
+                process_order(555)
+        fallida = FailedOrder.objects.get(order_id=555)
+        self.assertIn("contacto", fallida.message.lower())
+
+    def test_presupuesto_agotado_leyendo_productos_graba_failed_order(self):
+        """
+        La brecha encontrada el 2026-08-26: `build_sale_products` (que hace un
+        `get_product` por ítem) NO estaba envuelta en try/except, así que una
+        excepción ahí se escapaba de `process_order` sin registro. Es justo el
+        tramo que escala con la cantidad de ítems.
+        """
+        with patch("core.services.wc_api.get_order", return_value=self._orden(items=3)), patch(
+            "core.services.resolve_pos_and_payments", return_value=(6, [])
+        ), patch(
+            "core.services.resolve_contact_id", return_value=(7, ["cliente@example.com"])
+        ), patch(
+            "core.services.build_sale_products",
+            side_effect=deadline.PresupuestoOrdenAgotado("sin tiempo en el item 2"),
+        ):
+            with self.assertRaises(deadline.PresupuestoOrdenAgotado):
+                process_order(556)
+        fallida = FailedOrder.objects.get(order_id=556)
+        self.assertEqual(fallida.status, FailedOrder.FAILED)
+        self.assertIn("productos", fallida.message.lower())
+
+    def test_un_error_cualquiera_leyendo_productos_tambien_se_registra(self):
+        """Bug preexistente: un error de WooCommerce en este tramo también se perdía."""
+        with patch("core.services.wc_api.get_order", return_value=self._orden()), patch(
+            "core.services.resolve_pos_and_payments", return_value=(6, [])
+        ), patch(
+            "core.services.resolve_contact_id", return_value=(7, ["cliente@example.com"])
+        ), patch(
+            "core.services.build_sale_products",
+            side_effect=RuntimeError("WooCommerce caído"),
+        ):
+            with self.assertRaises(RuntimeError):
+                process_order(557)
+        self.assertTrue(FailedOrder.objects.filter(order_id=557).exists())

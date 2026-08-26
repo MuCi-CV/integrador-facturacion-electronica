@@ -6,6 +6,7 @@ from typing import Optional
 import sentry_sdk
 from django.db import IntegrityError
 
+from core import deadline
 from core.bims import bims, BimsBusinessError
 from core.ruc import get_razon_social
 from core.models import ContactCache, FailedOrder
@@ -472,6 +473,26 @@ def process_order(order_id: int) -> dict:
     """
     Orquesta el procesamiento completo de una orden de WooCommerce hacia BIMS.
 
+    Es el único punto donde se fija el presupuesto de la orden. gunicorn corre con
+    `--timeout 120` y mata al worker **por señal** al pasarse; un worker matado por
+    señal no ejecuta el `except` que graba el `FailedOrder`, así que la orden
+    desaparecería sin factura y sin registro. Con el presupuesto, cualquier fallo
+    por lentitud termina en un `FailedOrder` reintentable.
+
+    El `finally` no es decorativo: sin él, el presupuesto de esta orden se
+    filtraría a la próxima request que atienda el mismo worker.
+    """
+    token = deadline.iniciar()
+    try:
+        return _process_order(order_id)
+    finally:
+        deadline.restaurar(token)
+
+
+def _process_order(order_id: int) -> dict:
+    """
+    Orquesta el procesamiento completo de una orden de WooCommerce hacia BIMS.
+
     Retorna un dict con "status" y opcionalmente "message" o "error".
     Ante cualquier fallo persiste en FailedOrder y re-lanza la excepción.
     """
@@ -520,12 +541,22 @@ def process_order(order_id: int) -> dict:
         )
         raise
 
-    sale_products, skipped_messages = build_sale_products(
-        order_id=order_id,
-        line_items=order.get("line_items", []),
-        fee_lines=order.get("fee_lines", []),
-        discount=discount,
-    )
+    try:
+        sale_products, skipped_messages = build_sale_products(
+            order_id=order_id,
+            line_items=order.get("line_items", []),
+            fee_lines=order.get("fee_lines", []),
+            discount=discount,
+        )
+    except Exception as e:
+        FailedOrder.objects.update_or_create(
+            order_id=order_id,
+            defaults={
+                "status": FailedOrder.FAILED,
+                "message": f"Error al leer los productos en WooCommerce. {e}",
+            },
+        )
+        raise
 
     if not sale_products:
         # Si lo único que sobró fueron precios en 0, no hay nada que facturar: es un
