@@ -1922,6 +1922,111 @@ class TimeoutWooCommerceTest(TestCase):
         self.assertEqual(WooCommerceAPI().wcapi.timeout, TIMEOUT_WOOCOMMERCE)
 
 
+class PresupuestoOrdenWooCommerceTest(TestCase):
+    """
+    WooCommerce también consume presupuesto de la orden.
+
+    `get_product` se llama una vez por ítem, así que este tramo escala con la
+    cantidad de ítems y hoy no tiene ningún techo agregado: una orden de 5 ítems
+    puede gastar 5 x 30 = 150 s antes de tocar BIMS.
+    """
+
+    def _reloj(self):
+        estado = {"t": 1000.0}
+
+        def monotonic():
+            return estado["t"]
+
+        def avanzar(segundos):
+            estado["t"] += segundos
+
+        return monotonic, avanzar
+
+    def test_sin_presupuesto_usa_el_timeout_completo(self):
+        """Protege a cualquier uso fuera de una orden."""
+        api = WooCommerceAPI()
+        self.assertEqual(api._timeout_efectivo(), TIMEOUT_WOOCOMMERCE)
+
+    def test_con_presupuesto_amplio_usa_el_timeout_completo(self):
+        api = WooCommerceAPI()
+        monotonic, _ = self._reloj()
+        with patch("core.deadline.time.monotonic", monotonic):
+            token = deadline.iniciar(90)
+            try:
+                self.assertEqual(api._timeout_efectivo(), TIMEOUT_WOOCOMMERCE)
+            finally:
+                deadline.restaurar(token)
+
+    def test_con_presupuesto_corto_se_recorta(self):
+        api = WooCommerceAPI()
+        monotonic, _ = self._reloj()
+        with patch("core.deadline.time.monotonic", monotonic):
+            token = deadline.iniciar(7)
+            try:
+                self.assertEqual(api._timeout_efectivo(), 7)
+            finally:
+                deadline.restaurar(token)
+
+    def test_con_presupuesto_agotado_lanza_sin_pegarle_a_woocommerce(self):
+        api = WooCommerceAPI()
+        monotonic, avanzar = self._reloj()
+        with patch("core.deadline.time.monotonic", monotonic):
+            token = deadline.iniciar(5)
+            try:
+                avanzar(6)
+                with self.assertRaises(deadline.PresupuestoOrdenAgotado):
+                    api._timeout_efectivo()
+            finally:
+                deadline.restaurar(token)
+
+    def test_get_product_aplica_el_timeout_recortado(self):
+        api = WooCommerceAPI()
+        monotonic, _ = self._reloj()
+        respuesta = MagicMock()
+        respuesta.status_code = 200
+        respuesta.json.return_value = {"id": 1}
+        with patch("core.deadline.time.monotonic", monotonic), patch.object(
+            api.wcapi, "get", return_value=respuesta
+        ):
+            token = deadline.iniciar(9)
+            try:
+                api.get_product(1)
+            finally:
+                deadline.restaurar(token)
+            self.assertEqual(api.wcapi.timeout, 9)
+
+    def test_una_orden_de_muchos_items_no_supera_el_presupuesto(self):
+        """
+        El caso que hoy escala sin techo: con el presupuesto puesto, el ítem que
+        cae fuera del tiempo corta con PresupuestoOrdenAgotado en vez de seguir
+        sumando 30 s por ítem hasta pasarse de gunicorn.
+        """
+        api = WooCommerceAPI()
+        monotonic, avanzar = self._reloj()
+        respuesta = MagicMock()
+        respuesta.status_code = 200
+        respuesta.json.return_value = {"id": 1}
+
+        def get_lento(*args, **kwargs):
+            avanzar(TIMEOUT_WOOCOMMERCE)
+            return respuesta
+
+        atendidos = 0
+        with patch("core.deadline.time.monotonic", monotonic), patch.object(
+            api.wcapi, "get", side_effect=get_lento
+        ):
+            token = deadline.iniciar(deadline.PRESUPUESTO_ORDEN)
+            try:
+                with self.assertRaises(deadline.PresupuestoOrdenAgotado):
+                    for _ in range(10):
+                        api.get_product(1)
+                        atendidos += 1
+            finally:
+                deadline.restaurar(token)
+        # 90 s de presupuesto a 30 s por ítem: entran 3, el cuarto corta.
+        self.assertEqual(atendidos, 3)
+
+
 class DeadlineOrdenTest(TestCase):
     """
     El reloj por orden. `restante()` devolviendo None es la pieza central del

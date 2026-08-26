@@ -4,6 +4,8 @@ from woocommerce import API as WCAPI
 from django.conf import settings
 from typing import Union, List, Optional
 
+from core import deadline
+
 
 # Estaba en 480 s: cuatro veces los `--timeout 120` de gunicorn. Cualquier
 # llamada que pasara los 120 s hacía que gunicorn matara al worker POR SEÑAL, y
@@ -42,6 +44,25 @@ class WooCommerceAPI:
             url, key, secret, version="wc/v3", timeout=TIMEOUT_WOOCOMMERCE, verify_ssl=verify_ssl
         )
 
+    def _timeout_efectivo(self) -> float:
+        """
+        Timeout de esta llamada: el mínimo entre el propio y lo que queda de la orden.
+
+        `woocommerce.API` guarda `self.timeout` como atributo de instancia y lo lee
+        en cada request, así que ajustarlo antes de llamar surte efecto.
+
+        Sin presupuesto de orden devuelve el timeout de siempre: eso mantiene
+        intacto todo uso fuera de `process_order`.
+        """
+        restante = deadline.restante()
+        if restante is None:
+            return TIMEOUT_WOOCOMMERCE
+        if restante <= 0:
+            raise deadline.PresupuestoOrdenAgotado(
+                "Presupuesto de orden agotado antes de llamar WooCommerce."
+            )
+        return min(TIMEOUT_WOOCOMMERCE, restante)
+
     def get_products(self, **kwargs):
         res = self.wcapi.get("products", params=kwargs)
         if res.status_code == 200:
@@ -49,12 +70,14 @@ class WooCommerceAPI:
         raise self.ServerException(res.text)
 
     def get_product(self, id, **kwargs):
+        self.wcapi.timeout = self._timeout_efectivo()
         res = self.wcapi.get(f"products/{id}", params=kwargs)
         if res.status_code == 200:
             return res.json()
         raise self.ServerException(res.text)
 
     def get_order(self, id, **kwargs):
+        self.wcapi.timeout = self._timeout_efectivo()
         res = self.wcapi.get(f"orders/{id}", params=kwargs)
         if res.status_code == 200:
             return res.json()
@@ -68,6 +91,7 @@ class WooCommerceAPI:
         `fooeventspos_cashier` (verificado el 2026-08-24: customers/729 ->
         sancosmos@muci.org), así que no hace falta la API de WordPress.
         """
+        self.wcapi.timeout = self._timeout_efectivo()
         res = self.wcapi.get(f"customers/{id}", params=kwargs)
         if res.status_code == 200:
             return res.json()
@@ -82,6 +106,7 @@ class WooCommerceAPI:
         Hace falta `role=all`: sin eso wc/v3 solo devuelve los que tienen rol
         `customer` y los cajeros quedan afuera.
         """
+        self.wcapi.timeout = self._timeout_efectivo()
         res = self.wcapi.get("customers", params={"email": email, "role": "all"})
         if res.status_code != 200:
             raise self.ServerException(res.text)
@@ -89,6 +114,7 @@ class WooCommerceAPI:
         return encontrados[0] if encontrados else None
 
     def refund_order(self, id, data, **kwargs):
+        self.wcapi.timeout = self._timeout_efectivo()
         res = self.wcapi.post(f"orders/{id}/refunds", data={"data": data})
         if res.status_code == 200:
             return res.json()
