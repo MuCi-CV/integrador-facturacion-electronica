@@ -53,6 +53,22 @@ class WooCommerceAPI:
 
         Sin presupuesto de orden devuelve el timeout de siempre: eso mantiene
         intacto todo uso fuera de `process_order`.
+
+        OJO concurrencia: el valor calculado acá se asigna a `self.wcapi.timeout`,
+        que es estado mutable de instancia sobre `wc_api`, el singleton a nivel de
+        módulo (ver el final de este archivo). Es exactamente el patrón que el
+        docstring de `core/deadline.py` descarta para el singleton `bims` ("se
+        rompe sin aviso el día que algo sea concurrente") — acá se acepta porque
+        `woocommerce.API` únicamente expone el timeout como atributo mutable de
+        instancia, no hay otra forma de variarlo por llamada sin envolver la
+        librería. Es seguro solo porque gunicorn corre workers **sincrónicos**:
+        un worker atiende un request a la vez, así que no hay dos requests en
+        vuelo que puedan pisarse la asignación. Con una clase de worker con
+        concurrencia dentro del proceso (`gthread` con `--threads > 1`, `gevent`)
+        dos órdenes podrían intercalarse entre la asignación y el `.get()`/`.post()`
+        y una terminaría usando el presupuesto de la otra, en silencio. Si algún
+        día se cambia la clase de worker, este método deja de ser seguro tal como
+        está escrito.
         """
         restante = deadline.restante()
         if restante is None:
