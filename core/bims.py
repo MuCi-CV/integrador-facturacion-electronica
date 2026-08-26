@@ -324,12 +324,19 @@ class BimsApi:
         try:
             return self._retry_loop(method, url, max_retries, retry_delay, limite, **kwargs)
         except BimsTransientError:
-            alternate_url = self._alternate_base_url(url)
+            # El chequeo de tiempo va ANTES de `_alternate_base_url`: ese método
+            # no es una consulta pura, muta `self.base_url` de forma pegajosa.
+            # Llamarlo y después abandonar dejaba la instancia apuntando al host
+            # alternativo sin haber mandado un solo request y sin loguearlo.
+            #
             # Si el presupuesto de LLAMADA ya se agotó, reentrar al loop con el
             # mismo límite hacía que el segundo loop fallara de inmediato con
             # `Last error: None`, tapando la causa real (hallazgo 4). Y no tiene
             # sentido: no queda tiempo para probar el otro host.
-            if alternate_url is None or time.monotonic() >= limite:
+            if time.monotonic() >= limite:
+                raise
+            alternate_url = self._alternate_base_url(url)
+            if alternate_url is None:
                 raise
             logging.warning(
                 f"BIMS sin respuesta en {url} tras {max_retries} intentos; "

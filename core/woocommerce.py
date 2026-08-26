@@ -1,8 +1,9 @@
+import contextlib
 import urllib
 
 from woocommerce import API as WCAPI
 from django.conf import settings
-from typing import Union, List, Optional
+from typing import Union, List, Optional, Tuple
 
 from core import deadline
 
@@ -14,6 +15,11 @@ from core import deadline
 # vez por ítem de la orden, así que este valor se multiplica por la cantidad de
 # ítems; WooCommerce vive en el mismo servidor y responde rápido.
 TIMEOUT_WOOCOMMERCE = 30
+
+# Espejo de `bims.TIMEOUT_CONEXION`. Solo se aplica cuando hay presupuesto de
+# orden: un timeout escalar en `requests` vale para conexión Y lectura, así que
+# sin la tupla una llamada recortada a N segundos puede gastar 2N.
+TIMEOUT_CONEXION_WOOCOMMERCE = 5
 
 
 class WooCommerceAPI:
@@ -44,15 +50,27 @@ class WooCommerceAPI:
             url, key, secret, version="wc/v3", timeout=TIMEOUT_WOOCOMMERCE, verify_ssl=verify_ssl
         )
 
-    def _timeout_efectivo(self) -> float:
+    def _timeout_efectivo(self, endpoint: str) -> Union[float, Tuple[float, float]]:
         """
         Timeout de esta llamada: el mínimo entre el propio y lo que queda de la orden.
 
         `woocommerce.API` guarda `self.timeout` como atributo de instancia y lo lee
         en cada request, así que ajustarlo antes de llamar surte efecto.
 
-        Sin presupuesto de orden devuelve el timeout de siempre: eso mantiene
-        intacto todo uso fuera de `process_order`.
+        Sin presupuesto de orden devuelve el timeout de siempre, como escalar: eso
+        mantiene byte a byte todo uso fuera de `process_order` — en particular
+        `sync_bims_contacts`, que nunca fija presupuesto y no debe cambiar de
+        comportamiento.
+
+        Con presupuesto de orden en juego devuelve una tupla `(conexión, lectura)`
+        en vez de un escalar: un timeout escalar en `requests` vale para conexión
+        Y lectura por separado, así que una llamada recortada a N segundos podía
+        tardar hasta 2N (mismo defecto ya corregido del lado de BIMS, ver
+        `TIMEOUT_CONEXION` en `core/bims.py`).
+
+        `endpoint` solo se usa para el mensaje si el presupuesto ya se agotó: sin
+        eso, `FailedOrder.message` no distinguía qué llamada de WooCommerce se
+        quedó sin tiempo (hallazgo 4).
 
         OJO concurrencia: el valor calculado acá se asigna a `self.wcapi.timeout`,
         que es estado mutable de instancia sobre `wc_api`, el singleton a nivel de
@@ -75,9 +93,31 @@ class WooCommerceAPI:
             return TIMEOUT_WOOCOMMERCE
         if restante <= 0:
             raise deadline.PresupuestoOrdenAgotado(
-                "Presupuesto de orden agotado antes de llamar WooCommerce."
+                f"Presupuesto de orden agotado antes de llamar a WooCommerce en "
+                f"{endpoint}, excedido por {-restante:.1f}s."
             )
-        return min(TIMEOUT_WOOCOMMERCE, restante)
+        return (
+            min(TIMEOUT_CONEXION_WOOCOMMERCE, restante),
+            min(TIMEOUT_WOOCOMMERCE, restante),
+        )
+
+    @contextlib.contextmanager
+    def _timeout_recortado(self, endpoint: str):
+        """
+        Fija `self.wcapi.timeout` al recorte de esta llamada y lo restaura al salir.
+
+        Sin el restore, el recorte queda pegado al singleton `wc_api`: el valor
+        (posible fracción de segundo) que dejó la última orden persiste ahí hasta
+        que otra llamada lo vuelva a asignar. Los cinco métodos que usan esto se
+        auto-sanan porque todos reasignan antes de pegarle a la API, pero un
+        método nuevo que se agregue sin pasar por acá (como `get_products`, que
+        hoy no lo usa) heredaría en silencio el presupuesto de una orden anterior.
+        """
+        self.wcapi.timeout = self._timeout_efectivo(endpoint)
+        try:
+            yield
+        finally:
+            self.wcapi.timeout = TIMEOUT_WOOCOMMERCE
 
     def get_products(self, **kwargs):
         res = self.wcapi.get("products", params=kwargs)
@@ -86,15 +126,15 @@ class WooCommerceAPI:
         raise self.ServerException(res.text)
 
     def get_product(self, id, **kwargs):
-        self.wcapi.timeout = self._timeout_efectivo()
-        res = self.wcapi.get(f"products/{id}", params=kwargs)
+        with self._timeout_recortado(f"products/{id}"):
+            res = self.wcapi.get(f"products/{id}", params=kwargs)
         if res.status_code == 200:
             return res.json()
         raise self.ServerException(res.text)
 
     def get_order(self, id, **kwargs):
-        self.wcapi.timeout = self._timeout_efectivo()
-        res = self.wcapi.get(f"orders/{id}", params=kwargs)
+        with self._timeout_recortado(f"orders/{id}"):
+            res = self.wcapi.get(f"orders/{id}", params=kwargs)
         if res.status_code == 200:
             return res.json()
         raise self.ServerException(res.text)
@@ -107,8 +147,8 @@ class WooCommerceAPI:
         `fooeventspos_cashier` (verificado el 2026-08-24: customers/729 ->
         sancosmos@muci.org), así que no hace falta la API de WordPress.
         """
-        self.wcapi.timeout = self._timeout_efectivo()
-        res = self.wcapi.get(f"customers/{id}", params=kwargs)
+        with self._timeout_recortado(f"customers/{id}"):
+            res = self.wcapi.get(f"customers/{id}", params=kwargs)
         if res.status_code == 200:
             return res.json()
         if res.status_code == 404:
@@ -122,16 +162,16 @@ class WooCommerceAPI:
         Hace falta `role=all`: sin eso wc/v3 solo devuelve los que tienen rol
         `customer` y los cajeros quedan afuera.
         """
-        self.wcapi.timeout = self._timeout_efectivo()
-        res = self.wcapi.get("customers", params={"email": email, "role": "all"})
+        with self._timeout_recortado("customers"):
+            res = self.wcapi.get("customers", params={"email": email, "role": "all"})
         if res.status_code != 200:
             raise self.ServerException(res.text)
         encontrados = res.json()
         return encontrados[0] if encontrados else None
 
     def refund_order(self, id, data, **kwargs):
-        self.wcapi.timeout = self._timeout_efectivo()
-        res = self.wcapi.post(f"orders/{id}/refunds", data={"data": data})
+        with self._timeout_recortado(f"orders/{id}/refunds"):
+            res = self.wcapi.post(f"orders/{id}/refunds", data={"data": data})
         if res.status_code == 200:
             return res.json()
         raise self.ServerException(res.text)

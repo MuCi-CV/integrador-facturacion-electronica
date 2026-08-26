@@ -36,7 +36,11 @@ from core.constants import (
 )
 from core.models import FailedOrder, RucCache, Sucursal
 from core.forms import SucursalForm
-from core.woocommerce import TIMEOUT_WOOCOMMERCE, WooCommerceAPI
+from core.woocommerce import (
+    TIMEOUT_CONEXION_WOOCOMMERCE,
+    TIMEOUT_WOOCOMMERCE,
+    WooCommerceAPI,
+)
 from core.sucursales import completar_desde_woocommerce, opciones_de_punto_de_venta
 from core import deadline
 from django.test import TestCase, override_settings
@@ -1900,6 +1904,29 @@ class PresupuestoOrdenBimsTest(TestCase):
         self.assertNotIn("Last error: None", str(ctx.exception))
         self.assertIn("BIMS no responde", str(ctx.exception))
 
+    @override_settings(BIMS_API_KEY=_TEST_API_KEY)
+    def test_agotado_el_presupuesto_no_deja_el_base_url_conmutado(self):
+        """
+        Hallazgo 1: `_alternate_base_url` no es una consulta pura, muta
+        `self.base_url` de forma pegajosa (sticky para el resto de la vida de
+        la instancia). Si el presupuesto de la LLAMADA ya se agotó, no se manda
+        ningún request al host alternativo, así que tampoco debe quedar la
+        instancia apuntando ahí para las próximas órdenes de este worker.
+        """
+        api = self._api()
+        api.fallback_url = "http://otro.bims.test.local"
+        base_url_original = api.base_url
+        capturados = []
+        monotonic, dormir, fake_send = self._reloj_y_send(capturados)
+        with patch("core.bims.time.monotonic", monotonic), patch(
+            "core.deadline.time.monotonic", monotonic
+        ), patch("core.bims.time.sleep", dormir), patch.object(
+            requests.adapters.HTTPAdapter, "send", fake_send
+        ):
+            with self.assertRaises(BimsTransientError):
+                api.list_contacts("123456", "CI")
+        self.assertEqual(api.base_url, base_url_original)
+
     # ── La garantía agregada ──────────────────────────────────────────────────
 
     def test_tres_llamadas_no_superan_el_presupuesto_de_la_orden(self):
@@ -1948,17 +1975,21 @@ class PresupuestoOrdenWooCommerceTest(TestCase):
         return monotonic, avanzar
 
     def test_sin_presupuesto_usa_el_timeout_completo(self):
-        """Protege a cualquier uso fuera de una orden."""
+        """Protege a cualquier uso fuera de una orden (p. ej. sync_bims_contacts)."""
         api = WooCommerceAPI()
-        self.assertEqual(api._timeout_efectivo(), TIMEOUT_WOOCOMMERCE)
+        self.assertEqual(api._timeout_efectivo("orders/1"), TIMEOUT_WOOCOMMERCE)
 
     def test_con_presupuesto_amplio_usa_el_timeout_completo(self):
+        """Con presupuesto en juego el resultado es tupla, aunque el tope siga siendo el de siempre."""
         api = WooCommerceAPI()
         monotonic, _ = self._reloj()
         with patch("core.deadline.time.monotonic", monotonic):
             token = deadline.iniciar(90)
             try:
-                self.assertEqual(api._timeout_efectivo(), TIMEOUT_WOOCOMMERCE)
+                self.assertEqual(
+                    api._timeout_efectivo("orders/1"),
+                    (TIMEOUT_CONEXION_WOOCOMMERCE, TIMEOUT_WOOCOMMERCE),
+                )
             finally:
                 deadline.restaurar(token)
 
@@ -1968,7 +1999,10 @@ class PresupuestoOrdenWooCommerceTest(TestCase):
         with patch("core.deadline.time.monotonic", monotonic):
             token = deadline.iniciar(7)
             try:
-                self.assertEqual(api._timeout_efectivo(), 7)
+                self.assertEqual(
+                    api._timeout_efectivo("orders/1"),
+                    (TIMEOUT_CONEXION_WOOCOMMERCE, 7),
+                )
             finally:
                 deadline.restaurar(token)
 
@@ -1979,12 +2013,42 @@ class PresupuestoOrdenWooCommerceTest(TestCase):
             token = deadline.iniciar(5)
             try:
                 avanzar(6)
-                with self.assertRaises(deadline.PresupuestoOrdenAgotado):
-                    api._timeout_efectivo()
+                with self.assertRaises(deadline.PresupuestoOrdenAgotado) as ctx:
+                    api._timeout_efectivo("orders/42")
             finally:
                 deadline.restaurar(token)
+        # Hallazgo 4: el mensaje tiene que nombrar el endpoint, igual que BIMS.
+        self.assertIn("orders/42", str(ctx.exception))
 
     def test_get_product_aplica_el_timeout_recortado(self):
+        api = WooCommerceAPI()
+        monotonic, _ = self._reloj()
+        respuesta = MagicMock()
+        respuesta.status_code = 200
+        respuesta.json.return_value = {"id": 1}
+        capturado = {}
+
+        def get_y_capturar(*args, **kwargs):
+            # El timeout hay que leerlo DURANTE la llamada: hallazgo 6 lo
+            # restaura a TIMEOUT_WOOCOMMERCE apenas termina.
+            capturado["timeout"] = api.wcapi.timeout
+            return respuesta
+
+        with patch("core.deadline.time.monotonic", monotonic), patch.object(
+            api.wcapi, "get", side_effect=get_y_capturar
+        ):
+            token = deadline.iniciar(9)
+            try:
+                api.get_product(1)
+            finally:
+                deadline.restaurar(token)
+        self.assertEqual(capturado["timeout"], (TIMEOUT_CONEXION_WOOCOMMERCE, 9))
+
+    def test_el_timeout_se_restaura_tras_la_llamada(self):
+        """
+        Hallazgo 6: sin restore, el recorte de una orden queda pegado al
+        singleton `wc_api` y la siguiente orden lo hereda en silencio.
+        """
         api = WooCommerceAPI()
         monotonic, _ = self._reloj()
         respuesta = MagicMock()
@@ -1998,7 +2062,36 @@ class PresupuestoOrdenWooCommerceTest(TestCase):
                 api.get_product(1)
             finally:
                 deadline.restaurar(token)
-            self.assertEqual(api.wcapi.timeout, 9)
+        self.assertEqual(api.wcapi.timeout, TIMEOUT_WOOCOMMERCE)
+
+    def test_la_conexion_va_acotada_por_separado_de_la_lectura(self):
+        """
+        Hallazgo 2: un timeout escalar en `requests` vale para conexión Y
+        lectura por separado, así que sin la tupla una llamada recortada a N
+        segundos podía tardar hasta 2N. Con presupuesto amplio, la conexión
+        queda en su propio tope corto aunque la lectura tenga margen.
+        """
+        api = WooCommerceAPI()
+        monotonic, _ = self._reloj()
+        respuesta = MagicMock()
+        respuesta.status_code = 200
+        respuesta.json.return_value = {"id": 1}
+        capturado = {}
+
+        def get_y_capturar(*args, **kwargs):
+            capturado["timeout"] = api.wcapi.timeout
+            return respuesta
+
+        with patch("core.deadline.time.monotonic", monotonic), patch.object(
+            api.wcapi, "get", side_effect=get_y_capturar
+        ):
+            token = deadline.iniciar(20)
+            try:
+                api.get_order(1)
+            finally:
+                deadline.restaurar(token)
+        self.assertIsInstance(capturado["timeout"], tuple)
+        self.assertEqual(capturado["timeout"][0], TIMEOUT_CONEXION_WOOCOMMERCE)
 
     def test_una_orden_de_muchos_items_no_supera_el_presupuesto(self):
         """
