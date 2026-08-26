@@ -16,6 +16,7 @@ with patch("requests.post") as _mock_post:
     from core.bims import (
         BimsApi,
         BimsBusinessError,
+        BimsError,
         BimsTransientError,
         PRESUPUESTO_REINTENTOS,
         TIMEOUT_CONEXION,
@@ -32,6 +33,7 @@ from core.models import FailedOrder, RucCache, Sucursal
 from core.forms import SucursalForm
 from core.woocommerce import TIMEOUT_WOOCOMMERCE, WooCommerceAPI
 from core.sucursales import completar_desde_woocommerce, opciones_de_punto_de_venta
+from core import deadline
 from django.test import TestCase, override_settings
 
 
@@ -1729,3 +1731,84 @@ class TimeoutWooCommerceTest(TestCase):
 
     def test_el_cliente_se_construye_con_ese_timeout(self):
         self.assertEqual(WooCommerceAPI().wcapi.timeout, TIMEOUT_WOOCOMMERCE)
+
+
+class DeadlineOrdenTest(TestCase):
+    """
+    El reloj por orden. `restante()` devolviendo None es la pieza central del
+    diseño: "sin presupuesto" es un estado explícito y legítimo, y es lo que
+    hace que `sync_bims_contacts` siga funcionando sin tocar ese archivo.
+    """
+
+    def _reloj(self):
+        """Reloj falso: devuelve (monotonic, avanzar)."""
+        estado = {"t": 1000.0}
+
+        def monotonic():
+            return estado["t"]
+
+        def avanzar(segundos):
+            estado["t"] += segundos
+
+        return monotonic, avanzar
+
+    def test_sin_iniciar_no_hay_presupuesto(self):
+        self.assertIsNone(deadline.restante())
+
+    def test_iniciar_fija_el_presupuesto_completo(self):
+        monotonic, _ = self._reloj()
+        with patch("core.deadline.time.monotonic", monotonic):
+            token = deadline.iniciar()
+            try:
+                self.assertAlmostEqual(deadline.restante(), deadline.PRESUPUESTO_ORDEN)
+            finally:
+                deadline.restaurar(token)
+
+    def test_el_restante_baja_con_el_reloj(self):
+        monotonic, avanzar = self._reloj()
+        with patch("core.deadline.time.monotonic", monotonic):
+            token = deadline.iniciar()
+            try:
+                avanzar(30)
+                self.assertAlmostEqual(deadline.restante(), deadline.PRESUPUESTO_ORDEN - 30)
+            finally:
+                deadline.restaurar(token)
+
+    def test_el_restante_puede_ser_negativo(self):
+        """No se recorta a 0: el consumidor distingue 'agotado' de 'sin presupuesto'."""
+        monotonic, avanzar = self._reloj()
+        with patch("core.deadline.time.monotonic", monotonic):
+            token = deadline.iniciar()
+            try:
+                avanzar(deadline.PRESUPUESTO_ORDEN + 5)
+                self.assertLess(deadline.restante(), 0)
+            finally:
+                deadline.restaurar(token)
+
+    def test_restaurar_vuelve_a_sin_presupuesto(self):
+        token = deadline.iniciar()
+        deadline.restaurar(token)
+        self.assertIsNone(deadline.restante())
+
+    def test_acepta_un_presupuesto_explicito(self):
+        """Los tests de las otras tareas fijan presupuestos chicos con esto."""
+        monotonic, _ = self._reloj()
+        with patch("core.deadline.time.monotonic", monotonic):
+            token = deadline.iniciar(10)
+            try:
+                self.assertAlmostEqual(deadline.restante(), 10)
+            finally:
+                deadline.restaurar(token)
+
+    def test_deja_margen_bajo_el_timeout_de_gunicorn(self):
+        """30 s de margen para grabar el FailedOrder y responder."""
+        self.assertLessEqual(deadline.PRESUPUESTO_ORDEN, 90)
+        self.assertGreaterEqual(120 - deadline.PRESUPUESTO_ORDEN, 30)
+
+    def test_la_excepcion_no_es_un_error_de_bims(self):
+        """
+        Si heredara de BimsTransientError, el `except` de `_retry_request` se la
+        comería y volvería a intentar sin tiempo disponible.
+        """
+        self.assertTrue(issubclass(deadline.PresupuestoOrdenAgotado, Exception))
+        self.assertFalse(issubclass(deadline.PresupuestoOrdenAgotado, BimsError))
