@@ -64,14 +64,14 @@ bucle `for item in line_items:` con `wc_api.get_product(search_id)`.
 Consecuencia: un `PresupuestoOrdenAgotado` lanzado desde `get_product` **se escapa de
 `process_order` sin grabar `FailedOrder`** — justo el tramo que la spec identifica como el más
 riesgoso por escalar con la cantidad de ítems. La garantía central de la spec no se cumpliría
-sin cerrar esto. Se cubre en la **Tarea 4, Pasos 6–10**.
+sin cerrar esto. Se cubre en la **Task 4, Pasos 6–10**.
 
 (Nota: esto ya es un bug hoy, independiente de esta feature — una `ServerException` de
 WooCommerce en el medio del bucle también se pierde sin registro.)
 
 ---
 
-### Tarea 1: El módulo del reloj (`core/deadline.py`)
+### Task 1: El módulo del reloj (`core/deadline.py`)
 
 **Archivos:**
 - Crear: `core/deadline.py`
@@ -79,7 +79,7 @@ WooCommerce en el medio del bucle también se pierde sin registro.)
 
 **Interfaces:**
 - Consume: nada del proyecto. Solo `contextvars`, `time`, `typing`.
-- Produce (lo usan las tareas 2, 3 y 4):
+- Produce (lo usan las Tasks 2, 3 y 4):
   - `PRESUPUESTO_ORDEN: int = 90`
   - `iniciar(presupuesto: float = PRESUPUESTO_ORDEN) -> contextvars.Token`
   - `restaurar(token: contextvars.Token) -> None`
@@ -300,14 +300,14 @@ git commit -m "feat(deadline): modulo del presupuesto por orden con ContextVar"
 
 ---
 
-### Tarea 2: Integrar el presupuesto en `bims.py`
+### Task 2: Integrar el presupuesto en `bims.py`
 
 **Archivos:**
 - Modificar: `core/bims.py` — imports (cabecera), `_retry_request` (313-331), `_retry_loop` (333-344)
 - Test: `core/tests.py` (clase nueva `PresupuestoOrdenBimsTest`)
 
 **Interfaces:**
-- Consume de la Tarea 1: `deadline.restante()`, `deadline.PresupuestoOrdenAgotado`,
+- Consume de la Task 1: `deadline.restante()`, `deadline.PresupuestoOrdenAgotado`,
   `deadline.PRESUPUESTO_ORDEN`, `deadline.iniciar()`, `deadline.restaurar()`.
 - Produce: `_retry_loop` pasa a lanzar `deadline.PresupuestoOrdenAgotado` cuando el que se
   agota es el presupuesto **de la orden** (y `BimsTransientError` cuando es el de la
@@ -635,7 +635,7 @@ git commit -m "feat(bims): respetar el presupuesto de la orden y recortar el con
 
 ---
 
-### Tarea 3: Integrar el presupuesto en `woocommerce.py`
+### Task 3: Integrar el presupuesto en `woocommerce.py`
 
 **Archivos:**
 - Modificar: `core/woocommerce.py` — imports, método nuevo `_timeout_efectivo`, y los cinco
@@ -643,7 +643,7 @@ git commit -m "feat(bims): respetar el presupuesto de la orden y recortar el con
 - Test: `core/tests.py` (clase nueva `PresupuestoOrdenWooCommerceTest`)
 
 **Interfaces:**
-- Consume de la Tarea 1: `deadline.restante()`, `deadline.PresupuestoOrdenAgotado`.
+- Consume de la Task 1: `deadline.restante()`, `deadline.PresupuestoOrdenAgotado`.
 - Produce: `WooCommerceAPI._timeout_efectivo() -> float`. Los métodos `get_order`,
   `get_product`, `get_customer`, `find_customer_by_email` y `refund_order` ajustan
   `self.wcapi.timeout` antes de cada request. Las firmas públicas **no cambian**.
@@ -862,7 +862,7 @@ git commit -m "feat(woocommerce): recortar el timeout al restante de la orden"
 
 ---
 
-### Tarea 4: Fijar el presupuesto en `process_order` y cerrar la brecha del `FailedOrder`
+### Task 4: Fijar el presupuesto en `process_order` y cerrar la brecha del `FailedOrder`
 
 **Archivos:**
 - Modificar: `core/services.py` — imports, `process_order` (471-591), la llamada a
@@ -870,7 +870,7 @@ git commit -m "feat(woocommerce): recortar el timeout al restante de la orden"
 - Test: `core/tests.py` (clase nueva `PresupuestoOrdenProcessOrderTest`)
 
 **Interfaces:**
-- Consume de la Tarea 1: `deadline.iniciar()`, `deadline.restaurar()`,
+- Consume de la Task 1: `deadline.iniciar()`, `deadline.restaurar()`,
   `deadline.PresupuestoOrdenAgotado`.
 - Produce: `process_order(order_id: int) -> dict` conserva su firma y su contrato. El cuerpo
   actual pasa a llamarse `_process_order(order_id: int) -> dict` (privado, no lo llama nadie
@@ -1144,7 +1144,7 @@ git commit -m "feat(services): presupuesto por orden y FailedOrder al leer produ
 
 ---
 
-### Tarea 5: Verificar sobre el stack real de producción
+### Task 5: Verificar sobre el stack real de producción
 
 **Archivos:** ninguno. Es verificación previa al despliegue.
 
