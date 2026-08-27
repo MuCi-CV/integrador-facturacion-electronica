@@ -1,183 +1,138 @@
-# Handoff sesión del 2026-08-26
+# Handoff sesión del 2026-08-27
 
-> Tres actos: se validó el despliegue de timeouts del día anterior, se implementó entero el
-> presupuesto por orden, y se retomó la arquitectura del hub hasta dejar una propuesta lista
-> para presentar. **Nada se desplegó.** Producción siguió en `main` (`3b9773c`) todo el día.
+> Se cerraron los 5 puntos que el handoff anterior dejaba sin comprobar, se **desplegaron dos
+> cosas** y se verificaron las dos con tráfico real. Un pedido cambió de forma por completo a mitad
+> de camino, y apareció una **fuga de credencial** que no tiene que ver con nada de lo anterior.
 
 ## Estado al cierre
 
 | | |
 |---|---|
-| **Producción** | `main` @ `3b9773c` — **sin cambios en toda la sesión** |
-| Rama de trabajo | `feature/presupuesto-por-orden` @ `f07e79d`, pusheada |
-| Tests | **152/152** en local (3.12 + Django 6) **y** sobre el stack de producción (3.7.17 + Django 3.2.18) |
-| Servicio | último arranque 12:00 UTC — el reinicio programado, anterior a esta sesión |
-| Propuesta de donaciones | publicada, **esperando que Carlos la presente** |
+| **Producción** | `main` @ **`12cf312`** — dos despliegues hoy, los dos verificados en vivo |
+| Servicio | último arranque **19:26:54 UTC** (el del segundo despliegue) |
+| Tests | **155/155** en local (3.12 + Django 6) y sobre el **venv exacto** de producción (3.7.17 + Django 3.2.25) |
+| Ramas sin mergear | `chore/verificar-stack-palancas` (tooling, ver abajo) |
 
 ---
 
-# ⚠️ LO QUE QUEDÓ SIN COMPROBAR
+# ⚠️ LO PRIMERO DE MAÑANA
 
-Esto es lo primero de mañana. Todo lo demás de este documento es contexto.
+### 1. La fuga de credencial en `bims_api.log`
 
-### 1. El nombre del fee de la propina — **puede haber plata sin facturar**
+La respuesta de `POST /sales/` de BIMS incluye `Agency.tae_password` **en texto plano** (más
+`tae_username`). El integrador loguea el body crudo, así que **cada venta exitosa escribe esa
+credencial en disco**, replicada por la rotación en `.1/.2/.3` y `.bak`.
 
-`services.py:455` solo reconoce la propina si el cargo se llama **exactamente `Tip`**. Otro
-nombre → no se factura y **no se loguea nada**.
+Son **dos problemas separados**: que BIMS lo mande (hay que reportarlo, es su credencial) y que
+nosotros lo escribamos sin filtrar (nuestro arreglo: redactar `password|secret|token|api_key` antes
+de loguear). El log **no está en git** desde `e53b849`, así que no se filtró al repo.
 
-Lo que se buscó y lo que dio:
+**El reporte ya está escrito:** `docs/reportes/2026-08-27-reporte-a-bims.md`. Falta **enviarlo**.
+Está en dos partes a propósito — la de seguridad conviene mandarla sola.
 
-| Búsqueda | Muestra | Resultado |
+### 2. El cron de las 00:00 UTC — canario del presupuesto por orden
+
+`sync_bims_contacts` hace 38 llamadas secuenciales y **no debe** tener presupuesto de orden: tiene
+que recibir `None` de `restante()`. Se verificó fuera de contexto en el smoke test, pero la corrida
+completa de 17.300 contactos todavía no pasó con este código. Si el sync termina sin presupuestos
+agotados, el despliegue queda validado del todo.
+
+---
+
+## 1. Los 5 puntos sin comprobar, cerrados
+
+| # | Punto | Resultado |
 |---|---|---|
-| `product_id: 100` en payloads a BIMS | 13 ventas (`bims_api.log*` + `.bak`) | **0** |
-| Ventas con más de un ítem | esas 13 | **0** |
-| La palabra "propina" en `bims_sync.log` | 5,5 meses (13-mar a 26-ago) | **0** |
+| 1 | Nombre del fee de la propina | **Sin plata perdida.** En todo el histórico hay dos nombres: `Tip` 699 veces (551 en `completed`, desde 2023-10-08) y `Giftcard (777#gcn)` 3 veces —todas **negativas** y en órdenes **canceladas**, o sea que nunca llegaron. El riesgo real es otro: el nombre sale de `esc_html__('Tip', 'wpslash-tipping')`, **cadena traducible**. Un `.mo` lo vuelve "Propina" y las propinas dejan de facturarse en silencio |
+| 2 | Smoke test contra el BIMS real | **Pasa.** `login` 2,19 s, `get_posales` OK con la tupla `(connect, read)`, y con presupuesto agotado corta en **0,0 s** en vez de colgarse |
+| 3 | Venv exacto | **155/155 sobre Django 3.2.25** |
+| 4 | `order_id` duplicados | **No hay.** 8588 filas, 8588 distintos → la migración del `unique` del sub-proyecto A es segura |
+| 5 | ¿Woo le habla al CRM? | **Sí, por plugin.** `woocommerce-krayin-crm`, en `woocommerce_order_status_changed`, vía Action Scheduler. 134 leads en un día, todos 200 |
 
-**No concluye nada, y por qué:** los tres escenarios —no hay propinas, funcionan, se
-pierden— producen el mismo silencio. Una propina exitosa no escribe log; una perdida
-tampoco. El código es inobservable justo en el modo de falla que importa.
+Del punto 5 salió algo útil: **la correlación pedido↔lead ya existe** (`_krayin_lead_id` como meta
+de la orden), así que el eslabón que falta es solo **orden↔factura de BIMS**, que es el
+sub-proyecto A′.
 
-**Cómo cerrarlo, dos caminos:**
+## 2. Presupuesto por orden — DESPLEGADO 13:41:02 UTC
 
-- **Barato y definitivo en días:** una línea que loguee todo fee cuyo nombre no se reconoce.
-- **Definitivo ya, necesita root** (el `.env` no lo lee `anthropic_readonly`):
+Fast-forward `3b9773c..11d4780`, `migrate` no-op, restart. Sin variables nuevas en el `.env`.
 
-```
-ssh root@muci.org "cd /var/www/integrador && /root/.local/share/virtualenvs/integrador-ObaHlHmv/bin/python -c \"
-from dotenv import dotenv_values; from woocommerce import API; from collections import Counter
-c = dotenv_values('.env')
-w = API(url=c['WOOCOMMERCE_URL'], consumer_key=c['WOOCOMMERCE_KEY'], consumer_secret=c['WOOCOMMERCE_SECRET'], version='wc/v3', timeout=30)
-r = w.get('orders', params={'per_page':100,'status':'any'}).json()
-n = Counter(f['name'] for o in r for f in o.get('fee_lines',[]))
-print('ordenes revisadas:', len(r)); print('nombres de fee:', dict(n) or 'NINGUNO')
-\""
-```
+**Verificado en vivo:** la orden 201914 entró a los 27 s del reinicio y la **201916 facturó completa
+(Sale 31280) en ~9,7 s**. Cero presupuestos agotados, cero errores. Cierra el hallazgo 1 de los
+timeouts, que era la condición para discutir sacar el reinicio cada 6 h.
 
-### 2. Smoke test contra el BIMS real — **bloquea el despliegue**
+## 3. Cortesía — DESPLEGADO 19:26:54 UTC y verificado con una venta real
 
-Nunca se corrió. Es lo único que probaría que la tupla `(connect, read)` que introdujo esta
-rama viaja bien contra la API de verdad. **Necesita root** (lee el `.env`).
+**El pedido cambió de forma.** Arrancó como *"que el merch con precio 0 llegue para descontar
+inventario"*; tras hablar con finanzas resultó ser otra cosa: que una venta de caja con método
+**Cortesía** llegue **con el precio original** y sea **rastreable**.
 
-### 3. Django 3.2.18 vs 3.2.25
+**Hallazgo central:** FooEvents **no tiene** un método "Cortesía". La caja usa el slot
+`fooeventspos_direct_bank_transfer` reetiquetado — **1036 órdenes desde 2023-10-11, ninguna llegó
+nunca**. La transferencia bancaria de verdad es `cash_on_delivery` (26). Confundirlos haría figurar
+una cortesía como cobrada.
 
-La suite se validó sobre el `python3.7` **del sistema**, que trae Django **3.2.18**. El venv
-de producción tiene **3.2.25** — 7 releases de parche dentro de la misma minor. Prueba
-compatibilidad con 3.7 y con la API de 3.2; no prueba el venv exacto. Cerrarlo necesita root.
+**Verificación end-to-end:** orden Woo **202707 → BIMS Sale 31301**, `payment_method_id: 43`,
+producto *Tazas Pequeñas SC* a **35.000 = su `sell_price`**, `invoice_number 12000`, certificada ante
+la SET (`eis_response: "(0300) Lote recibido con éxito"`). La caja después anuló pedido y factura
+**a mano en los dos sistemas**, que es lo correcto: el webhook `Refund order` está **deshabilitado**
+y apunta a un `staging.girolabs.cloud` inexistente, así que una cancelación en Woo **no se propaga**.
 
-### 4. ¿Hay `order_id` duplicados en producción?
+**Alcance acordado:** solo las cortesías que **ya traen precio** (149 de 961 `completed`). Las **812**
+con las líneas en 0 quedan afuera; las frena el chequeo de `total == 0`, que corre **antes** que el
+de método de pago. Hay un test que lo fija para que no se cuelen.
 
-Bloquea el `unique` que pide el sub-proyecto A: si los hay, **la migración falla**. Hay que
-contarlos antes de escribir la migración.
+**De paso, el fallback dejó de ser silencioso:** cualquier `opmk` desconocido se facturaba como
+"En línea" (28) sin loguear nada — el mismo bug que tuvo Cortesía 3 años. Ahora avisa con `WARNING`.
 
-### 5. Que WooCommerce le hable hoy directo al CRM
+## 4. El spike del inventario, y lo que respondió de rebote
 
-Afirmado por Carlos (tras `wc-completed`), **nunca verificado** contra Woo ni Krayin. Toda la
-propuesta de donaciones se apoya en esto.
+Quedó reemplazado por Cortesía, pero dejó cosas útiles:
+
+- **La fuente de verdad de la API de BIMS es `/home/vallory/IA/bims/bims_docs/docs/openapi.json`**
+  (340 paths, 119 esquemas), no `ayuda.bims.app` (3 endpoints). Y
+  `/home/vallory/code/plugin-factura-electronica/wc-bims-integrador/bims1.apib` tiene los payloads
+  concretos que el openapi deja genéricos.
+- **`send_invoice` resuelto:** `POST /api/sales/send/{id}.json` es *"envía el documento **al
+  cliente**"* — entrega, no emisión. Nuestro `bims.py:618` está mal nombrado y es código muerto.
+  La certificación es **automática al guardar**.
+- **Una venta facturada normal SÍ descuenta inventario** (`Sale.stock: true`), confirmado en la venta
+  31301. Sigue sin saberse si una con `billed: false` lo hace.
+- **`stock_uses` (órdenes de uso interno) es solo lectura**: existe `index`, no `add`. Es el pedido
+  2.1 del reporte a BIMS.
+
+## 5. Django 5.2 LTS — objetivo marcado por Carlos
+
+**Producción corre Django 3.2, sin soporte desde abril de 2024.** 4.2 LTS también venció (abril
+2026), así que **5.2 es el único destino LTS vigente**. Restricción que ordena el trabajo: **5.2 pide
+Python ≥ 3.10 y producción tiene 3.7.17**, así que son dos saltos y el intérprete va primero. Es el
+"proyecto B", pero es deuda de seguridad, no modernización. Y **sin backups no es reversible**.
 
 ---
 
-## 1. El sync nocturno validó el deploy de timeouts
+## Cabos sueltos
 
-17.304 contactos, **0** presupuestos agotados, **0** timeouts en 38 llamadas. Y 5 órdenes
-facturadas sin fallos desde el deploy (Sale 31267 a 31271), la última en ~10 s. **El
-presupuesto de 40 s no hay que ajustarlo.**
-
-Confirmado de paso: `bims_api.log.1/.2/.3` los tres fechados 00:03 — el cron quema las 4
-ventanas de rotación cada noche. Es la razón de que la muestra del punto 1 sea de 13 ventas.
-
-## 2. Presupuesto por orden, implementado
-
-```
-f07e79d chore: script de verificacion sobre el stack real de produccion
-1b006d1 docs: handoff (reemplazado por este)
-13af3b8 docs: encabezados Task N en el plan
-4de77a4 fix: 4 hallazgos del review final de la rama
-b2baa85 feat(services): presupuesto por orden y FailedOrder al leer productos
-aa263fd docs(woocommerce): documentar el supuesto de concurrencia
-c22b9c4 feat(woocommerce): recortar el timeout al restante de la orden
-247caf7 feat(bims): respetar el presupuesto de la orden y recortar la conexión
-69cadfd feat(deadline): modulo del presupuesto por orden con ContextVar
-```
-
-`core/deadline.py` lleva el límite en un `contextvars.ContextVar`, `PRESUPUESTO_ORDEN = 90`,
-fijado **solo** en `process_order` con `try/finally`. `sync_bims_contacts` recibe `None` de
-`restante()` y **no requirió tocarse**.
-
-**Brecha cerrada que la spec daba por inexistente:** `build_sale_products` no estaba envuelta
-en ningún `try/except`, así que un fallo en el `get_product` por ítem se escapaba **sin grabar
-`FailedOrder`**. Era un bug preexistente.
-
-**Dos defectos que introdujo el plan**, encontrados por la revisión final y ya arreglados:
-`_alternate_base_url` conmutaba el host de forma pegajosa sin mandar request ni loguear; y un
-timeout escalar en `requests` aplica a conexión **y** lectura, así que el peor caso llegaba a
-~115 s contra los 120 de gunicorn — el margen de 30 s que promete la spec no existía.
-
-**Se decidió NO subir el `--timeout` de gunicorn a 180.** No compra nada (el presupuesto de 90
-corta primero; peor caso del diseño ≈105 s) y cuesta: un worker colgado queda atado 50% más.
-Si hace falta margen, la palanca es **bajar `PRESUPUESTO_ORDEN`**.
-
-**Herramienta nueva:** `./verificar-en-stack-produccion.sh` corre la suite sobre el stack real
-sin tocar producción. Documentado en `CLAUDE.md`.
-
-## 3. Arquitectura del hub, reactivada
-
-Propuesta publicada: **https://claude.ai/code/artifact/1142a0c2-3c6a-4184-9089-c4769e703cd9**
-(privada hasta que Carlos la comparta). **Esperando que la presente y decidan.**
-
-Recomienda que las **donaciones manuales entren por Krayin/Fundraising** en vez de por
-WooCommerce, porque es la única opción donde el conjunto completo de donaciones existe **por
-construcción** y no por acuerdo.
-
-**Corrección importante:** BIMS y el CRM **no deben comunicarse entre sí**. El integrador es
-el único que ve los dos lados. Eso disuelve la incógnita original.
-
-**La pregunta que frenó el proyecto el 21/08 está respondida:** a `/sales/` le pega un webhook
-de Woo y nadie lee el body — pero Woo **sí cuenta los no-2xx y deshabilita el webhook a las 5
-fallas**. `SalesView` devuelve 503 ante cualquier excepción, así que **una caída de BIMS de 5
-órdenes corta la facturación en silencio**. Ya le pasó a `Refund order`.
-
-**Decisiones de diseño tomadas** (detalle en la memoria del proyecto): A incluye el async y
-responde 202; cola en **MariaDB + cron con `flock`** (Redis existe pero `db0` tiene 270.862
-claves de otro sistema); latencia aceptable hasta ~1 min; **extender `FailedOrder` en su
-lugar**, sin renombrar hasta que haya backups; alertas de pedido a **Slack** vía Incoming
-Webhook, dejando Sentry para problemas de código.
-
-⚠️ **Ojo con Sentry:** `settings.py:14-17` usa `LoggingIntegration(event_level=ERROR)`, así que
-**todo `logger.error()` es un evento**. `bims.py` loguea uno por reintento. Separar los canales
-exige además **bajar a `warning` los fallos de negocio esperados**, o la falla queda en los dos
-lados.
-
-## Lo que sigue, en orden
-
-1. Cerrar los 5 puntos de arriba (el 1 y el 2 necesitan root).
-2. Desplegar el presupuesto por orden y mirar el cron de las 00:00 UTC como canario.
-3. Que Carlos presente la propuesta de donaciones.
-4. **A′** — guardar el `sale_id`: no depende de ninguna decisión pendiente, se puede escribir ya.
-5. Spec del sub-proyecto A, ya diseñado.
+- **`chore/verificar-stack-palancas` sin mergear ni pushear.** Hoy costó un error real: verifiqué
+  contra Django 3.2.18 creyendo que era 3.2.25, porque la palanca `PYTHON=` no está en `main` y el
+  script viejo **ignora la variable en silencio**. Mientras viva solo en esa rama, cualquier
+  verificación desde otra rama usa el intérprete equivocado sin avisar.
+- **`payment_method_title` quedó como parámetro muerto** en `resolve_pos_and_payments`
+  (`services.py:91`, pasado desde `:541`). Decisión explícita de Carlos: sacarlo toca la firma y 21
+  call sites de tests. Documentado en el commit.
+- **La tilde de `Cortesia` en BIMS** (id 43): Carlos la va a corregir. **Tiene que ser un rename
+  sobre el 43**, no un método nuevo, o el mapeo del código apunta al equivocado.
+- **Sentry:** cualquier script de diagnóstico con los settings de producción reporta como si fuera
+  la app — pasó hoy con un `KeyError` de un sondeo mío. La línea para evitarlo:
+  `sentry_sdk.get_global_scope().set_client(None)` después de `django.setup()`. Y siguen en 1.0
+  `traces_sample_rate` y `profiles_sample_rate`, con el DSN hardcodeado.
+- **`scp` a producción está bloqueado** por el classifier; `git archive | ssh` y `tar -c | ssh` sí
+  pasan. Y el acceso root **necesita** `-o IdentitiesOnly=yes`.
 
 ## Pendientes de antes, sin cambios
 
-- **⚠️ Backups de las bases.** El más grave del proyecto. Sigue sin resolverse.
-- **201 órdenes en FAILED** sin reproceso; `runretryfaileds.sh` es código muerto y roto. El
-  drenador del sub-proyecto A lo reemplaza y lo vuelve obsoleto.
-- **Los logs de BIMS se pierden ~12 h por día** (confirmado otra vez hoy, y es lo que redujo la
-  muestra del punto 1 a 13 ventas).
-- Spec del proyecto B (Python 3.12 + Django 5.2 LTS).
-- Ventana para los 67 parches de terceros y decidir sobre Ubuntu Pro.
-- Renombrar la fila del posale 7 a "Caja Fund MuCi" desde el admin.
-- Nombres deformados tipo `C L A R I C E`, sin diagnosticar.
-- Borrar `feature/gestion-sucursales`, `feature/migracion-api-key` y `feature/timeouts-bims`.
-
-## Menores anotados y no arreglados
-
-Del review final de la rama, todos evaluados y parkeados: el mensaje de agotamiento reporta
-`PRESUPUESTO_ORDEN` en vez del presupuesto en efecto si alguien pasa uno custom; un intento
-fútil de ~2 s cuando queda una fracción de segundo; dos handlers de `FailedOrder` sin `status`
-explícito (`services.py:504,540`); `resolve_pos_and_payments` sin envolver (no puede lanzar
-excepciones de presupuesto, pero sí `ValueError`/`KeyError`); el mensaje "excedido por -0.0s"
-si `restante` cae exactamente en 0; y dos cosas dormidas de modo sesión —el relogin duplica el
-gasto de un intento, y `str(e)` puede arrastrar un `?sid=` a la base—. Producción corre en modo
-API Key desde el 24/08.
-
-Fuera de alcance pero anotado: `traces_sample_rate` y `profiles_sample_rate` están al **1.0**
-en producción, y el DSN de Sentry está hardcodeado en `settings.py` en vez del `.env`.
+- **⚠️ Backups de las bases.** El más grave del proyecto, y ahora bloquea el upgrade de Python.
+- **201 órdenes en FAILED** sin reproceso; `runretryfaileds.sh` es código muerto y roto.
+- Los logs de BIMS se pierden ~12 h por día por la rotación del cron nocturno.
+- Ventana para los 67 parches de terceros.
+- Propuesta de donaciones publicada, **esperando que Carlos la presente**.
+- **A′** — guardar el `sale_id`: no depende de ninguna decisión pendiente.
