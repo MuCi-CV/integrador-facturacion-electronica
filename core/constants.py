@@ -13,6 +13,9 @@ FOOEVENTS_PAYMENT_METHOD_MAP = {
     "fooeventspos_check_payment": 34,     # Gift Card
     "fooeventspos_cash": 21,              # Efectivo
     "fooeventspos_cash_on_delivery": 26,  # Transferencia Bancaria
+    # FooEvents no tiene un método "Cortesía": la caja usa el slot de transferencia
+    # directa reetiquetado. El de transferencia real es `cash_on_delivery`, arriba.
+    "fooeventspos_direct_bank_transfer": 43,  # Cortesía
     "fooeventspos_other": 27,             # Bancard
     "fooeventspos_online": 28,            # Pago en línea
 }

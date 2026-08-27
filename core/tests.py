@@ -116,10 +116,59 @@ class ResolvePosAndPaymentsTest(TestCase):
         result = resolve_pos_and_payments(meta_data, total=30000, payment_method_title="Cash")
         self.assertIsNone(result)
 
-    def test_cortesia_retorna_none(self):
-        meta_data = [{"key": "_fooeventspos_user_id", "value": "729"}]
-        result = resolve_pos_and_payments(meta_data, total=30000, payment_method_title="Cortesía")
-        self.assertIsNone(result)
+    def test_cortesia_se_factura_con_el_metodo_de_pago_de_bims(self):
+        """
+        Antes se descartaba la orden entera. Finanzas la quiere facturada al precio
+        original, con la cortesía rastreable: el método de pago 43 de BIMS.
+        """
+        meta_data = [
+            {"key": "_fooeventspos_user_id", "value": "729"},
+            {
+                "key": "_fooeventspos_payments",
+                "value": '[{"opmk": "fooeventspos_direct_bank_transfer", "amount": 0}]',
+            },
+        ]
+        result = resolve_pos_and_payments(meta_data, total=200000, payment_method_title="Cortesía")
+        self.assertEqual(result, (4, [{"payment_method_id": 43, "amount": 200000}]))
+
+    def test_opmk_desconocido_avisa_antes_de_caer_al_fallback(self):
+        """
+        Un `opmk` que no está en el mapeo se factura como "En línea" (28). Eso es
+        exactamente el bug que tuvo Cortesía durante 3 años: FooEvents reetiqueta un
+        slot y nadie se entera. El fallback se queda, pero deja de ser silencioso.
+        """
+        meta_data = [
+            {"key": "_fooeventspos_user_id", "value": "729"},
+            {
+                "key": "_fooeventspos_payments",
+                "value": '[{"opmk": "fooeventspos_slot_nuevo", "amount": 0}]',
+            },
+        ]
+        with self.assertLogs("core.services", level="WARNING") as registro:
+            _, pagos = resolve_pos_and_payments(
+                meta_data, total=30000, payment_method_title="Algo Nuevo"
+            )
+
+        self.assertEqual(pagos, [{"payment_method_id": 28, "amount": 30000}])
+        self.assertIn("fooeventspos_slot_nuevo", "\n".join(registro.output))
+
+    def test_transferencia_directa_no_se_confunde_con_cortesia(self):
+        """
+        FooEvents usa dos slots distintos: `direct_bank_transfer` está etiquetado
+        "Cortesía" y `cash_on_delivery` es la transferencia bancaria de verdad (26).
+        Confundirlos haría figurar una cortesía como cobrada.
+        """
+        meta_data = [
+            {"key": "_fooeventspos_user_id", "value": "729"},
+            {
+                "key": "_fooeventspos_payments",
+                "value": '[{"opmk": "fooeventspos_cash_on_delivery", "amount": 0}]',
+            },
+        ]
+        _, pagos = resolve_pos_and_payments(
+            meta_data, total=30000, payment_method_title="Transferencia Bancaria directa"
+        )
+        self.assertEqual(pagos, [{"payment_method_id": 26, "amount": 30000}])
 
     def test_san_cosmos_mapea_a_posale_4(self):
         meta_data = [
@@ -842,6 +891,28 @@ class ProcessOrderZeroTotalTest(TestCase):
         mock_bims.create_sale.assert_not_called()
         self.assertEqual(result["status"], "Monto 0")
 
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_cortesia_con_total_cero_sigue_sin_llegar_a_bims(self, mock_wc, mock_bims):
+        """
+        Alcance acordado con finanzas (2026-08-27): solo las cortesías que ya traen
+        precio. Las 812 históricas con las líneas en 0 quedan afuera, y las frena el
+        chequeo de `total == 0`, que corre ANTES del de método de pago. Este test
+        existe para que sacar el descarte de Cortesía no las cuele por la ventana.
+        """
+        from core.services import process_order
+
+        orden = self._order(total="0", discount_total="0")
+        orden["payment_method_title"] = "Cortesía"
+        mock_wc.get_order.return_value = orden
+        mock_wc.get_product.return_value = {"sku": "500"}
+        mock_bims.create_sale.return_value = (12345, None)
+
+        result = process_order(order_id=201334)
+
+        mock_bims.create_sale.assert_not_called()
+        self.assertEqual(result["status"], "Monto 0")
+
 
 class ProcessOrderZeroPriceItemsTest(TestCase):
     """Los productos con precio 0 no llegan a BIMS; si no queda ninguno, la orden se descarta."""
@@ -1170,8 +1241,9 @@ class SucursalResolucionTest(TestCase):
             )
         )
 
-    def test_cortesia_sigue_ignorandose(self):
-        self.assertIsNone(
+    def test_cortesia_ya_no_se_ignora(self):
+        """El descarte por Cortesía se quitó a pedido de finanzas (2026-08-27)."""
+        self.assertIsNotNone(
             resolve_pos_and_payments(
                 self._pos_meta(729), total=30000, payment_method_title="Cortesía"
             )

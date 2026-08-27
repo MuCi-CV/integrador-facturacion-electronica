@@ -119,10 +119,6 @@ def resolve_pos_and_payments(
         )
         return None
 
-    if payment_method_title == "Cortesía":
-        logger.info("Orden ignorada: método de pago Cortesía.")
-        return None
-
     sales_payment_methods = _parse_pos_payments(meta_data, total)
     return posale_id, sales_payment_methods
 
@@ -143,16 +139,39 @@ def _parse_pos_payments(meta_data: list, total: int) -> list:
     payments = json.loads(payment_meta["value"])
 
     if len(payments) == 1 and float(payments[0].get("amount", 0)) == 0:
-        method_id = FOOEVENTS_PAYMENT_METHOD_MAP.get(payments[0]["opmk"], PAYMENT_METHOD_DEFAULT_ID)
-        return [{"payment_method_id": method_id, "amount": total}]
+        return [
+            {
+                "payment_method_id": _payment_method_id(payments[0]["opmk"]),
+                "amount": total,
+            }
+        ]
 
     return [
         {
-            "payment_method_id": FOOEVENTS_PAYMENT_METHOD_MAP.get(p["opmk"], PAYMENT_METHOD_DEFAULT_ID),
+            "payment_method_id": _payment_method_id(p["opmk"]),
             "amount": float(p["amount"]),
         }
         for p in payments
     ]
+
+
+def _payment_method_id(opmk: str) -> int:
+    """
+    Traduce un método de pago de FooEvents POS al de BIMS.
+
+    El fallback se queda —una orden no debe caerse por un método nuevo— pero **avisa**.
+    Un `opmk` desconocido se factura como "En línea", o sea como cobrada: es
+    exactamente el bug que tuvo Cortesía durante 3 años, porque FooEvents reetiqueta
+    un slot y del lado de BIMS nadie se entera.
+    """
+    method_id = FOOEVENTS_PAYMENT_METHOD_MAP.get(opmk)
+    if method_id is None:
+        logger.warning(
+            f"Método de pago de FooEvents sin mapear: {opmk}. "
+            f"Se factura como {PAYMENT_METHOD_DEFAULT_ID} (En línea)."
+        )
+        return PAYMENT_METHOD_DEFAULT_ID
+    return method_id
 
 
 def resolve_contact_id(
