@@ -2765,3 +2765,78 @@ class RedaccionCamposSensiblesTest(TestCase):
             api._request_with_relogin(metodo, "https://bims.example/sales/", json={})
 
         self.assertNotIn("la-credencial-que-no-debe-quedar", str(ctx.exception))
+
+
+class SettingsRealTest(TestCase):
+    """
+    El `settings.py` de producción tiene que importar y pasar `check`.
+
+    La suite corre con `test_settings`, que carga 4 apps y esquiva `drf_yasg`,
+    `corsheaders` y el admin. Este test cubre el settings real, que es donde
+    vive el riesgo de un upgrade de Django: un `ImproperlyConfigured` ahí se
+    manifiesta al ARRANCAR el servicio, no al correr los tests.
+    """
+
+    def test_el_settings_de_produccion_pasa_check(self):
+        import os
+        import subprocess
+        import sys
+        import tempfile
+        from pathlib import Path
+
+        raiz = Path(__file__).resolve().parent.parent
+
+        # El settings hace `dotenv_values(".env")` relativo al cwd, así que se
+        # corre en un directorio temporal con un .env sintético. Nunca se toca el
+        # .env real, que además no existe en local.
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, ".env").write_text(
+                "SECRET_KEY=solo-para-el-check\n"
+                "DEBUG=False\n"
+                "ALLOWED_HOSTS=localhost\n"
+                "DB_NAME=no_se_conecta\n"
+                "DB_USER=no_se_conecta\n"
+                "DB_PASSWORD=no_se_conecta\n"
+                "DB_HOST=127.0.0.1\n"
+                "DB_PORT=3306\n"
+                "WOOCOMMERCE_URL=http://test.local\n"
+                "WOOCOMMERCE_KEY=k\n"
+                "WOOCOMMERCE_SECRET=s\n"
+                "BIMS_URL=http://bims.test.local\n"
+                "BIMS_USER=u\n"
+                "BIMS_PASSWORD=p\n",
+                encoding="utf-8",
+            )
+
+            codigo = (
+                # `core/bims.py` instancia `BimsApi()` al importarse y eso intenta
+                # un login REAL contra BIMS; el `check` carga el admin, que
+                # arrastra esa cadena. Se corta la red antes de `django.setup()`,
+                # igual que hace el encabezado de este archivo.
+                "from unittest.mock import patch\n"
+                "patch('requests.post').start()\n"
+                "patch('requests.Session.request').start()\n"
+                "import os, django\n"
+                "os.environ['DJANGO_SETTINGS_MODULE'] = 'muci-integrador.settings'\n"
+                "django.setup()\n"
+                # Sin esto el check queda registrado como cliente de producción en Sentry.
+                "import sentry_sdk; sentry_sdk.get_global_scope().set_client(None)\n"
+                "from django.core.management import call_command\n"
+                "call_command('check')\n"
+            )
+            entorno = dict(os.environ, PYTHONPATH=str(raiz))
+            resultado = subprocess.run(
+                [sys.executable, "-c", codigo],
+                cwd=tmp,
+                env=entorno,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+
+        self.assertEqual(
+            resultado.returncode,
+            0,
+            "el settings real no pasa `check`:\n%s\n%s"
+            % (resultado.stdout, resultado.stderr),
+        )
