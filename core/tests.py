@@ -2840,3 +2840,54 @@ class SettingsRealTest(TestCase):
             "el settings real no pasa `check`:\n%s\n%s"
             % (resultado.stdout, resultado.stderr),
         )
+
+
+class SmokeUrlsTest(TestCase):
+    """
+    Las dos rutas que la suite nunca tocó y que un upgrade de Django rompe
+    fácil: la generación del schema de Swagger y el changelist del admin.
+    """
+
+    def test_el_schema_de_swagger_se_genera(self):
+        """
+        `drf_yasg` puede importar y fallar igual al RECORRER las vistas para
+        armar el schema. Esto lo ejercita de verdad.
+        """
+        respuesta = self.client.get("/swagger.json")
+
+        self.assertEqual(respuesta.status_code, 200, respuesta.content[:400])
+        self.assertEqual(respuesta["Content-Type"].split(";")[0], "application/json")
+
+        # Un 200 con `{}` pasaría las dos aserciones de arriba sin haber generado
+        # nada. Lo que prueba que el recorrido de las vistas funcionó es que haya
+        # paths documentados.
+        schema = json.loads(respuesta.content)
+        self.assertIn("paths", schema)
+        self.assertGreater(len(schema["paths"]), 0, "el schema salió sin paths")
+
+    def test_el_changelist_del_admin_de_ordenes_responde(self):
+        """
+        `FailedOrderAdmin` ganó `bims_sale_id` y `bims_invoice_number` en
+        list_display y search_fields el 2026-08-28, sin cobertura. Un nombre de
+        campo mal escrito ahí es un error 500 en la pantalla que usa la caja.
+        """
+        from django.contrib.auth.models import User
+
+        User.objects.create_superuser("admin-test", "admin@test.local", "clave-de-test")
+        self.client.login(username="admin-test", password="clave-de-test")
+
+        FailedOrder.objects.create(
+            order_id=202707,
+            status=FailedOrder.COMPLETED,
+            message="Procesado con éxito.",
+            bims_sale_id="31301",
+            bims_invoice_number="12000",
+        )
+
+        respuesta = self.client.get("/admin/core/failedorder/")
+        self.assertEqual(respuesta.status_code, 200, respuesta.content[:400])
+
+        # La búsqueda por número de factura es la razón de ser del campo.
+        busqueda = self.client.get("/admin/core/failedorder/?q=12000")
+        self.assertEqual(busqueda.status_code, 200, busqueda.content[:400])
+        self.assertContains(busqueda, "202707")
