@@ -20,11 +20,17 @@ devuelve, dentro del objeto **`Agency`**, un campo **`tae_password` con una cont
 en texto plano**, acompañado de **`tae_username`**. El par de credenciales viaja
 completo en la respuesta de cada venta creada.
 
-- **Observado en:** venta `Sale.id = 31301`, creada el 2026-08-27 a las 19:41 UTC.
 - **Endpoint:** `POST /api/sales/` (respuesta, no petición).
 - **Ubicación en el JSON:** `data.Agency.tae_password`.
+- **Lo detectamos en:** venta `Sale.id = 31301`, del 2026-08-27 a las 19:41 UTC.
+- **Antigüedad real del comportamiento:** al revisar nuestros registros históricos, el
+  campo aparece en respuestas de **marzo de 2026** y en **todas** las ventas exitosas
+  desde entonces. El 2026-08-27 es cuando lo notamos, no cuando empezó.
 
-**No transcribimos el valor en este documento** ni lo enviaremos por ningún canal.
+**No transcribimos el valor en este documento.** Pero hay un punto incómodo que
+preferimos decir de frente, porque cambia el tamaño del problema: **no podemos
+afirmar que esa credencial siga contenida dentro de nuestra infraestructura.** El
+detalle está en la sección siguiente.
 
 ## Por qué nos parece importante
 
@@ -34,25 +40,58 @@ rechazo de la SET o un cambio de contrato sin reproducir la venta. Nuestro integ
 lo hace, y suponemos que cualquier otro cliente de la API también.
 
 La consecuencia es que **esa contraseña se persiste en los logs de todos los
-integradores, en cada venta exitosa**, sin que ninguno lo haya pedido ni lo sepa. En
-nuestro caso quedó replicada en varios archivos por la rotación del log.
+integradores, en cada venta exitosa**, sin que ninguno lo haya pedido ni lo sepa.
+
+## Alcance de la exposición de nuestro lado
+
+Auditamos dónde terminó el dato en nuestro caso. Lo detallamos porque creemos que
+cualquier integrador con una arquitectura parecida está en la misma situación, y eso
+es información que necesitan para evaluar el impacto:
+
+1. **Archivos de log del servidor**, replicados por la rotación en varios archivos.
+2. **Copias de esos logs en equipos de desarrollo**, usadas para depuración. Solo en
+   uno de esos conjuntos contamos **307 apariciones** del campo.
+3. **Un servicio externo de seguimiento de errores.** Nuestra configuración envía los
+   registros de nivel INFO como contexto adjunto a los eventos de error. Es decir: es
+   muy probable que la credencial **ya haya sido transmitida a un proveedor tercero**,
+   fuera de nuestro control y del de ustedes. Esto es responsabilidad de nuestra
+   configuración, no de BIMS, y lo estamos corrigiendo — pero **es irreversible para
+   los datos ya enviados**, y por eso el pedido 1 de abajo es urgente.
+
+Un integrador que use cualquier plataforma de observabilidad (Sentry, Datadog,
+CloudWatch, ELK) tiene el mismo problema sin haberlo elegido, porque el dato llega
+dentro de una respuesta que es legítimo registrar.
 
 ## Qué pedimos
 
-1. **Quitar `tae_password` de la respuesta de `/api/sales/`.** Si el campo se necesita
+1. **Rotar esa credencial (`tae_username` / `tae_password`), asumiendo que estuvo
+   expuesta.** Lo ponemos primero porque es lo único que remedia el pasado: quitar el
+   campo de la respuesta protege de acá en adelante, pero no deshace cinco meses de
+   logs ni lo que ya se transmitió a terceros. Conviene asumir la exposición en los
+   registros de **todos** los clientes de la API durante todo ese período.
+2. **Quitar `tae_password` de la respuesta de `/api/sales/`.** Si el campo se necesita
    internamente, que no se serialice hacia la API. Lo mismo aplica a cualquier otro
    endpoint que devuelva el objeto `Agency`.
-2. **Rotar esa credencial**, dando por supuesto que estuvo expuesta en los logs de
-   todos los clientes de la API durante el tiempo que lleve el comportamiento.
-3. Confirmarnos si **algún otro endpoint** devuelve campos de este tipo, para que
-   podamos revisar nuestros registros históricos con criterio en vez de a ciegas.
+3. **Confirmarnos si algún otro endpoint devuelve campos de este tipo**, para que
+   podamos revisar nuestros registros históricos con criterio en vez de a ciegas. Si
+   nos dan la lista, la usamos para purgar con precisión.
+4. **Avisar a los demás integradores**, si corresponde. Nosotros lo encontramos por
+   casualidad revisando otra cosa; no tenemos motivo para pensar que somos los únicos
+   afectados ni los primeros en tenerlo en disco.
 
 ## Qué vamos a hacer nosotros
 
-Independientemente de la respuesta, vamos a **redactar los campos sensibles antes de
-escribir el log** (filtrando claves que coincidan con `password`, `secret`, `token`,
-`api_key`). No reemplaza al arreglo del lado de BIMS: mitiga nuestro caso, no el de los
-demás integradores.
+- **Redactar los campos sensibles antes de escribir el log**, filtrando de forma
+  recursiva las claves que coincidan con `password`, `secret`, `token`, `api_key` y
+  similares. Nuestro enmascarado actual no lo atrapó porque comparaba nombres exactos
+  y solo en el primer nivel del JSON.
+- **Cortar el envío de cuerpos de respuesta al servicio externo** de seguimiento de
+  errores.
+- **Purgar las copias existentes** de los logs, en el servidor y en los equipos de
+  desarrollo.
+
+Nada de esto reemplaza al arreglo del lado de BIMS: mitiga nuestro caso, no el de los
+demás integradores, y no alcanza a lo ya transmitido.
 
 ---
 
