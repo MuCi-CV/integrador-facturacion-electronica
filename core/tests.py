@@ -869,7 +869,7 @@ class ProcessOrderZeroTotalTest(TestCase):
         mock_wc.get_order.return_value = self._order(total="0", discount_total="0")
         # SKU válido: sin la guarda correcta, se armaría un producto y se llamaría a create_sale.
         mock_wc.get_product.return_value = {"sku": "500"}
-        mock_bims.create_sale.return_value = (12345, None)
+        mock_bims.create_sale.return_value = (12345, 777, None)
 
         process_order(order_id=183527)
 
@@ -884,7 +884,7 @@ class ProcessOrderZeroTotalTest(TestCase):
         # int("0.00") lanza ValueError; debe tratarse como monto 0, no romper.
         mock_wc.get_order.return_value = self._order(total="0.00", discount_total="0.00")
         mock_wc.get_product.return_value = {"sku": "500"}
-        mock_bims.create_sale.return_value = (12345, None)
+        mock_bims.create_sale.return_value = (12345, 777, None)
 
         result = process_order(order_id=999)
 
@@ -906,7 +906,7 @@ class ProcessOrderZeroTotalTest(TestCase):
         orden["payment_method_title"] = "Cortesía"
         mock_wc.get_order.return_value = orden
         mock_wc.get_product.return_value = {"sku": "500"}
-        mock_bims.create_sale.return_value = (12345, None)
+        mock_bims.create_sale.return_value = (12345, 777, None)
 
         result = process_order(order_id=201334)
 
@@ -946,7 +946,7 @@ class ProcessOrderZeroPriceItemsTest(TestCase):
 
         mock_wc.get_order.return_value = self._order([self._item(1, "0"), self._item(2, "0")])
         mock_wc.get_product.return_value = {"sku": "500"}
-        mock_bims.create_sale.return_value = (12345, None)
+        mock_bims.create_sale.return_value = (12345, 777, None)
 
         result = process_order(order_id=555)
 
@@ -965,7 +965,7 @@ class ProcessOrderZeroPriceItemsTest(TestCase):
         mock_wc.get_order.return_value = self._order([self._item(1, "0"), self._item(2, "5000")])
         # El segundo ítem tiene monto pero no tiene SKU: es un problema real que revisar.
         mock_wc.get_product.side_effect = [{"sku": "500"}, {"sku": ""}]
-        mock_bims.create_sale.return_value = (12345, None)
+        mock_bims.create_sale.return_value = (12345, 777, None)
 
         with self.assertRaises(ValueError):
             process_order(order_id=556)
@@ -985,7 +985,7 @@ class ProcessOrderZeroPriceItemsTest(TestCase):
             [self._item(1, "0")], fee_lines=[{"name": "Tip", "total": "5000"}]
         )
         mock_wc.get_product.return_value = {"sku": "500"}
-        mock_bims.create_sale.return_value = (12345, None)
+        mock_bims.create_sale.return_value = (12345, 777, None)
 
         process_order(order_id=557)
 
@@ -1007,7 +1007,7 @@ class ProcessOrderZeroPriceItemsTest(TestCase):
         # y no hay nada que revisar, así que no debe ensuciar Sentry.
         mock_wc.get_order.return_value = self._order([self._item(1, "0"), self._item(2, "5000")])
         mock_wc.get_product.side_effect = [{"sku": "500"}, {"sku": "600"}]
-        mock_bims.create_sale.return_value = (12345, None)
+        mock_bims.create_sale.return_value = (12345, 777, None)
 
         process_order(order_id=558)
 
@@ -1027,7 +1027,7 @@ class ProcessOrderZeroPriceItemsTest(TestCase):
         # sale con el resto, pero alguien tiene que revisarla.
         mock_wc.get_order.return_value = self._order([self._item(1, "-5000"), self._item(2, "8000")])
         mock_wc.get_product.side_effect = [{"sku": "500"}, {"sku": "600"}]
-        mock_bims.create_sale.return_value = (12345, None)
+        mock_bims.create_sale.return_value = (12345, 777, None)
 
         process_order(order_id=560)
 
@@ -1050,7 +1050,7 @@ class ProcessOrderZeroPriceItemsTest(TestCase):
         # esperado: queda en FailedOrder para revisar.
         mock_wc.get_order.return_value = self._order([self._item(1, "-5000")])
         mock_wc.get_product.return_value = {"sku": "500"}
-        mock_bims.create_sale.return_value = (12345, None)
+        mock_bims.create_sale.return_value = (12345, 777, None)
 
         with self.assertRaises(ValueError):
             process_order(order_id=561)
@@ -1070,7 +1070,7 @@ class ProcessOrderZeroPriceItemsTest(TestCase):
         # Un ítem con monto pero sin SKU sí es un problema de datos que hay que revisar.
         mock_wc.get_order.return_value = self._order([self._item(1, "3000"), self._item(2, "5000")])
         mock_wc.get_product.side_effect = [{"sku": ""}, {"sku": "600"}]
-        mock_bims.create_sale.return_value = (12345, None)
+        mock_bims.create_sale.return_value = (12345, 777, None)
 
         process_order(order_id=559)
 
@@ -2374,3 +2374,224 @@ class PresupuestoOrdenProcessOrderTest(TestCase):
             with self.assertRaises(RuntimeError):
                 process_order(557)
         self.assertTrue(FailedOrder.objects.filter(order_id=557).exists())
+
+
+class CorrelacionOrdenFacturaTest(TestCase):
+    """El `sale_id` y el número de factura de BIMS quedan guardados junto a la orden."""
+
+    def _order(self, total="10000"):
+        return {
+            "total": total,
+            "discount_total": "0",
+            "meta_data": [],
+            "billing": {},
+            "shipping": {},
+            "line_items": [
+                {
+                    "product_id": 162,
+                    "variation_id": 0,
+                    "quantity": 1,
+                    "total": total,
+                    "total_tax": "0",
+                    "name": "Tazas Pequeñas SC",
+                }
+            ],
+            "fee_lines": [],
+        }
+
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_orden_facturada_guarda_sale_id_e_invoice_number(
+        self, mock_wc, mock_bims, _mock_contact
+    ):
+        from core.services import process_order
+
+        mock_wc.get_order.return_value = self._order()
+        mock_wc.get_product.return_value = {"sku": "500"}
+        # BIMS devuelve los dos identificadores; hasta ahora el invoice_number se descartaba.
+        mock_bims.create_sale.return_value = (31301, 12000, None)
+
+        process_order(order_id=202707)
+
+        registro = FailedOrder.objects.get(order_id=202707)
+        self.assertEqual(registro.status, FailedOrder.COMPLETED)
+        # Se guardan como texto: BIMS es laxo con los tipos y no hacemos aritmética con ellos.
+        self.assertEqual(registro.bims_sale_id, "31301")
+        self.assertEqual(registro.bims_invoice_number, "12000")
+
+    @patch.object(BimsApi, "login", return_value="fake_sid")
+    def test_create_sale_devuelve_el_invoice_number_de_la_respuesta(self, _mock_login):
+        api = BimsApi()
+        respuesta = {
+            "status": "ok",
+            "data": {"Sale": {"id": 31301, "invoice_number": 12000}},
+        }
+        with patch.object(api, "_retry_request", return_value=respuesta):
+            sale_id, invoice_number, error = api.create_sale(
+                contact_id=7,
+                sale_products=[],
+                posale_id=4,
+                sales_payment_methods=[],
+                contact_emails="cliente@ejemplo.com",
+                order=202707,
+            )
+
+        self.assertEqual(sale_id, 31301)
+        self.assertEqual(invoice_number, 12000)
+        self.assertIsNone(error)
+
+    @patch.object(BimsApi, "login", return_value="fake_sid")
+    def test_create_sale_sin_invoice_number_no_rompe(self, _mock_login):
+        """Si BIMS deja de mandar el campo, la venta se registra igual sin factura."""
+        api = BimsApi()
+        respuesta = {"status": "ok", "data": {"Sale": {"id": 31302}}}
+        with patch.object(api, "_retry_request", return_value=respuesta):
+            sale_id, invoice_number, error = api.create_sale(
+                contact_id=7,
+                sale_products=[],
+                posale_id=4,
+                sales_payment_methods=[],
+                contact_emails="cliente@ejemplo.com",
+                order=202708,
+            )
+
+        self.assertEqual(sale_id, 31302)
+        self.assertIsNone(invoice_number)
+        self.assertIsNone(error)
+
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_sin_invoice_number_se_guarda_null_y_no_el_texto_none(
+        self, mock_wc, mock_bims, _mock_contact
+    ):
+        from core.services import process_order
+
+        mock_wc.get_order.return_value = self._order()
+        mock_wc.get_product.return_value = {"sku": "500"}
+        mock_bims.create_sale.return_value = (31302, None, None)
+
+        process_order(order_id=202708)
+
+        registro = FailedOrder.objects.get(order_id=202708)
+        self.assertEqual(registro.bims_sale_id, "31302")
+        # `str(None)` daría el texto "None", que se vería como una factura real.
+        self.assertIsNone(registro.bims_invoice_number)
+
+    @patch("core.services.sentry_sdk")
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_orden_rechazada_por_bims_no_guarda_identificadores(
+        self, mock_wc, mock_bims, _mock_contact, _mock_sentry
+    ):
+        """
+        Guarda de regresión: una orden que no se facturó no puede quedar con un
+        `sale_id`, o el campo dejaría de servir para responder "¿se facturó?".
+        """
+        from core.services import process_order
+
+        mock_wc.get_order.return_value = self._order()
+        mock_wc.get_product.return_value = {"sku": "500"}
+        mock_bims.create_sale.return_value = (None, None, "Rechazado")
+
+        with self.assertRaises(ValueError):
+            process_order(order_id=202709)
+
+        registro = FailedOrder.objects.get(order_id=202709)
+        self.assertEqual(registro.status, FailedOrder.FAILED)
+        self.assertIsNone(registro.bims_sale_id)
+        self.assertIsNone(registro.bims_invoice_number)
+
+    # ── Paso 4: la factura también queda visible en WooCommerce ─────────────
+
+    def test_update_order_meta_envia_las_claves_al_endpoint_de_la_orden(self):
+        api = WooCommerceAPI()
+        respuesta = MagicMock(status_code=200)
+        respuesta.json.return_value = {"id": 202707}
+
+        with patch.object(api, "wcapi") as mock_wcapi:
+            mock_wcapi.put.return_value = respuesta
+            api.update_order_meta(202707, {"_bims_sale_id": "31301"})
+
+        mock_wcapi.put.assert_called_once_with(
+            "orders/202707",
+            data={"meta_data": [{"key": "_bims_sale_id", "value": "31301"}]},
+        )
+
+    def test_update_order_meta_lanza_si_woo_responde_error(self):
+        """El cliente reporta fiel; la política de "no romper" vive en services."""
+        api = WooCommerceAPI()
+        respuesta = MagicMock(status_code=400)
+        respuesta.text = "Bad Request"
+
+        with patch.object(api, "wcapi") as mock_wcapi:
+            mock_wcapi.put.return_value = respuesta
+            with self.assertRaises(WooCommerceAPI.ServerException):
+                api.update_order_meta(202707, {"_bims_sale_id": "31301"})
+
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_orden_facturada_anota_la_factura_en_woo(
+        self, mock_wc, mock_bims, _mock_contact
+    ):
+        from core.services import process_order
+
+        mock_wc.get_order.return_value = self._order()
+        mock_wc.get_product.return_value = {"sku": "500"}
+        mock_bims.create_sale.return_value = (31301, 12000, None)
+
+        process_order(order_id=202707)
+
+        mock_wc.update_order_meta.assert_called_once_with(
+            202707, {"_bims_sale_id": "31301", "_bims_invoice_number": "12000"}
+        )
+
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_si_falla_la_escritura_en_woo_la_orden_sigue_completada(
+        self, mock_wc, mock_bims, _mock_contact
+    ):
+        """
+        El test que más importa. En este punto la factura ya existe en BIMS y ya
+        se certificó ante la SET: propagar el error daría un 503, y 5 de esos
+        seguidos apagan el webhook `Venta Entrada`.
+        """
+        from core.services import process_order
+
+        mock_wc.get_order.return_value = self._order()
+        mock_wc.get_product.return_value = {"sku": "500"}
+        mock_bims.create_sale.return_value = (31301, 12000, None)
+        mock_wc.update_order_meta.side_effect = WooCommerceAPI.ServerException("Woo caído")
+
+        resultado = process_order(order_id=202707)
+
+        self.assertEqual(resultado["status"], "ok")
+        registro = FailedOrder.objects.get(order_id=202707)
+        self.assertEqual(registro.status, FailedOrder.COMPLETED)
+        self.assertEqual(registro.bims_sale_id, "31301")
+
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_presupuesto_agotado_al_anotar_en_woo_no_rompe_la_orden(
+        self, mock_wc, mock_bims, _mock_contact
+    ):
+        from core.services import process_order
+
+        mock_wc.get_order.return_value = self._order()
+        mock_wc.get_product.return_value = {"sku": "500"}
+        mock_bims.create_sale.return_value = (31301, 12000, None)
+        mock_wc.update_order_meta.side_effect = deadline.PresupuestoOrdenAgotado(
+            "sin presupuesto"
+        )
+
+        resultado = process_order(order_id=202707)
+
+        self.assertEqual(resultado["status"], "ok")
+        self.assertEqual(
+            FailedOrder.objects.get(order_id=202707).status, FailedOrder.COMPLETED
+        )

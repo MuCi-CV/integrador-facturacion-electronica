@@ -3,6 +3,7 @@ import logging
 import re
 from typing import Optional
 
+import requests
 import sentry_sdk
 from django.db import IntegrityError
 
@@ -10,7 +11,7 @@ from core import deadline
 from core.bims import bims, BimsBusinessError
 from core.ruc import get_razon_social
 from core.models import ContactCache, FailedOrder
-from core.woocommerce import wc_api
+from core.woocommerce import wc_api, WooCommerceAPI
 from core.constants import (
     DISCOUNT_PRICE_PRODUCT_IDS,
     FLAT_PRICE_PRODUCT_IDS,
@@ -599,7 +600,7 @@ def _process_order(order_id: int) -> dict:
         raise ValueError(final_message)
 
     try:
-        sale_id, bims_error = bims.create_sale(
+        sale_id, invoice_number, bims_error = bims.create_sale(
             contact_id=contact_id,
             sale_products=sale_products,
             posale_id=posale_id,
@@ -634,8 +635,36 @@ def _process_order(order_id: int) -> dict:
             )
 
     logger.info(f"Order {order_id} procesada. BIMS Sale ID: {sale_id}. {status_message}")
+    sale_id_txt = str(sale_id)
+    invoice_txt = str(invoice_number) if invoice_number is not None else None
     FailedOrder.objects.update_or_create(
         order_id=order_id,
-        defaults={"status": FailedOrder.COMPLETED, "message": status_message},
+        defaults={
+            "status": FailedOrder.COMPLETED,
+            "message": status_message,
+            "bims_sale_id": sale_id_txt,
+            "bims_invoice_number": invoice_txt,
+        },
     )
+
+    # La factura también se anota en la orden de WooCommerce, que es donde
+    # trabaja la caja. Es best-effort a propósito: acá la venta ya está
+    # facturada y certificada ante la SET, y el FailedOrder ya quedó COMPLETED.
+    # Propagar el error daría un 503 que además mentiría, y 5 seguidos apagan el
+    # webhook `Venta Entrada` (es como murió `Refund order`).
+    meta_factura = {"_bims_sale_id": sale_id_txt}
+    if invoice_txt is not None:
+        meta_factura["_bims_invoice_number"] = invoice_txt
+    try:
+        wc_api.update_order_meta(order_id, meta_factura)
+    except (
+        WooCommerceAPI.ServerException,
+        requests.RequestException,
+        deadline.PresupuestoOrdenAgotado,
+    ) as e:
+        logger.warning(
+            f"Order {order_id}: venta {sale_id} facturada, pero no se pudo anotar "
+            f"en WooCommerce: {e}"
+        )
+
     return {"status": "ok", "message": status_message}

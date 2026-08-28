@@ -610,10 +610,12 @@ class BimsApi:
 
         data = response_data.get("data")
         if isinstance(data, dict) and data.get("Sale") and data["Sale"].get("id"):
-            return data["Sale"]["id"], None
+            # `invoice_number` ya viene en la respuesta y hasta ahora se descartaba;
+            # es el dato que identifica la factura para finanzas y para la caja.
+            return data["Sale"]["id"], data["Sale"].get("invoice_number"), None
             
         error_msg = response_data.get("message") or response_data.get("error") or "BIMS devolvió HTTP 200 pero no generó la venta (ID vacío)."
-        return None, error_msg
+        return None, None, error_msg
 
     def send_invoice(self, sale_id):
         url = f"{self.base_url}/sales/send/{sale_id}/"

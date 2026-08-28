@@ -17,9 +17,15 @@ from django.db import connection
 
 @admin.register(FailedOrder)
 class FailedOrderAdmin(admin.ModelAdmin):
-    list_display = ("order_id", "colored_status", "message")
+    list_display = (
+        "order_id",
+        "colored_status",
+        "bims_invoice_number",
+        "bims_sale_id",
+        "message",
+    )
     list_display_links = ("order_id", "colored_status")
-    search_fields = ("order_id",)
+    search_fields = ("order_id", "bims_sale_id", "bims_invoice_number")
     ordering = ("status", "order_id")
     list_filter = ("status",)
     actions = ["retry_selected_orders", "mark_as_failed"]

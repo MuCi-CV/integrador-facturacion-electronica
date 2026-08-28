@@ -169,6 +169,28 @@ class WooCommerceAPI:
         encontrados = res.json()
         return encontrados[0] if encontrados else None
 
+    def update_order_meta(self, id, meta: dict) -> dict:
+        """
+        Escribe (o actualiza) claves de metadata en una orden.
+
+        WooCommerce hace **upsert por clave**: `MetaDataUtil::update` itera solo
+        sobre las entradas recibidas y llama `update_meta_data` una por una, así
+        que las claves que no se mandan quedan intactas. Verificado sobre el
+        código desplegado: esto no pisa metadata de otros plugins, en particular
+        `_krayin_lead_id`, que es el vínculo orden↔CRM.
+
+        Lanza `ServerException` ante cualquier respuesta no-200; la política de
+        qué hacer con ese fallo vive en la capa de servicio, no acá.
+        """
+        payload = {
+            "meta_data": [{"key": clave, "value": valor} for clave, valor in meta.items()]
+        }
+        with self._timeout_recortado(f"orders/{id}"):
+            res = self.wcapi.put(f"orders/{id}", data=payload)
+        if res.status_code == 200:
+            return res.json()
+        raise self.ServerException(res.text)
+
     def refund_order(self, id, data, **kwargs):
         with self._timeout_recortado(f"orders/{id}/refunds"):
             res = self.wcapi.post(f"orders/{id}/refunds", data={"data": data})

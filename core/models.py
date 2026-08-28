@@ -30,6 +30,20 @@ class FailedOrder(models.Model):
         verbose_name="Estado", choices=STATUS_CHOICES, default=FAILED, db_index=True
     )
     message = models.TextField(verbose_name="Mensaje", blank=True, null=True)
+    # Correlación orden → factura de BIMS. `null` significa "no sabemos": lo son las
+    # órdenes anteriores a este campo y las que fallaron antes de facturar. Se guardan
+    # como texto porque BIMS es laxo con los tipos (devolvió `payment_method_id: "43"`
+    # como string) y no hacemos aritmética con estos valores.
+    bims_sale_id = models.CharField(
+        verbose_name="ID de venta en BIMS",
+        max_length=32,
+        blank=True,
+        null=True,
+        db_index=True,
+    )
+    bims_invoice_number = models.CharField(
+        verbose_name="Nº de factura", max_length=32, blank=True, null=True
+    )
     created_at = models.DateTimeField(default=now)
     updated_at = models.DateTimeField(auto_now=True)
 
