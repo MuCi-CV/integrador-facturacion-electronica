@@ -91,14 +91,22 @@ version_info = (1, 4, 6, "final", 1)  # spoof fijo en el código
 
 Y el backend MySQL de Django compara contra ese `version_info`:
 
-| destino | umbral | spoof | ¿arranca? |
+**El spoof cambia entre versiones de PyMySQL**, y eso importa:
+
+| PyMySQL | spoof | Django 5.2 (`≥1.4.3`) | Django 6 (`≥2.2.1`) |
 |---|---|---|---|
-| **Django 5.2** | `≥ (1, 4, 3)` | `(1, 4, 6)` | **sí, sin cambiar de driver** |
-| Django 6 | `≥ (2, 2, 1)` | `(1, 4, 6)` | no |
+| 1.1.x (la de producción hoy) | `(1, 4, 6)` | pasa | **no pasa** |
+| 1.2.0 | `(2, 2, 8)` | pasa | **pasa** |
 
 Es un `ImproperlyConfigured` al arrancar, o sea que se manifestaría recién al reiniciar el
-servicio. Confirma que **5.2 es el destino correcto** y marca el trabajo que exigiría el
-salto siguiente.
+servicio. De ahí el piso `pymysql = ">=1.2"` en el `Pipfile`: sin él, un `pipenv install`
+puede dejar un venv que arranca en 5.2 y muere en 6.
+
+> **Corrección del 2026-08-28, durante la Task 2.** La primera versión de esta spec decía
+> que el shim era **un muro para Django 6**. Es falso con PyMySQL ≥ 1.2.0, que subió el
+> spoof a `(2, 2, 8)` justo para pasar el umbral nuevo. Se midió sobre el venv paralelo ya
+> construido. **El motivo para apuntar a 5.2 y no a 6 sigue en pie, pero es el otro: 5.2 es
+> el único LTS vigente.**
 
 ### 6. El hueco de validación, que es el hallazgo más incómodo
 
@@ -223,8 +231,9 @@ sobre el Python 3.12 que ya hay. A partir de ahí, un verde local significa algo
 
 ## Fuera de alcance y por qué
 
-- **Django 6:** exige salir del shim de PyMySQL hacia `mysqlclient`, que necesita build deps
-  del sistema. Se decide cuando 5.2 esté estable.
+- **Django 6:** no es un LTS. Con PyMySQL ≥ 1.2.0 el driver ya no lo bloquea (ver la
+  corrección de arriba), así que el trabajo real sería revisar deprecaciones de 5.2 a 6. Se
+  decide cuando 5.2 esté estable.
 - **Borrar el venv viejo:** se conserva como rollback. Se borra cuando haya confianza, no en
   este proyecto.
 - **`USE_L10N`:** se saca porque está al lado, pero no es parte del objetivo.
