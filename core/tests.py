@@ -24,8 +24,11 @@ with patch("requests.post") as _mock_post:
         BimsError,
         BimsTransientError,
         PRESUPUESTO_REINTENTOS,
+        REDACTADO,
         TIMEOUT_CONEXION,
         TIMEOUT_LECTURA,
+        _redactar,
+        _redactar_texto,
     )
 
 from core.constants import (
@@ -2595,3 +2598,170 @@ class CorrelacionOrdenFacturaTest(TestCase):
         self.assertEqual(
             FailedOrder.objects.get(order_id=202707).status, FailedOrder.COMPLETED
         )
+
+
+class RedaccionCamposSensiblesTest(TestCase):
+    """
+    BIMS devuelve `Agency.tae_password` en texto plano en cada venta creada, y el
+    integrador loguea el cuerpo crudo de las respuestas. El enmascarado anterior
+    no lo atrapaba por tres razones: comparaba nombres exactos, era de un solo
+    nivel, y no se aplicaba a las respuestas.
+    """
+
+    def _respuesta_de_venta(self):
+        """La forma real de la respuesta de `POST /sales/` (venta 31301)."""
+        return {
+            "status": "ok",
+            "data": {
+                "Sale": {"id": 31301, "invoice_number": 12000},
+                "Agency": {
+                    "id": 1,
+                    "name": "MuCi",
+                    "tae_username": "usuario_tae",
+                    "tae_password": "la-credencial-que-no-debe-quedar",
+                },
+            },
+        }
+
+    def test_redacta_la_clave_anidada_dos_niveles_abajo(self):
+        """El caso real: `data.Agency.tae_password`."""
+        redactado = _redactar(self._respuesta_de_venta())
+
+        self.assertEqual(redactado["data"]["Agency"]["tae_password"], REDACTADO)
+
+    def test_no_muta_el_objeto_original(self):
+        """
+        Crítico: `bims.py` saca el session id del MISMO dict que loguea. Un
+        filtro in-place metería un bug de negocio dentro de un arreglo de
+        seguridad.
+        """
+        original = self._respuesta_de_venta()
+        _redactar(original)
+
+        self.assertEqual(
+            original["data"]["Agency"]["tae_password"], "la-credencial-que-no-debe-quedar"
+        )
+
+    def test_deja_intacto_lo_que_no_es_sensible(self):
+        redactado = _redactar(self._respuesta_de_venta())
+
+        self.assertEqual(redactado["data"]["Sale"]["id"], 31301)
+        self.assertEqual(redactado["data"]["Sale"]["invoice_number"], 12000)
+        self.assertEqual(redactado["data"]["Agency"]["name"], "MuCi")
+
+    def test_recorre_listas(self):
+        """BIMS devuelve arrays (`SalesProduct`, `SalesPaymentMethod`)."""
+        cuerpo = {"data": [{"Item": {"api_key": "secreta"}}, {"Item": {"precio": 100}}]}
+
+        redactado = _redactar(cuerpo)
+
+        self.assertEqual(redactado["data"][0]["Item"]["api_key"], REDACTADO)
+        self.assertEqual(redactado["data"][1]["Item"]["precio"], 100)
+
+    def test_matchea_por_subcadena_y_sin_importar_mayusculas(self):
+        """
+        `tae_password` es la razón por la que el enmascarado viejo falló: no es
+        igual a `password`. Y el match tiene que sobrevivir a que BIMS agregue
+        mañana otro campo con otro prefijo.
+        """
+        cuerpo = {
+            "tae_password": "x",
+            "API_KEY": "x",
+            "Token": "x",
+            "client_secret": "x",
+            "mi_apikey": "x",
+        }
+
+        redactado = _redactar(cuerpo)
+
+        for clave in cuerpo:
+            self.assertEqual(redactado[clave], REDACTADO, "no redactó %s" % clave)
+
+    def test_no_redacta_claves_parecidas_pero_inocentes(self):
+        """`tokenizado` matchea `token`; se acepta a propósito (falso positivo
+        barato). Pero un campo sin relación no se toca."""
+        redactado = _redactar({"password_expires_at": "2026-01-01", "posale_id": 4})
+
+        self.assertEqual(redactado["posale_id"], 4)
+        self.assertEqual(redactado["password_expires_at"], REDACTADO)
+
+    def test_redacta_sobre_texto_crudo(self):
+        """
+        Los 7 sitios que loguean `.text` ya son string: un walker de estructuras
+        no sirve ahí.
+        """
+        crudo = '{"Agency":{"tae_password":"la-credencial","name":"MuCi"}}'
+
+        redactado = _redactar_texto(crudo)
+
+        self.assertNotIn("la-credencial", redactado)
+        self.assertIn("MuCi", redactado)
+
+    def test_redactar_texto_tolera_lo_que_no_es_json(self):
+        """Esos sitios existen justamente porque la respuesta no era JSON."""
+        self.assertEqual(_redactar_texto("502 Bad Gateway"), "502 Bad Gateway")
+        self.assertEqual(_redactar_texto(""), "")
+        self.assertIsNone(_redactar_texto(None))
+
+    # ── Los helpers no sirven de nada si no se aplican en los sitios reales ──
+
+    def _metodo_que_responde(self, status_code, cuerpo):
+        respuesta = requests.Response()
+        respuesta.status_code = status_code
+        if isinstance(cuerpo, str):
+            respuesta._content = cuerpo.encode("utf-8")
+        else:
+            respuesta._content = json.dumps(cuerpo).encode("utf-8")
+        metodo = MagicMock(return_value=respuesta)
+        metodo.__name__ = "post"
+        return metodo
+
+    @patch.object(BimsApi, "login", return_value="fake_sid")
+    @patch("core.bims.bims_logger")
+    def test_el_cuerpo_de_la_respuesta_se_loguea_redactado(self, mock_logger, _mock_login):
+        api = BimsApi()
+        metodo = self._metodo_que_responde(200, self._respuesta_de_venta())
+
+        api._request_with_relogin(metodo, "https://bims.example/sales/", json={"Sale": {}})
+
+        logueado = " ".join(str(l) for l in mock_logger.info.call_args_list)
+        self.assertNotIn("la-credencial-que-no-debe-quedar", logueado)
+        self.assertIn(REDACTADO, logueado)
+
+    @patch.object(BimsApi, "login", return_value="fake_sid")
+    @patch("core.bims.bims_logger")
+    def test_una_respuesta_no_json_tambien_se_loguea_redactada(
+        self, mock_logger, _mock_login
+    ):
+        """Los sitios que loguean `res.text` crudo, donde no hay estructura."""
+        api = BimsApi()
+        crudo = 'ERROR <html> "tae_password":"la-credencial-que-no-debe-quedar" </html>'
+        metodo = self._metodo_que_responde(200, crudo)
+
+        with self.assertRaises(Exception):
+            api._request_with_relogin(metodo, "https://bims.example/sales/", json={})
+
+        todo = " ".join(
+            str(l)
+            for l in mock_logger.info.call_args_list
+            + mock_logger.error.call_args_list
+            + mock_logger.warning.call_args_list
+        )
+        self.assertNotIn("la-credencial-que-no-debe-quedar", todo)
+
+    @patch.object(BimsApi, "login", return_value="fake_sid")
+    @patch("core.bims.bims_logger")
+    def test_el_mensaje_de_la_excepcion_sale_redactado(self, _mock_logger, _mock_login):
+        """
+        `error_msg` no va solo al log: termina en `FailedOrder.message` (base de
+        datos) y en Sentry como mensaje de la excepción.
+        """
+        api = BimsApi()
+        metodo = self._metodo_que_responde(
+            500, {"Agency": {"tae_password": "la-credencial-que-no-debe-quedar"}}
+        )
+
+        with self.assertRaises(BimsTransientError) as ctx:
+            api._request_with_relogin(metodo, "https://bims.example/sales/", json={})
+
+        self.assertNotIn("la-credencial-que-no-debe-quedar", str(ctx.exception))

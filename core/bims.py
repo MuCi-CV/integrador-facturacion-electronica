@@ -1,6 +1,7 @@
 import requests
 import logging
 import json
+import re
 from django.conf import settings
 from http import cookiejar
 from typing import Optional, Any
@@ -62,6 +63,68 @@ def _safe_json(obj):
         return str(obj)
 
 
+# ── Redacción de campos sensibles antes de loguear ───────────────────────────
+# BIMS devuelve `Agency.tae_password` EN TEXTO PLANO en la respuesta de cada
+# venta creada (detectado 2026-08-27, presente en respuestas desde marzo). Como
+# logueamos el cuerpo crudo, esa credencial se escribía en disco en cada venta
+# exitosa, y además viajaba a Sentry como breadcrumb.
+#
+# El match es por SUBCADENA e ignorando mayúsculas, no por nombre exacto: el
+# campo que motivó esto es `tae_password`, que no es igual a `password`, y así
+# queda cubierto también el que BIMS agregue mañana con otro prefijo.
+_CLAVES_SENSIBLES = re.compile(
+    r"password|passwd|secret|token|api_key|apikey|credential", re.IGNORECASE
+)
+
+REDACTADO = "***REDACTADO***"
+
+# La misma idea sobre texto ya serializado, para los sitios que loguean
+# `res.text` crudo: captura `"clave": "valor"` y reemplaza solo el valor.
+_PAR_SENSIBLE_EN_TEXTO = re.compile(
+    r"""(["']?[\w.-]*(?:password|passwd|secret|token|api_key|apikey|credential)"""
+    r"""[\w.-]*["']?\s*[:=]\s*)(["'])(?:\\.|(?!\2).)*\2""",
+    re.IGNORECASE,
+)
+
+
+def _redactar(obj: Any) -> Any:
+    """
+    Copia `obj` reemplazando el valor de toda clave sensible por `REDACTADO`.
+
+    Devuelve una COPIA a propósito. `login()` saca el session id del mismo dict
+    que loguea (`response_data["data"]["Session"]["id"]`) y
+    `_request_with_relogin` devuelve el cuerpo al llamador: redactar in-place
+    metería un bug de negocio dentro de un arreglo de seguridad.
+
+    Si la clave es sensible se reemplaza el subárbol completo, sin recorrerlo.
+
+    No lleva cota de profundidad: la entrada siempre es JSON parseado o
+    literales que construimos en este módulo, y ninguno de los dos puede tener
+    ciclos ni pasa de unos pocos niveles.
+    """
+    if isinstance(obj, dict):
+        return {
+            clave: (
+                REDACTADO
+                if isinstance(clave, str) and _CLAVES_SENSIBLES.search(clave)
+                else _redactar(valor)
+            )
+            for clave, valor in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_redactar(elemento) for elemento in obj]
+    return obj
+
+
+def _redactar_texto(texto: Optional[str]) -> Optional[str]:
+    """Redacta pares clave/valor sensibles en una cadena ya serializada."""
+    if not texto:
+        return texto
+    return _PAR_SENSIBLE_EN_TEXTO.sub(
+        r"\g<1>\g<2>" + REDACTADO + r"\g<2>", texto
+    )
+
+
 def _mask_params(params):
     """Enmascara el sid en los params para no loguear credenciales."""
     if not params:
@@ -69,16 +132,6 @@ def _mask_params(params):
     masked = dict(params)
     if "sid" in masked:
         masked["sid"] = "***"
-    return masked
-
-
-def _mask_login_body(body):
-    """Enmascara password y tenant en el body de login."""
-    if not body:
-        return body
-    masked = dict(body)
-    if "password" in masked:
-        masked["password"] = "***"
     return masked
 
 
@@ -183,7 +236,7 @@ class BimsApi:
 
         bims_logger.info("══════ BIMS REQUEST ══════")
         bims_logger.info(f"POST {url} | Caller: login")
-        bims_logger.info(f"Body: {_safe_json(_mask_login_body(body))}")
+        bims_logger.info(f"Body: {_safe_json(_redactar(body))}")
 
         start_time = time.time()
         try:
@@ -197,7 +250,7 @@ class BimsApi:
             except ValueError:
                 bims_logger.error(
                     f"Login: respuesta no es JSON válido. "
-                    f"Status: {res.status_code} | Body: {res.text[:500]}"
+                    f"Status: {res.status_code} | Body: {_redactar_texto(res.text[:500])}"
                 )
                 raise requests.RequestException(
                     f"BIMS login devolvió respuesta no-JSON (status {res.status_code})"
@@ -205,7 +258,7 @@ class BimsApi:
 
             bims_logger.info("══════ BIMS RESPONSE ══════")
             bims_logger.info(f"Status: {res.status_code} | Time: {elapsed:.2f}s")
-            bims_logger.info(f"Body: {_safe_json(response_data)}")
+            bims_logger.info(f"Body: {_safe_json(_redactar(response_data))}")
 
             if response_data.get("status") == "ok":
                 return response_data.get("data").get("Session").get("id")
@@ -231,7 +284,7 @@ class BimsApi:
         bims_logger.info(f"{method_name} {url} | Caller: {caller}")
         bims_logger.info(f"Params: {_safe_json(_mask_params(params))}")
         if body is not None:
-            bims_logger.info(f"Body: {_safe_json(body)}")
+            bims_logger.info(f"Body: {_safe_json(_redactar(body))}")
 
         start_time = time.time()
         try:
@@ -243,10 +296,10 @@ class BimsApi:
             except ValueError:
                 bims_logger.error(
                     f"{method_name} {url}: respuesta no es JSON válido. "
-                    f"Status: {res.status_code} | Body: {res.text[:500]}"
+                    f"Status: {res.status_code} | Body: {_redactar_texto(res.text[:500])}"
                 )
                 raise requests.RequestException(
-                    f"BIMS devolvió respuesta no-JSON (status {res.status_code}): {res.text[:200]}"
+                    f"BIMS devolvió respuesta no-JSON (status {res.status_code}): {_redactar_texto(res.text[:200])}"
                 )
 
             # BIMS puede indicar sesión expirada via HTTP 401 o via JSON body code "401" (HTTP 200)
@@ -275,10 +328,10 @@ class BimsApi:
                     except ValueError:
                         bims_logger.error(
                             f"{method_name} {url}: respuesta no es JSON válido tras relogin. "
-                            f"Status: {res.status_code} | Body: {res.text[:500]}"
+                            f"Status: {res.status_code} | Body: {_redactar_texto(res.text[:500])}"
                         )
                         raise requests.RequestException(
-                            f"BIMS devolvió respuesta no-JSON tras relogin (status {res.status_code}): {res.text[:200]}"
+                            f"BIMS devolvió respuesta no-JSON tras relogin (status {res.status_code}): {_redactar_texto(res.text[:200])}"
                         )
 
                     # Si tras un relogin EXITOSO sigue viniendo 401, no es sesión expirada
@@ -291,7 +344,7 @@ class BimsApi:
 
             bims_logger.info("══════ BIMS RESPONSE ══════")
             bims_logger.info(f"Status: {res.status_code} | Time: {elapsed:.2f}s")
-            bims_logger.info(f"Body: {_safe_json(response_body)}")
+            bims_logger.info(f"Body: {_safe_json(_redactar(response_body))}")
 
             res.raise_for_status()
             return response_body
@@ -299,11 +352,14 @@ class BimsApi:
             elapsed = time.time() - start_time
             error_msg = f"Error during {method_name} request to {url}."
             if hasattr(e, 'response') and e.response is not None:
-                error_msg += f" Response status: {e.response.status_code}. Response body: {e.response.text}"
+                error_msg += (
+                    f" Response status: {e.response.status_code}."
+                    f" Response body: {_redactar_texto(e.response.text)}"
+                )
                 bims_logger.error("══════ BIMS ERROR ══════")
                 bims_logger.error(f"{method_name} {url} | Time: {elapsed:.2f}s")
                 bims_logger.error(f"Status: {e.response.status_code}")
-                bims_logger.error(f"Response: {e.response.text}")
+                bims_logger.error(f"Response: {_redactar_texto(e.response.text)}")
             else:
                 # Sin `e.response` (error de red: conexión, timeout, DNS) la única
                 # causa real es `str(e)`; sin incluirla acá el mensaje quedaba
