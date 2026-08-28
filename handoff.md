@@ -1,138 +1,159 @@
-# Handoff sesión del 2026-08-27
+# Handoff sesión del 2026-08-28
 
-> Se cerraron los 5 puntos que el handoff anterior dejaba sin comprobar, se **desplegaron dos
-> cosas** y se verificaron las dos con tráfico real. Un pedido cambió de forma por completo a mitad
-> de camino, y apareció una **fuga de credencial** que no tiene que ver con nada de lo anterior.
+> **Dos despliegues, los dos validados con ventas reales el mismo día.** Además se cerró la fuga
+> de credencial del lado nuestro y quedó **todo listo para Django 5.2 menos el flip**, que se hace
+> el lunes. Aparecieron tres hallazgos que corrigieron cosas que creíamos ciertas, incluida una
+> afirmación de la spec que escribí unas horas antes.
 
 ## Estado al cierre
 
 | | |
 |---|---|
-| **Producción** | `main` @ **`12cf312`** — dos despliegues hoy, los dos verificados en vivo |
-| Servicio | último arranque **19:26:54 UTC** (el del segundo despliegue) |
-| Tests | **155/155** en local (3.12 + Django 6) y sobre el **venv exacto** de producción (3.7.17 + Django 3.2.25) |
-| Ramas sin mergear | `chore/verificar-stack-palancas` (tooling, ver abajo) |
+| **Producción** | `main` @ **`470e6ec`** — Python 3.7.17 + Django 3.2.25, sin cambios |
+| Servicio | último arranque **14:50:29 UTC** |
+| Tests | **179/179** en local (3.12 + **Django 5.2.17**) y en el venv nuevo del servidor (3.10.12 + 5.2.17) |
+| Ramas sin mergear | `feature/django-52-lts` @ `35f9a31` (pusheada), `chore/verificar-stack-palancas` (tooling, sigue pendiente de ayer) |
 
 ---
 
-# ⚠️ LO PRIMERO DE MAÑANA
+# 📅 LO PRIMERO DEL LUNES
 
-### 1. La fuga de credencial en `bims_api.log`
+### El flip a Django 5.2
 
-La respuesta de `POST /sales/` de BIMS incluye `Agency.tae_password` **en texto plano** (más
-`tae_username`). El integrador loguea el body crudo, así que **cada venta exitosa escribe esa
-credencial en disco**, replicada por la rotación en `.1/.2/.3` y `.bak`.
+**Todo está hecho y probado menos el último paso.** Es la **Task 7** del plan
+(`docs/superpowers/plans/2026-08-28-django-52-lts.md`), escrita paso por paso.
 
-Son **dos problemas separados**: que BIMS lo mande (hay que reportarlo, es su credencial) y que
-nosotros lo escribamos sin filtrar (nuestro arreglo: redactar `password|secret|token|api_key` antes
-de loguear). El log **no está en git** desde `e53b849`, así que no se filtró al repo.
+Lo que ya está listo:
 
-**El reporte ya está escrito:** `docs/reportes/2026-08-27-reporte-a-bims.md`. Falta **enviarlo**.
-Está en dos partes a propósito — la de seguridad conviene mandarla sola.
+- **Backup verificado de las 4 bases** — 225 MB, 10.837.450 líneas. El primero que tuvieron.
+  Script reutilizable en `backup-bases.sh`.
+- **Venv paralelo** `/root/venv-integrador-52` con Python 3.10.12 + Django 5.2.17: **179/179**.
+- **`showmigrations --plan` contra la base viva: 0 sin aplicar, 26 aplicadas.** El `migrate` será
+  no-op, así que **no queda estado de base adelantado y el rollback es completo.**
+- El venv viejo (`integrador-ObaHlHmv`) **intacto**: es el rollback.
 
-### 2. El cron de las 00:00 UTC — canario del presupuesto por orden
+Dos cuidados que están en el plan y conviene no improvisar: **leer el unit completo antes de
+editarlo** (la ruta del venv puede estar en `Environment=` o `ExecStartPre=`, no solo en
+`ExecStart=`), y **respaldarlo como `.pre-django52`** — ese archivo es la vuelta atrás.
 
-`sync_bims_contacts` hace 38 llamadas secuenciales y **no debe** tener presupuesto de orden: tiene
-que recibir `None` de `restante()`. Se verificó fuera de contexto en el smoke test, pero la corrida
-completa de 17.300 contactos todavía no pasó con este código. Si el sync termina sin presupuestos
-agotados, el despliegue queda validado del todo.
+### Y lo que no depende de nosotros: enviar el reporte a BIMS
+
+`docs/reportes/2026-08-27-reporte-a-bims.md`, **Parte 1 sola**. Sigue sin enviar, y es lo único
+que puede lograr que **roten la credencial** — que es lo único que remedia lo que Sentry ya
+ingirió.
+
+Dato nuevo que refuerza el pedido: en 5,5 meses de logs hay **un solo valor distinto** de
+credencial. **Nunca la rotaron**, así que la ventana de exposición es el período completo.
 
 ---
 
-## 1. Los 5 puntos sin comprobar, cerrados
+## 1. La fuga de credencial, cerrada de nuestro lado
 
-| # | Punto | Resultado |
-|---|---|---|
-| 1 | Nombre del fee de la propina | **Sin plata perdida.** En todo el histórico hay dos nombres: `Tip` 699 veces (551 en `completed`, desde 2023-10-08) y `Giftcard (777#gcn)` 3 veces —todas **negativas** y en órdenes **canceladas**, o sea que nunca llegaron. El riesgo real es otro: el nombre sale de `esc_html__('Tip', 'wpslash-tipping')`, **cadena traducible**. Un `.mo` lo vuelve "Propina" y las propinas dejan de facturarse en silencio |
-| 2 | Smoke test contra el BIMS real | **Pasa.** `login` 2,19 s, `get_posales` OK con la tupla `(connect, read)`, y con presupuesto agotado corta en **0,0 s** en vez de colgarse |
-| 3 | Venv exacto | **155/155 sobre Django 3.2.25** |
-| 4 | `order_id` duplicados | **No hay.** 8588 filas, 8588 distintos → la migración del `unique` del sub-proyecto A es segura |
-| 5 | ¿Woo le habla al CRM? | **Sí, por plugin.** `woocommerce-krayin-crm`, en `woocommerce_order_status_changed`, vía Action Scheduler. 134 leads en un día, todos 200 |
+Ayer se detectó que BIMS devuelve `Agency.tae_password` en texto plano. La auditoría de hoy mostró
+que era más grande: **tres sumideros, no uno.**
 
-Del punto 5 salió algo útil: **la correlación pedido↔lead ya existe** (`_krayin_lead_id` como meta
-de la orden), así que el eslabón que falta es solo **orden↔factura de BIMS**, que es el
-sub-proyecto A′.
+| sumidero | estado |
+|---|---|
+| Log del servidor + rotación | **purgado** (8 ocurrencias) |
+| **307 copias en la máquina local**, desde marzo | **purgadas** |
+| **Sentry**, vía breadcrumbs de nivel INFO | **cortado de arriba** por el filtro |
+| ~~`FailedOrder` en la base~~ | **descartado con evidencia directa**: 8632 filas, 0 con el campo |
 
-## 2. Presupuesto por orden — DESPLEGADO 13:41:02 UTC
+**`propagate: False` NO protege de Sentry** — verificado en el fuente del SDK, no asumido:
+`sentry_sdk/integrations/logging.py:160-195` parchea `logging.Logger.callHandlers`, que corre en el
+logger de origen y solo filtra por nombre contra una lista de ignorados.
 
-Fast-forward `3b9773c..11d4780`, `migrate` no-op, restart. Sin variables nuevas en el `.env`.
+**El filtro** (`_redactar` / `_redactar_texto`, `470e6ec`) recorre dicts y listas y matchea la clave
+por **subcadena**. El enmascarado viejo fallaba por tres razones independientes: comparaba nombres
+exactos (`tae_password` ≠ `password`), era de un solo nivel, y no se aplicaba a las respuestas.
+Devuelve **copia**, porque `login()` saca el session id del mismo dict que loguea.
 
-**Verificado en vivo:** la orden 201914 entró a los 27 s del reinicio y la **201916 facturó completa
-(Sale 31280) en ~9,7 s**. Cero presupuestos agotados, cero errores. Cierra el hallazgo 1 de los
-timeouts, que era la condición para discutir sacar el reinicio cada 6 h.
+**Validado contra los logs reales antes de desplegar:** de las 307 líneas, redacta 307 y deja 0.
+**Y sobre tráfico vivo después:** las dos ventas posteriores al deploy generaron 4 entradas, todas
+redactadas. Si el filtro estuviera roto, el conteo "con valor" sería 2 y es 0 — o sea que actuó el
+filtro, no solo la purga.
 
-## 3. Cortesía — DESPLEGADO 19:26:54 UTC y verificado con una venta real
+**Cómo se purgó, que importa si hay que repetirlo:** los 3 workers de gunicorn tienen
+`bims_api.log` abierto. Un `sed -i` crea un inodo nuevo y el proceso sigue escribiendo al viejo, ya
+borrado → se pierde el log hasta el próximo reinicio. La forma correcta es abrir en `r+`,
+reescribir desde 0 y truncar: mismo inodo (verificado `797722->797722`).
 
-**El pedido cambió de forma.** Arrancó como *"que el merch con precio 0 llegue para descontar
-inventario"*; tras hablar con finanzas resultó ser otra cosa: que una venta de caja con método
-**Cortesía** llegue **con el precio original** y sea **rastreable**.
+## 2. Correlación orden↔factura, desplegada y validada
 
-**Hallazgo central:** FooEvents **no tiene** un método "Cortesía". La caja usa el slot
-`fooeventspos_direct_bank_transfer` reetiquetado — **1036 órdenes desde 2023-10-11, ninguna llegó
-nunca**. La transferencia bancaria de verdad es `cash_on_delivery` (26). Confundirlos haría figurar
-una cortesía como cobrada.
+`FailedOrder` ganó `bims_sale_id` y `bims_invoice_number` (migración 0008), `create_sale` dejó de
+descartar el `invoice_number`, y la factura **también se anota como metadata en la orden de
+WooCommerce**, que es donde trabaja la caja.
 
-**Verificación end-to-end:** orden Woo **202707 → BIMS Sale 31301**, `payment_method_id: 43`,
-producto *Tazas Pequeñas SC* a **35.000 = su `sell_price`**, `invoice_number 12000`, certificada ante
-la SET (`eis_response: "(0300) Lote recibido con éxito"`). La caja después anuló pedido y factura
-**a mano en los dos sistemas**, que es lo correcto: el webhook `Refund order` está **deshabilitado**
-y apunta a un `staging.girolabs.cloud` inexistente, así que una cancelación en Woo **no se propaga**.
+**Validación end-to-end con dos ventas reales**, con el corte exactamente en el deploy de las 14:15:
 
-**Alcance acordado:** solo las cortesías que **ya traen precio** (149 de 961 `completed`). Las **812**
-con las líneas en 0 quedan afuera; las frena el chequeo de `total == 0`, que corre **antes** que el
-de método de pago. Hay un test que lo fija para que no se cuelen.
+| orden | UTC | sale_id | factura |
+|---|---|---|---|
+| 203769 → 203775 | 12:56–13:15 | `None` | `None` |
+| **203784** | 17:26 | **31325** | **14567** |
+| **203787** | 18:10 | **31326** | **14568** |
 
-**De paso, el fallback dejó de ser silencioso:** cualquier `opmk` desconocido se facturaba como
-"En línea" (28) sin loguear nada — el mismo bug que tuvo Cortesía 3 años. Ahora avisa con `WARNING`.
+Y en `wpzv_wc_orders_meta` las dos tienen `_bims_sale_id` y `_bims_invoice_number`, **con las tres
+metas de Krayin intactas** — el upsert por clave del `PUT` confirmado con tráfico real, no solo por
+lectura del código.
 
-## 4. El spike del inventario, y lo que respondió de rebote
+**La escritura a Woo es best-effort a propósito:** ahí la venta ya está facturada y certificada
+ante la SET, y el `FailedOrder` ya quedó COMPLETED. Propagar el error daría un 503 que además
+mentiría, y 5 seguidos apagan el webhook `Venta Entrada`. Hay un test que lo fija.
 
-Quedó reemplazado por Cortesía, pero dejó cosas útiles:
+⚠️ **203784 y 203787 son las primeras órdenes donde nuestro `PUT` agrega un tercer
+`order.updated`**, que dispara el bot de WhatsApp. No debería duplicar entradas (el job chequea
+`status = 'sent'` y corre con `numprocs=1`), y no hay señal de problema. Pero si aparece un reclamo
+de entrada duplicada, son esas dos las primeras a mirar.
 
-- **La fuente de verdad de la API de BIMS es `/home/vallory/IA/bims/bims_docs/docs/openapi.json`**
-  (340 paths, 119 esquemas), no `ayuda.bims.app` (3 endpoints). Y
-  `/home/vallory/code/plugin-factura-electronica/wc-bims-integrador/bims1.apib` tiene los payloads
-  concretos que el openapi deja genéricos.
-- **`send_invoice` resuelto:** `POST /api/sales/send/{id}.json` es *"envía el documento **al
-  cliente**"* — entrega, no emisión. Nuestro `bims.py:618` está mal nombrado y es código muerto.
-  La certificación es **automática al guardar**.
-- **Una venta facturada normal SÍ descuenta inventario** (`Sale.stock: true`), confirmado en la venta
-  31301. Sigue sin saberse si una con `billed: false` lo hace.
-- **`stock_uses` (órdenes de uso interno) es solo lectura**: existe `index`, no `add`. Es el pedido
-  2.1 del reporte a BIMS.
+## 3. Django 5.2: tres hallazgos que cambiaron el plan
 
-## 5. Django 5.2 LTS — objetivo marcado por Carlos
+- **El servidor ya tenía `/usr/bin/python3.10`** (Ubuntu 22.04.5). El requisito duro de 5.2 estaba
+  satisfecho desde el principio.
+- **No hay ni una migración interna nueva entre 3.2.25 y 5.2.17** (`admin` 3/3, `auth` 12/12,
+  `contenttypes` 2/2, `sessions` 1/1). Eso convierte el rollback por venv en **completo** y bajó el
+  riesgo de todo el proyecto.
+- **El "muro de PyMySQL" para Django 6 no existe.** El spoof de `version_info` cambió entre
+  versiones: 1.1.x reporta `(1,4,6)` y no pasa el umbral `≥2.2.1` de Django 6, pero **1.2.0 reporta
+  `(2,2,8)` y pasa los dos**. **Corregí la spec**, que lo daba como el motivo técnico para no ir a
+  6. El motivo válido es el otro: **5.2 es el único LTS vigente.** De ahí el piso
+  `pymysql = ">=1.2"` en el `Pipfile`.
 
-**Producción corre Django 3.2, sin soporte desde abril de 2024.** 4.2 LTS también venció (abril
-2026), así que **5.2 es el único destino LTS vigente**. Restricción que ordena el trabajo: **5.2 pide
-Python ≥ 3.10 y producción tiene 3.7.17**, así que son dos saltos y el intérprete va primero. Es el
-"proyecto B", pero es deuda de seguridad, no modernización. Y **sin backups no es reversible**.
+## 4. Lo que se descubrió al cerrar el hueco de validación
+
+`test_settings` cargaba **4 apps** y esquivaba `drf_yasg`, `corsheaders` y el admin. O sea que
+"176 en verde sobre Django 6" no decía nada sobre lo que más puede romper. Ahora carga **las 10 de
+producción**, con `ROOT_URLCONF` real, y hay tres tests nuevos (176 → **179**).
+
+El test que carga el `settings.py` real encontró **dos cosas en su primera corrida**:
+
+1. **`corsheaders` no estaba instalado en el venv local**, aunque el settings real lo lista.
+2. **Con Django 6.0.3 + PyMySQL 1.1.2 el settings real NO LEVANTA:** `ImproperlyConfigured:
+   mysqlclient 2.2.1 or newer is required; you have 1.4.6`. **El entorno local no podía arrancar la
+   app y nadie lo sabía.**
+
+Y de paso: **`manage.py check` dispara un login REAL contra BIMS.** `bims.py` instancia `BimsApi()`
+al importarse y el `check` carga el admin, que arrastra esa cadena. **Todo comando de `manage.py`
+en producción hace un login a BIMS al importar**, incluidos `migrate` y `showmigrations`.
 
 ---
 
 ## Cabos sueltos
 
-- **`chore/verificar-stack-palancas` sin mergear ni pushear.** Hoy costó un error real: verifiqué
-  contra Django 3.2.18 creyendo que era 3.2.25, porque la palanca `PYTHON=` no está en `main` y el
-  script viejo **ignora la variable en silencio**. Mientras viva solo en esa rama, cualquier
-  verificación desde otra rama usa el intérprete equivocado sin avisar.
-- **`payment_method_title` quedó como parámetro muerto** en `resolve_pos_and_payments`
-  (`services.py:91`, pasado desde `:541`). Decisión explícita de Carlos: sacarlo toca la firma y 21
-  call sites de tests. Documentado en el commit.
-- **La tilde de `Cortesia` en BIMS** (id 43): Carlos la va a corregir. **Tiene que ser un rename
-  sobre el 43**, no un método nuevo, o el mapeo del código apunta al equivocado.
-- **Sentry:** cualquier script de diagnóstico con los settings de producción reporta como si fuera
-  la app — pasó hoy con un `KeyError` de un sondeo mío. La línea para evitarlo:
-  `sentry_sdk.get_global_scope().set_client(None)` después de `django.setup()`. Y siguen en 1.0
-  `traces_sample_rate` y `profiles_sample_rate`, con el DSN hardcodeado.
-- **`scp` a producción está bloqueado** por el classifier; `git archive | ssh` y `tar -c | ssh` sí
-  pasan. Y el acceso root **necesita** `-o IdentitiesOnly=yes`.
-
-## Pendientes de antes, sin cambios
-
-- **⚠️ Backups de las bases.** El más grave del proyecto, y ahora bloquea el upgrade de Python.
-- **201 órdenes en FAILED** sin reproceso; `runretryfaileds.sh` es código muerto y roto.
-- Los logs de BIMS se pierden ~12 h por día por la rotación del cron nocturno.
-- Ventana para los 67 parches de terceros.
-- Propuesta de donaciones publicada, **esperando que Carlos la presente**.
-- **A′** — guardar el `sale_id`: no depende de ninguna decisión pendiente.
+- **`Pipfile.lock` quedó desactualizado** y está trackeado: sigue fijando Django 3.2.25, DRF
+  3.15.1, `mysqlclient`, `simplejwt` y PyMySQL 1.1.1. Un `pipenv install` honra el lock e
+  instalaría **el stack viejo en silencio**. Decisión pendiente: regenerarlo con Python 3.10, o
+  sacarlo del repo dado que el venv nuevo ya no se construye con pipenv.
+- **El `.env` de producción es legible por todos** (`-rw-r-xr--`): cualquier usuario del servidor
+  lee la password de MariaDB y las credenciales de BIMS. Se arregla con `chmod 600`. No lo toqué.
+- **`chore/verificar-stack-palancas` sigue sin mergear.** Mientras viva solo en rama, el script
+  **ignora la variable `PYTHON=` en silencio**.
+- **Corrección al registro:** la memoria decía que los PAT de `carlvallory` no podían pushear a
+  este repo. **Hoy el push funcionó** tres veces.
+- Tres archivos de dev sin trackear (`dev-sucursales.sqlite3`, `dev_settings.py`, `dev_urls.py`),
+  restos de la rama de sucursales.
+- **Recomendación para el repo del bot** (no es de este proyecto): la idempotencia depende de
+  `numprocs=1` en un `.conf` de Supervisor, y `bot/README.md:350` documenta `numprocs=2`. El
+  arreglo que el propio doc propone es `ShouldBeUnique` con `uniqueId()` devolviendo el `orderId`.
+- Del backlog viejo, sin tocar: **201 órdenes en FAILED** sin reproceso automático, los **67
+  parches de terceros**, `traces_sample_rate`/`profiles_sample_rate` en **1.0** con el DSN
+  hardcodeado, y la rotación de `bims_api.log` que pierde ~12 h por día.
