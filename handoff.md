@@ -1,159 +1,149 @@
-# Handoff sesión del 2026-08-28
+# Handoff sesión del 2026-08-31
 
-> **Dos despliegues, los dos validados con ventas reales el mismo día.** Además se cerró la fuga
-> de credencial del lado nuestro y quedó **todo listo para Django 5.2 menos el flip**, que se hace
-> el lunes. Aparecieron tres hallazgos que corrigieron cosas que creíamos ciertas, incluida una
-> afirmación de la spec que escribí unas horas antes.
+> **Producción migró a Python 3.10 + Django 5.2 LTS.** Aparecieron dos regresiones: una se cerró
+> con una línea en nginx y la otra sigue abierta pero ya es visible. Además quedó diseñado y
+> planificado el sub-proyecto A, con la Tarea 1 implementada.
+>
+> Tres correcciones a cosas que dábamos por ciertas, y **dos errores míos del lado del servidor**
+> que conviene leer antes de repetirlos.
 
 ## Estado al cierre
 
 | | |
 |---|---|
-| **Producción** | `main` @ **`470e6ec`** — Python 3.7.17 + Django 3.2.25, sin cambios |
-| Servicio | último arranque **14:50:29 UTC** |
-| Tests | **179/179** en local (3.12 + **Django 5.2.17**) y en el venv nuevo del servidor (3.10.12 + 5.2.17) |
-| Ramas sin mergear | `feature/django-52-lts` @ `35f9a31` (pusheada), `chore/verificar-stack-palancas` (tooling, sigue pendiente de ayer) |
+| **Producción** | `main` @ **`43fd813`** — **Python 3.10.12 + Django 5.2.17** |
+| Servicio | último arranque **13:57:39 UTC** |
+| Tests | **186** en la rama de trabajo; 183 en `main` |
+| Rama activa | `feature/hub-ingreso-cola` @ `0e4b3b4`, **sin pushear** |
+| Rollback | `mucintegrador.service.pre-django52` + venv viejo intacto |
 
 ---
 
-# 📅 LO PRIMERO DEL LUNES
+## 1. El flip a Django 5.2 — HECHO y validado
 
-### El flip a Django 5.2
+Producción pasó de **Python 3.7.17 + Django 3.2.25** a **3.10.12 + 5.2.17** a las 13:08:36 UTC.
+Cierra más de dos años sin parches de seguridad del framework.
 
-**Todo está hecho y probado menos el último paso.** Es la **Task 7** del plan
-(`docs/superpowers/plans/2026-08-28-django-52-lts.md`), escrita paso por paso.
-
-Lo que ya está listo:
-
-- **Backup verificado de las 4 bases** — 225 MB, 10.837.450 líneas. El primero que tuvieron.
-  Script reutilizable en `backup-bases.sh`.
-- **Venv paralelo** `/root/venv-integrador-52` con Python 3.10.12 + Django 5.2.17: **179/179**.
-- **`showmigrations --plan` contra la base viva: 0 sin aplicar, 26 aplicadas.** El `migrate` será
-  no-op, así que **no queda estado de base adelantado y el rollback es completo.**
-- El venv viejo (`integrador-ObaHlHmv`) **intacto**: es el rollback.
-
-Dos cuidados que están en el plan y conviene no improvisar: **leer el unit completo antes de
-editarlo** (la ruta del venv puede estar en `Environment=` o `ExecStartPre=`, no solo en
-`ExecStart=`), y **respaldarlo como `.pre-django52`** — ese archivo es la vuelta atrás.
-
-### Y lo que no depende de nosotros: enviar el reporte a BIMS
-
-`docs/reportes/2026-08-27-reporte-a-bims.md`, **Parte 1 sola**. Sigue sin enviar, y es lo único
-que puede lograr que **roten la credencial** — que es lo único que remedia lo que Sentry ya
-ingirió.
-
-Dato nuevo que refuerza el pedido: en 5,5 meses de logs hay **un solo valor distinto** de
-credencial. **Nunca la rotaron**, así que la ventana de exposición es el período completo.
-
----
-
-## 1. La fuga de credencial, cerrada de nuestro lado
-
-Ayer se detectó que BIMS devuelve `Agency.tae_password` en texto plano. La auditoría de hoy mostró
-que era más grande: **tres sumideros, no uno.**
-
-| sumidero | estado |
+| verificación | resultado |
 |---|---|
-| Log del servidor + rotación | **purgado** (8 ocurrencias) |
-| **307 copias en la máquina local**, desde marzo | **purgadas** |
-| **Sentry**, vía breadcrumbs de nivel INFO | **cortado de arriba** por el filtro |
-| ~~`FailedOrder` en la base~~ | **descartado con evidencia directa**: 8632 filas, 0 con el campo |
+| Suite en el stack viejo | 179/179 → el rollback es seguro |
+| Suite en el venv nuevo, contra el commit final | 179/179 |
+| `corsheaders` / `drf-yasg` / `pymysql` | 4.9.0 / 1.21.15 / **1.2.0** |
+| `migrate` | **`No migrations to apply.`** → rollback completo |
+| Venta real | orden **204000 → BIMS 31385, factura 12040**, certificada ante la SET |
 
-**`propagate: False` NO protege de Sentry** — verificado en el fuente del SDK, no asumido:
-`sentry_sdk/integrations/logging.py:160-195` parchea `logging.Logger.callHandlers`, que corre en el
-logger de origen y solo filtra por nombre contra una lista de ignorados.
+**El chequeo funcional del plan dio 404 con el deploy sano.** `curl http://localhost/swagger.json`
+cae en un server block de nginx que no es el del integrador —el host real es
+`integrador.muci.org`— así que las requests **nunca llegaron a gunicorn**, y el access log de
+journald lo prueba. Por el socket daban 200 y 302 desde el principio.
 
-**El filtro** (`_redactar` / `_redactar_texto`, `470e6ec`) recorre dicts y listas y matchea la clave
-por **subcadena**. El enmascarado viejo fallaba por tres razones independientes: comparaba nombres
-exactos (`tae_password` ≠ `password`), era de un solo nivel, y no se aplicaba a las respuestas.
-Devuelve **copia**, porque `login()` saca el session id del mismo dict que loguea.
+**Lección, ya escrita en el plan:** un chequeo de verificación que nunca se corrió contra el estado
+ANTERIOR no distingue una regresión de un chequeo mal escrito. Ante un rojo, probar el componente
+**sin la capa de infraestructura de por medio** antes de disparar el rollback.
 
-**Validado contra los logs reales antes de desplegar:** de las 307 líneas, redacta 307 y deja 0.
-**Y sobre tráfico vivo después:** las dos ventas posteriores al deploy generaron 4 entradas, todas
-redactadas. Si el filtro estuviera roto, el conteo "con valor" sería 2 y es 0 — o sea que actuó el
-filtro, no solo la purga.
+## 2. Regresión 1: CSRF 403 en el admin — CERRADA
 
-**Cómo se purgó, que importa si hay que repetirlo:** los 3 workers de gunicorn tienen
-`bims_api.log` abierto. Un `sed -i` crea un inodo nuevo y el proceso sigue escribiendo al viejo, ya
-borrado → se pierde el log hasta el próximo reinicio. La forma correcta es abrir en `r+`,
-reescribir desde 0 y truncar: mismo inodo (verificado `797722->797722`).
+El admin devolvía *"Origin checking failed"*. **La causa raíz no estaba en Django: estaba en nginx,
+y llevaba años mal.**
 
-## 2. Correlación orden↔factura, desplegada y validada
+El server block de `integrador.muci.org` no mandaba **`X-Forwarded-Proto`**. Sin ese header,
+`SECURE_PROXY_SSL_HEADER` nunca dispara, `request.is_secure()` da **False**, y Django compara el
+`Origin: https://…` del browser contra un `good_origin` armado con `http://`.
 
-`FailedOrder` ganó `bims_sale_id` y `bims_invoice_number` (migración 0008), `create_sale` dejó de
-descartar el `invoice_number`, y la factura **también se anota como metadata en la orden de
-WooCommerce**, que es donde trabaja la caja.
+**Por qué apareció recién ahora, verificado en el fuente y no asumido:** `_origin_verified` aparece
+**0 veces** en el `csrf.py` de Django 3.2 y **2 veces** en el de 5.2. La verificación del header
+`Origin` **se agregó en Django 4.0**. Nginx estuvo mal todo este tiempo y 3.2 no miraba.
 
-**Validación end-to-end con dos ventas reales**, con el corte exactamente en el deploy de las 14:15:
+Arreglo: una línea (`proxy_set_header X-Forwarded-Proto $scheme;`). Backup en
+`integrador.muci.org.pre-xfp` — ⚠️ **ese backup ya tiene el header**, no es el original.
+Verificado sin ssh: `curl https://integrador.muci.org/swagger.json` reporta `"schemes": ["https"]`.
 
-| orden | UTC | sale_id | factura |
-|---|---|---|---|
-| 203769 → 203775 | 12:56–13:15 | `None` | `None` |
-| **203784** | 17:26 | **31325** | **14567** |
-| **203787** | 18:10 | **31326** | **14568** |
+## 3. Regresión 2: las metas de BIMS no llegaron a Woo — INSTRUMENTADA, causa abierta
 
-Y en `wpzv_wc_orders_meta` las dos tienen `_bims_sale_id` y `_bims_invoice_number`, **con las tres
-metas de Krayin intactas** — el upsert por clave del `PUT` confirmado con tráfico real, no solo por
-lectura del código.
+La orden 204000 facturó y **no** quedó con `_bims_sale_id` en WooCommerce. El corte parecía
+limpio: cinco órdenes con metas antes del flip, la primera sin metas después.
 
-**La escritura a Woo es best-effort a propósito:** ahí la venta ya está facturada y certificada
-ante la SET, y el `FailedOrder` ya quedó COMPLETED. Propagar el error daría un 503 que además
-mentiría, y 5 seguidos apagan el webhook `Venta Entrada`. Hay un test que lo fija.
+**Afirmé que el flip lo había roto y estaba equivocado.** Se probó el camino completo sobre el venv
+nuevo: sin redirect, el PUT sigue siendo PUT, 200, y las metas **quedan persistidas**. La orden se
+reparó de paso. La hipótesis del redirect (un 302 convierte cualquier método en GET, verificado en
+`SessionRedirectMixin.rebuild_method`) quedó **refutada**: el redirect de nginx para `muci.org` es
+un **301**, que un PUT sobrevive.
 
-⚠️ **203784 y 203787 son las primeras órdenes donde nuestro `PUT` agrega un tercer
-`order.updated`**, que dispara el bot de WhatsApp. No debería duplicar entradas (el job chequea
-`status = 'sent'` y corre con `numprocs=1`), y no hay señal de problema. Pero si aparece un reclamo
-de entrada duplicada, son esas dos las primeras a mirar.
+**Sospecha principal: carrera de escritura perdida.** El PUT salió 24 s después de creada la orden,
+con el plugin de Krayin escribiendo a los 9 s. Si otro proceso cargó la orden antes y la guardó
+después, nos pisa la meta y Woo igual responde 200.
 
-## 3. Django 5.2: tres hallazgos que cambiaron el plan
+**Lección:** con `n=1` del lado nuevo, un corte temporal limpio **no** distingue una regresión de
+una coincidencia.
 
-- **El servidor ya tenía `/usr/bin/python3.10`** (Ubuntu 22.04.5). El requisito duro de 5.2 estaba
-  satisfecho desde el principio.
-- **No hay ni una migración interna nueva entre 3.2.25 y 5.2.17** (`admin` 3/3, `auth` 12/12,
-  `contenttypes` 2/2, `sessions` 1/1). Eso convierte el rollback por venv en **completo** y bajó el
-  riesgo de todo el proyecto.
-- **El "muro de PyMySQL" para Django 6 no existe.** El spoof de `version_info` cambió entre
-  versiones: 1.1.x reporta `(1,4,6)` y no pasa el umbral `≥2.2.1` de Django 6, pero **1.2.0 reporta
-  `(2,2,8)` y pasa los dos**. **Corregí la spec**, que lo daba como el motivo técnico para no ir a
-  6. El motivo válido es el otro: **5.2 es el único LTS vigente.** De ahí el piso
-  `pymysql = ">=1.2"` en el `Pipfile`.
+**Lo que sí se hizo:** `update_order_meta` ahora verifica que las claves vuelvan en la respuesta del
+PUT con el valor que mandamos, y lanza `ServerException` si no — que `services.py` ya captura y
+loguea como `WARNING` sin romper la orden. **Cuatro tests, los cuatro vistos fallar antes.** Se
+corrigió además un mock que devolvía `{"id": ...}` sin `meta_data`, cosa que Woo no hace nunca:
+**ese mock irreal era la razón por la que el agujero podía existir con la suite en verde.**
 
-## 4. Lo que se descubrió al cerrar el hueco de validación
+⚠️ Esto **no arregla** la pérdida, la hace visible. La Tarea 7 del plan de A la vuelve
+auto-reparable.
 
-`test_settings` cargaba **4 apps** y esquivaba `drf_yasg`, `corsheaders` y el admin. O sea que
-"176 en verde sobre Django 6" no decía nada sobre lo que más puede romper. Ahora carga **las 10 de
-producción**, con `ROOT_URLCONF` real, y hay tres tests nuevos (176 → **179**).
+## 4. Sub-proyecto A — spec, plan y Tarea 1
 
-El test que carga el `settings.py` real encontró **dos cosas en su primera corrida**:
+Objetivo de Carlos: que el CRM sepa si una donación se facturó de verdad, porque **fundraising va a
+cargar donaciones desde Krayin** y esas nunca pasan por WooCommerce.
 
-1. **`corsheaders` no estaba instalado en el venv local**, aunque el settings real lo lista.
-2. **Con Django 6.0.3 + PyMySQL 1.1.2 el settings real NO LEVANTA:** `ImproperlyConfigured:
-   mysqlclient 2.2.1 or newer is required; you have 1.4.6`. **El entorno local no podía arrancar la
-   app y nadie lo sabía.**
+**Corrección importante de la sesión:** afirmé que "el CRM como origen no está contemplado en
+ninguna parte". **Falso.** El documento publicado el 26/08 ya tiene el diagrama de **dos orígenes**
+con Krayin entrando al integrador, rotulado "entrada nueva". El `.md` de arquitectura en disco es de
+**julio** y quedó superado. La memoria de Carlos era mejor que la mía.
 
-Y de paso: **`manage.py check` dispara un login REAL contra BIMS.** `bims.py` instancia `BimsApi()`
-al importarse y el `check` carga el admin, que arrastra esa cadena. **Todo comando de `manage.py`
-en producción hace un login a BIMS al importar**, incluidos `migrate` y `showmigrations`.
+- **Spec:** `docs/superpowers/specs/2026-08-31-hub-ingreso-cola-estado-design.md`
+- **Plan:** `docs/superpowers/plans/2026-08-31-hub-ingreso-cola-estado.md` — 9 tareas, 2 despliegues
+- **Progreso:** `progreso.md`
+
+**Tarea 1 hecha** (`51f2798`): estados `PENDING`/`PROCESSING`/`PAUSED`/`NOT_APPLICABLE` y campos
+`origin`, `bims_attempts`, `bims_next_attempt`, `woo_meta_ok`, `claimed_at`. Migración `0009`
+aditiva: **ningún dato se toca**. 183 → **186 tests**.
+
+**Se abandonó el `RenameField`** por pedido de Carlos, y con razón: en MySQL/MariaDB el DDL hace
+commit implícito, así que la atomicidad que Django le da a una migración **no cubre el esquema**, y
+no hay dump a mano para ensayarla. Ahora se **expande y contrae**: `order_id` queda intacto y
+borrarlo es una tarea diferida.
 
 ---
 
-## Cabos sueltos
+## Cabos sueltos y hallazgos
 
-- **`Pipfile.lock` quedó desactualizado** y está trackeado: sigue fijando Django 3.2.25, DRF
-  3.15.1, `mysqlclient`, `simplejwt` y PyMySQL 1.1.1. Un `pipenv install` honra el lock e
-  instalaría **el stack viejo en silencio**. Decisión pendiente: regenerarlo con Python 3.10, o
-  sacarlo del repo dado que el venv nuevo ya no se construye con pipenv.
-- **El `.env` de producción es legible por todos** (`-rw-r-xr--`): cualquier usuario del servidor
-  lee la password de MariaDB y las credenciales de BIMS. Se arregla con `chmod 600`. No lo toqué.
-- **`chore/verificar-stack-palancas` sigue sin mergear.** Mientras viva solo en rama, el script
-  **ignora la variable `PYTHON=` en silencio**.
-- **Corrección al registro:** la memoria decía que los PAT de `carlvallory` no podían pushear a
-  este repo. **Hoy el push funcionó** tres veces.
-- Tres archivos de dev sin trackear (`dev-sucursales.sqlite3`, `dev_settings.py`, `dev_urls.py`),
-  restos de la rama de sucursales.
-- **Recomendación para el repo del bot** (no es de este proyecto): la idempotencia depende de
-  `numprocs=1` en un `.conf` de Supervisor, y `bot/README.md:350` documenta `numprocs=2`. El
-  arreglo que el propio doc propone es `ShouldBeUnique` con `uniqueId()` devolviendo el `orderId`.
-- Del backlog viejo, sin tocar: **201 órdenes en FAILED** sin reproceso automático, los **67
-  parches de terceros**, `traces_sample_rate`/`profiles_sample_rate` en **1.0** con el DSN
-  hardcodeado, y la rotación de `bims_api.log` que pierde ~12 h por día.
+- ⚠️ **CUATRO consumidores se rompen con el 202, no dos.** Además de `retryfaileds.py:28` y
+  `sync_bims_contacts.py:78`, el admin tiene **dos más**: `retry_failed_orders_button`
+  (`admin.py:111`) y `retry_selected_orders` (`admin.py:152`). Los cuatro hacen `POST` a `/sales/`
+  y chequean `status_code == 200`, que con el 202 **nunca vuelve a ser cierto**. El plan solo lista
+  dos: **hay que actualizarlo antes de la Tarea 5.**
+- **`makemigrations` no funciona con `test_settings`.** `core/bims.py:723` tiene `bims = BimsApi()`
+  a nivel de módulo y el `__init__` hace login, así que el comando intenta conectarse a un host
+  inventado y crashea. Usar `--settings=muci-integrador.dev_settings`.
+- **`black` no está instalado ni en el `Pipfile`, y el código no está formateado con él** (hay
+  líneas de 108 caracteres; su default es 88). `CLAUDE.md` lo recomienda pero nunca se aplicó.
+  Correrlo ahora reformatearía medio proyecto: conviene como commit aislado, después del
+  Despliegue 2.
+- **`DEBUG=True` en producción.** Confirmado por dos caminos: la página de error 403 mostró la
+  sección de ayuda, y el SentryUptimeBot recibe **302 en `/`**, redirect que `urls.py` solo agrega
+  `if settings.DEBUG`. **Previo al flip.** Sale del `.env`.
+- **`admin.py` tiene un botón que corre `call_command("migrate")` desde la UI** (`:84`). Preexistente.
+- **`admin.py:53-62` registra la misma URL dos veces.** Preexistente e inofensivo.
+- **El reporte a BIMS sigue sin enviar** (`docs/reportes/2026-08-27-reporte-a-bims.md`). Es lo único
+  que puede lograr que roten la credencial. Carlos decidió postergarlo.
+- Del backlog viejo: **201 órdenes en FAILED**, los **67 parches de terceros**, y
+  `traces_sample_rate`/`profiles_sample_rate` en 1.0.
+
+## ⚠️ Dos errores míos del lado del servidor, para no repetirlos
+
+1. **Un `sed` no idempotente duplicó una directiva de nginx.** Se corrió dos veces y quedaron dos
+   `proxy_set_header X-Forwarded-Proto`. Con el header duplicado nginx lo manda dos veces y Django
+   puede leer `https,https`, que tampoco matchea: el CSRF habría seguido roto por otra razón.
+   **Todo comando de parcheo sobre el servidor debe chequear antes de escribir.**
+2. **Un `git add -A` mandó tres archivos de dev a producción** (`dev-sucursales.sqlite3`,
+   `dev_settings.py`, `dev_urls.py`). Sin credenciales y inertes allá, pero no iban. **Agregar por
+   nombre, siempre.** Quedaron gitignorados, y `dev_settings.py` resultó ser una herramienta útil.
+
+**Y una regla nueva de Carlos:** los `ssh` del asistente van **siempre** como
+`anthropic_readonly@muci.org`, nunca como root, ni para leer. Todo lo que modifica el servidor se lo
+pasa a Carlos para que lo corra él.
