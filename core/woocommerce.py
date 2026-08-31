@@ -22,6 +22,20 @@ TIMEOUT_WOOCOMMERCE = 30
 TIMEOUT_CONEXION_WOOCOMMERCE = 5
 
 
+def _meta_confirmada(cuerpo: dict, clave: str, esperado) -> bool:
+    """
+    ¿La respuesta del PUT trae `clave` con el valor que mandamos?
+
+    Compara como texto a propósito: mandamos strings y WooCommerce puede
+    devolver enteros para el mismo dato. Eso es persistencia correcta, no una
+    falla, y compararlo crudo daría falsos positivos en cada venta.
+    """
+    for entrada in cuerpo.get("meta_data") or []:
+        if str(entrada.get("key")) == clave:
+            return str(entrada.get("value")) == str(esperado)
+    return False
+
+
 class WooCommerceAPI:
     """
     Provides services to interact with a WooCommerce website
@@ -179,17 +193,36 @@ class WooCommerceAPI:
         código desplegado: esto no pisa metadata de otros plugins, en particular
         `_krayin_lead_id`, que es el vínculo orden↔CRM.
 
-        Lanza `ServerException` ante cualquier respuesta no-200; la política de
-        qué hacer con ese fallo vive en la capa de servicio, no acá.
+        Lanza `ServerException` ante cualquier respuesta no-200 **y también
+        cuando WooCommerce responde 200 sin persistir lo que pedimos**; la
+        política de qué hacer con ese fallo vive en la capa de servicio, no acá.
+
+        Lo segundo no es paranoia: el 2026-08-31 la orden 204000 facturó en BIMS,
+        este PUT devolvió 200 y la meta no quedó escrita. Como el código
+        descartaba la respuesta, no hubo excepción ni warning y la falla fue
+        **invisible** — se descubrió comparando órdenes a mano. Verificar la
+        respuesta convierte esa clase de falla en una línea de log.
         """
         payload = {
             "meta_data": [{"key": clave, "value": valor} for clave, valor in meta.items()]
         }
         with self._timeout_recortado(f"orders/{id}"):
             res = self.wcapi.put(f"orders/{id}", data=payload)
-        if res.status_code == 200:
-            return res.json()
-        raise self.ServerException(res.text)
+        if res.status_code != 200:
+            raise self.ServerException(res.text)
+
+        cuerpo = res.json()
+        no_confirmadas = [
+            clave
+            for clave, valor in meta.items()
+            if not _meta_confirmada(cuerpo, clave, valor)
+        ]
+        if no_confirmadas:
+            raise self.ServerException(
+                f"WooCommerce respondió 200 pero no confirmó "
+                f"{', '.join(sorted(no_confirmadas))} en la orden {id}."
+            )
+        return cuerpo
 
     def refund_order(self, id, data, **kwargs):
         with self._timeout_recortado(f"orders/{id}/refunds"):

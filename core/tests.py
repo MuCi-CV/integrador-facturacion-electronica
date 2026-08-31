@@ -2512,7 +2512,12 @@ class CorrelacionOrdenFacturaTest(TestCase):
     def test_update_order_meta_envia_las_claves_al_endpoint_de_la_orden(self):
         api = WooCommerceAPI()
         respuesta = MagicMock(status_code=200)
-        respuesta.json.return_value = {"id": 202707}
+        # Woo devuelve la orden entera, con `meta_data` incluida. El mock viejo
+        # respondía `{"id": ...}` a secas, que no pasa nunca en la realidad.
+        respuesta.json.return_value = {
+            "id": 202707,
+            "meta_data": [{"key": "_bims_sale_id", "value": "31301"}],
+        }
 
         with patch.object(api, "wcapi") as mock_wcapi:
             mock_wcapi.put.return_value = respuesta
@@ -2533,6 +2538,61 @@ class CorrelacionOrdenFacturaTest(TestCase):
             mock_wcapi.put.return_value = respuesta
             with self.assertRaises(WooCommerceAPI.ServerException):
                 api.update_order_meta(202707, {"_bims_sale_id": "31301"})
+
+    def test_update_order_meta_lanza_si_woo_responde_200_sin_persistir(self):
+        """
+        El caso real del 2026-08-31: la orden 204000 facturó en BIMS, el PUT a
+        WooCommerce devolvió **200** y la meta no quedó escrita. Sin verificar la
+        respuesta no hay excepción, no hay warning y la falla es invisible: hubo
+        que descubrirla comparando órdenes a mano.
+        """
+        api = WooCommerceAPI()
+        respuesta = MagicMock(status_code=200)
+        respuesta.json.return_value = {
+            "id": 204000,
+            "meta_data": [{"key": "_krayin_lead_id", "value": "28147"}],
+        }
+
+        with patch.object(api, "wcapi") as mock_wcapi:
+            mock_wcapi.put.return_value = respuesta
+            with self.assertRaises(WooCommerceAPI.ServerException) as ctx:
+                api.update_order_meta(204000, {"_bims_sale_id": "31385"})
+
+        # El mensaje va a `FailedOrder.message` y al log: tiene que decir qué
+        # clave no se confirmó, o no sirve para diagnosticar.
+        self.assertIn("_bims_sale_id", str(ctx.exception))
+
+    def test_update_order_meta_lanza_si_woo_devuelve_otro_valor(self):
+        """Confirmar la clave no alcanza: puede volver con un valor distinto."""
+        api = WooCommerceAPI()
+        respuesta = MagicMock(status_code=200)
+        respuesta.json.return_value = {
+            "id": 204000,
+            "meta_data": [{"key": "_bims_sale_id", "value": "otro"}],
+        }
+
+        with patch.object(api, "wcapi") as mock_wcapi:
+            mock_wcapi.put.return_value = respuesta
+            with self.assertRaises(WooCommerceAPI.ServerException):
+                api.update_order_meta(204000, {"_bims_sale_id": "31385"})
+
+    def test_update_order_meta_acepta_el_valor_confirmado_aunque_cambie_de_tipo(self):
+        """
+        BIMS y WooCommerce son laxos con los tipos: mandamos texto y Woo puede
+        devolver un entero. Eso es persistencia correcta, no una falla.
+        """
+        api = WooCommerceAPI()
+        respuesta = MagicMock(status_code=200)
+        respuesta.json.return_value = {
+            "id": 204000,
+            "meta_data": [{"key": "_bims_sale_id", "value": 31385}],
+        }
+
+        with patch.object(api, "wcapi") as mock_wcapi:
+            mock_wcapi.put.return_value = respuesta
+            cuerpo = api.update_order_meta(204000, {"_bims_sale_id": "31385"})
+
+        self.assertEqual(cuerpo["id"], 204000)
 
     @patch("core.services.resolve_contact_id", return_value=(999, None))
     @patch("core.services.bims")
@@ -2576,6 +2636,44 @@ class CorrelacionOrdenFacturaTest(TestCase):
         registro = FailedOrder.objects.get(order_id=202707)
         self.assertEqual(registro.status, FailedOrder.COMPLETED)
         self.assertEqual(registro.bims_sale_id, "31301")
+
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_woo_que_responde_200_sin_persistir_deja_rastro_en_el_log(
+        self, mock_wc, mock_bims, _mock_contact
+    ):
+        """
+        La cadena completa, que es el entregable: si WooCommerce acepta el PUT
+        pero no escribe, tiene que quedar un WARNING que diga qué clave faltó.
+        Antes de esta instrumentación el flujo terminaba en 200 sin rastro
+        alguno, y la orden 204000 se perdió así.
+
+        Se usa el `update_order_meta` REAL (no un side_effect) para que el test
+        cubra el camino entero y no la mentira de un mock.
+        """
+        from core.services import process_order
+
+        mock_wc.get_order.return_value = self._order()
+        mock_wc.get_product.return_value = {"sku": "500"}
+        mock_bims.create_sale.return_value = (31385, 12040, None)
+
+        api = WooCommerceAPI()
+        respuesta = MagicMock(status_code=200)
+        respuesta.json.return_value = {"id": 202707, "meta_data": []}
+
+        with patch.object(api, "wcapi") as mock_wcapi:
+            mock_wcapi.put.return_value = respuesta
+            mock_wc.update_order_meta = api.update_order_meta
+            with self.assertLogs("core.services", level="WARNING") as registrado:
+                resultado = process_order(order_id=202707)
+
+        self.assertIn("_bims_sale_id", "\n".join(registrado.output))
+        # Y la venta sigue dándose por buena: ya está facturada y certificada.
+        self.assertEqual(resultado["status"], "ok")
+        self.assertEqual(
+            FailedOrder.objects.get(order_id=202707).status, FailedOrder.COMPLETED
+        )
 
     @patch("core.services.resolve_contact_id", return_value=(999, None))
     @patch("core.services.bims")
