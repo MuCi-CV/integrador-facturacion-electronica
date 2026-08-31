@@ -61,10 +61,12 @@ fundraising va a cargar donaciones desde Krayin y esas nunca pasan por WooCommer
 
 ## Trampas conocidas — leer antes de tocar
 
-- ⚠️ **CUATRO consumidores se rompen con el 202**, no dos como dice el plan: `retryfaileds.py:28`,
-  `sync_bims_contacts.py:78`, y en el admin `retry_failed_orders_button` (`:111`) y
-  `retry_selected_orders` (`:152`). Los cuatro chequean `status_code == 200`, que con el 202
-  **nunca vuelve a ser cierto**, y fallarían **en silencio**. Actualizar el plan antes de la Tarea 5.
+- ⚠️ **CUATRO consumidores se rompen con el 202** — ✅ **ya corregido en el plan (Tarea 5)**:
+  `retryfaileds.py:28`, `sync_bims_contacts.py:78`, y en el admin `retry_failed_orders_button`
+  (`:111`) y `retry_selected_orders` (`:152`). Los cuatro chequean `status_code == 200`, que con el
+  202 **nunca vuelve a ser cierto**: no explotan, **dejan de hacer nada sin avisar**.
+  Los dos del admin además le dicen al usuario "procesadas correctamente", así que la pantalla
+  mentiría. El plan ahora corrige también ese mensaje, no solo el código.
 - ⚠️ **`makemigrations` va con `dev_settings`, no con `test_settings`.** `core/bims.py:723` tiene
   `bims = BimsApi()` a nivel de módulo y el `__init__` hace login: con `test_settings` el comando
   intenta conectarse a un host inventado y **crashea sin generar nada**.

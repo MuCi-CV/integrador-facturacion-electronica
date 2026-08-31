@@ -51,7 +51,7 @@ el trabajo real. `FailedOrder` se extiende en su lugar para ser a la vez cola y 
 | `core/services.py` | `process_order`: marcar `NOT_APPLICABLE`/`PAUSED`; sin cambios de negocio | 4, 7 |
 | `core/management/commands/process_queue.py` | **nuevo** — worker + reaper | 6 |
 | `core/alerts.py` | **nuevo** — cliente de Slack con throttling | 8 |
-| `core/admin.py` | colores y filtros de los estados nuevos | 1, 2 |
+| `core/admin.py` | colores y filtros de los estados nuevos; **y los dos reintentos por HTTP** | 1, 2, **5** |
 | `core/management/commands/retryfaileds.py` | reencolar por BD, no por HTTP | 5 |
 | `core/management/commands/sync_bims_contacts.py` | leer el estado `PAUSED`, reencolar por BD | 4, 5 |
 | `process-queue.sh` | **nuevo** — envoltorio con `flock` para el cron | 6 |
@@ -65,14 +65,27 @@ despliegue de este plan puede dejar la tabla fiscal a mitad de camino.
 
 ---
 
-### ⚠️ Hallazgo previo al plan: dos consumidores se rompen con el 202
+### ⚠️ Hallazgo previo al plan: CUATRO consumidores se rompen con el 202
 
-`retryfaileds.py:28` y `sync_bims_contacts.py:78` hacen `POST` a `/sales/` y chequean
-**`response.status_code == 200`**. Con el `202` esa condición **nunca vuelve a ser cierta**, y los
-dos reintentos dejarían de funcionar **en silencio**.
+**Corregido el 2026-08-31: son cuatro, no dos.** Los otros dos aparecieron al leer `admin.py`
+completo, y son los más fáciles de pasar por alto porque están dentro de métodos del admin y no en
+un comando con nombre evidente.
+
+| archivo | qué es | línea del `status_code == 200` |
+|---|---|---|
+| `core/management/commands/retryfaileds.py` | comando de reintentos, lo llama `runretryfaileds.sh` | `:28` |
+| `core/management/commands/sync_bims_contacts.py` | reintento de las pausadas, dentro del sync | `:78` |
+| `core/admin.py` → `retry_failed_orders_button` | **botón del admin** "reintentar fallidas" | `:111` |
+| `core/admin.py` → `retry_selected_orders` | **acción del admin** sobre la selección | `:152` |
+
+Los cuatro hacen `POST` a `/sales/` y chequean **`response.status_code == 200`**. Con el `202` esa
+condición **nunca vuelve a ser cierta**: no explotan, simplemente **dejan de marcar nada** y el
+reintento se vuelve un no-op **silencioso**. Los dos del admin son peores en un aspecto: alguien
+aprieta el botón, no ve error, y asume que reintentó.
 
 Además, con la cola, reencolar por HTTP contra nosotros mismos deja de tener sentido: es escribir
-`PENDING` en una fila. **La Tarea 5 los convierte a escritura directa en BD.** No es opcional.
+`PENDING` en una fila. **La Tarea 5 convierte los cuatro a escritura directa en BD.** No es
+opcional.
 
 ---
 
@@ -561,7 +574,9 @@ git commit -m "feat(cola): las ordenes que no corresponde facturar dejan fila NO
 
 **Files:**
 - Modify: `core/views.py` (`SalesView.post`), `core/states.py`
-- Modify: `core/management/commands/retryfaileds.py`, `core/management/commands/sync_bims_contacts.py`
+- Modify (los CUATRO consumidores del 202): `core/management/commands/retryfaileds.py`,
+  `core/management/commands/sync_bims_contacts.py`, y en `core/admin.py` los métodos
+  `retry_failed_orders_button` y `retry_selected_orders`
 - Test: `core/tests.py`
 
 **Interfaces:**
@@ -652,14 +667,15 @@ class SalesView(APIView):
         return Response(data={"status": "encolada"}, status=status.HTTP_202_ACCEPTED)
 ```
 
-- [ ] **Step 5: Convertir los dos reintentos a escritura directa en BD**
+- [ ] **Step 5: Convertir los CUATRO reintentos a escritura directa en BD**
 
-**Crítico:** los dos chequean `status_code == 200`, que con el `202` nunca vuelve a ser cierto.
+**Crítico y fácil de subestimar:** los cuatro chequean `status_code == 200`, que con el `202` nunca
+vuelve a ser cierto. No fallan con error — **dejan de hacer nada, sin avisar**.
 
-En `retryfaileds.py`, reemplazar todo el bucle HTTP por:
+**5a — `core/management/commands/retryfaileds.py`.** Reemplazar todo el bucle HTTP por:
 
 ```python
-        from core.states import encolar
+        from core.states import enqueue
 
         reencoladas = 0
         for orden in FailedOrder.objects.filter(status=FailedOrder.FAILED):
@@ -668,18 +684,48 @@ En `retryfaileds.py`, reemplazar todo el bucle HTTP por:
         self.stdout.write(self.style.SUCCESS(f"Reencoladas: {reencoladas}"))
 ```
 
-En `sync_bims_contacts.py`, reemplazar el bucle de pausadas por el mismo patrón, filtrando
+**5b — `core/management/commands/sync_bims_contacts.py`.** El mismo patrón, filtrando
 `status=FailedOrder.PAUSED`. Se van los `import requests` que quedan sin uso en ese bloque.
+
+**5c — `core/admin.py`, `retry_failed_orders_button` (`:98-137`).** Todo el cuerpo del `try` se
+reemplaza por el mismo bucle, y el mensaje al usuario tiene que **decir la verdad nueva**: ya no
+"procesadas", sino "encoladas".
+
+```python
+    def retry_failed_orders_button(self, request):
+        """Reencola todas las fallidas. El worker las procesa en ~1 minuto."""
+        from core.states import enqueue
+
+        ordenes = FailedOrder.objects.filter(status=FailedOrder.FAILED)
+        for orden in ordenes:
+            enqueue(orden.external_reference, orden.origin)
+        self.message_user(
+            request,
+            f"{len(ordenes)} orden(es) reencolada(s). Se procesan en el próximo "
+            f"minuto; la pantalla no cambia al instante.",
+            level=messages.SUCCESS,
+        )
+        return HttpResponseRedirect("..")
+```
+
+**5d — `core/admin.py`, `retry_selected_orders` (`:139-176`).** Igual, sobre el `queryset`,
+conservando el filtro por `FAILED` que ya tenía.
+
+⚠️ **El mensaje importa tanto como el código.** Estos dos son botones que aprieta una persona: si
+dicen "procesadas correctamente" cuando en realidad encolaron, la pantalla miente y alguien va a
+concluir que el reintento no sirve. Es la misma clase de falla silenciosa que este sub-proyecto
+viene a eliminar.
 
 - [ ] **Step 6: Correr los tests**
 
 Expected: **193 OK**. Los tests que asumían 200 en `/sales/` hay que actualizarlos al 202 — **son
-del contrato viejo, no regresiones**.
+del contrato viejo, no regresiones**. Si algún test cubría los botones del admin, sus asserts sobre
+el mensaje también cambian.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add core/views.py core/states.py core/tests.py \
+git add core/views.py core/states.py core/tests.py core/admin.py \
         core/management/commands/retryfaileds.py \
         core/management/commands/sync_bims_contacts.py
 git commit -m "feat(cola): el ingreso persiste y devuelve 202
@@ -688,8 +734,10 @@ Woo deshabilita el webhook a las 5 no-2xx seguidas y hoy devolvemos 503 ante
 cualquier excepcion de BIMS. Con 202 el unico no-2xx que queda es el 400 por
 request malformado, que no depende de terceros.
 
-Los dos reintentos pasan a escribir en la BD: chequeaban status_code == 200 y
-con el 202 habrian dejado de funcionar en silencio."
+Los CUATRO reintentos pasan a escribir en la BD: los dos comandos y los dos del
+admin chequeaban status_code == 200, y con el 202 habrian dejado de funcionar en
+silencio. Los del admin ademas avisaban 'procesadas correctamente', asi que la
+pantalla habria mentido."
 ```
 
 ---
