@@ -20,9 +20,30 @@ class FailedOrder(models.Model):
 
     FAILED = 1
     COMPLETED = 2
+    # ⚠️ Los dos de arriba YA EXISTEN en producción con esos valores y hay 8588
+    # filas que dependen de ellos. Los nuevos se agregan arriba; renumerar
+    # reescribiría el estado fiscal de toda la historia.
+    PENDING = 3
+    PROCESSING = 4
+    PAUSED = 5
+    NOT_APPLICABLE = 6
     STATUS_CHOICES = (
         (FAILED, "Fallido"),
         (COMPLETED, "Completado"),
+        (PENDING, "Pendiente"),
+        (PROCESSING, "En proceso"),
+        (PAUSED, "Pausada"),
+        (NOT_APPLICABLE, "No aplica"),
+    )
+
+    ORIGIN_WOO = "woo"
+    # Sin uso en el sub-proyecto A: lo estrena F, la entrada de donaciones desde
+    # Krayin. El esquema lo admite desde ya para no migrar dos veces la tabla de
+    # estado fiscal.
+    ORIGIN_CRM = "crm"
+    ORIGIN_CHOICES = (
+        (ORIGIN_WOO, "WooCommerce"),
+        (ORIGIN_CRM, "CRM Krayin"),
     )
 
     order_id = models.IntegerField(verbose_name="ID de la orden")
@@ -43,6 +64,30 @@ class FailedOrder(models.Model):
     )
     bims_invoice_number = models.CharField(
         verbose_name="Nº de factura", max_length=32, blank=True, null=True
+    )
+    origin = models.CharField(
+        verbose_name="Origen",
+        max_length=8,
+        choices=ORIGIN_CHOICES,
+        default=ORIGIN_WOO,
+        db_index=True,
+    )
+    bims_attempts = models.PositiveSmallIntegerField(
+        verbose_name="Intentos contra BIMS", default=0
+    )
+    bims_next_attempt = models.DateTimeField(
+        verbose_name="Próximo intento", null=True, blank=True, db_index=True
+    )
+    # La rama de anotar en WooCommerce no lleva backoff propio: es una llamada
+    # barata e idempotente y le alcanza con reintentarse en cada pasada. Darle
+    # cronograma a cada rama serían nueve columnas cuando entre el CRM.
+    woo_meta_ok = models.BooleanField(
+        verbose_name="Anotada en WooCommerce", default=False
+    )
+    # Sin esto, una fila que quedó en PROCESSING porque el worker murió a mitad
+    # de camino se queda ahí para siempre. Es el bug clásico de toda cola.
+    claimed_at = models.DateTimeField(
+        verbose_name="Tomada por el worker", null=True, blank=True
     )
     created_at = models.DateTimeField(default=now)
     updated_at = models.DateTimeField(auto_now=True)

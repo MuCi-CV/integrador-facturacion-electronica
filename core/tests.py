@@ -2989,3 +2989,37 @@ class SmokeUrlsTest(TestCase):
         busqueda = self.client.get("/admin/core/failedorder/?q=12000")
         self.assertEqual(busqueda.status_code, 200, busqueda.content[:400])
         self.assertContains(busqueda, "202707")
+
+
+# ── Sub-proyecto A: ingreso, cola y estado por rama ────────────────────────
+
+
+class EstadosDeColaTest(TestCase):
+    """
+    `FailedOrder` pasa a ser cola además de tabla de estado. Los estados nuevos
+    se agregan ARRIBA de los existentes, nunca renumerando: hay 8588 filas en
+    producción que dependen de que FAILED sea 1 y COMPLETED sea 2.
+    """
+
+    def test_los_estados_existentes_conservan_su_valor(self):
+        self.assertEqual(FailedOrder.FAILED, 1)
+        self.assertEqual(FailedOrder.COMPLETED, 2)
+
+    def test_los_estados_nuevos_existen_con_sus_valores(self):
+        self.assertEqual(FailedOrder.PENDING, 3)
+        self.assertEqual(FailedOrder.PROCESSING, 4)
+        self.assertEqual(FailedOrder.PAUSED, 5)
+        self.assertEqual(FailedOrder.NOT_APPLICABLE, 6)
+
+    def test_los_campos_de_cola_tienen_defaults_seguros(self):
+        """
+        Los defaults importan: la migración los aplica a las 8588 filas
+        existentes, así que un default equivocado toca datos fiscales.
+        """
+        fila = FailedOrder.objects.create(order_id=1)
+
+        self.assertEqual(fila.origin, FailedOrder.ORIGIN_WOO)
+        self.assertEqual(fila.bims_attempts, 0)
+        self.assertIsNone(fila.bims_next_attempt)
+        self.assertFalse(fila.woo_meta_ok)
+        self.assertIsNone(fila.claimed_at)

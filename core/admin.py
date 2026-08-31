@@ -27,7 +27,7 @@ class FailedOrderAdmin(admin.ModelAdmin):
     list_display_links = ("order_id", "colored_status")
     search_fields = ("order_id", "bims_sale_id", "bims_invoice_number")
     ordering = ("status", "order_id")
-    list_filter = ("status",)
+    list_filter = ("status", "origin")
     actions = ["retry_selected_orders", "mark_as_failed"]
 
     def changelist_view(self, request, extra_context=None):
@@ -37,7 +37,16 @@ class FailedOrderAdmin(admin.ModelAdmin):
         return super().changelist_view(request, extra_context=extra_context)
 
     def colored_status(self, obj):
-        colors = {1: "red", 2: "green"}
+        # Por constante y no por número: con seis estados, un dict {1: ..., 2: ...}
+        # deja los nuevos en negro y la pantalla deja de informar.
+        colors = {
+            FailedOrder.FAILED: "red",
+            FailedOrder.COMPLETED: "#00B26B",
+            FailedOrder.PENDING: "#F37043",
+            FailedOrder.PROCESSING: "#6950A1",
+            FailedOrder.PAUSED: "#F17DB1",
+            FailedOrder.NOT_APPLICABLE: "gray",
+        }
         return format_html(
             '<span style="color: {};">{}</span>',
             colors.get(obj.status, "black"),
