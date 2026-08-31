@@ -26,7 +26,9 @@ el trabajo real. `FailedOrder` se extiende en su lugar para ser a la vez cola y 
 - **Tests:** `.venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings`.
 - **Sin tráfico real** a BIMS ni a WooCommerce en los tests: `unittest.mock` / `responses`.
 - **Anotaciones de tipo obligatorias** en funciones nuevas. **Black** para el formato.
-- **Nomenclatura:** el código de dominio está en español (`referencia_externa`, `origen`). Mantenerlo.
+- **Nomenclatura (Carlos, 2026-08-31):** **identificadores de código y columnas de BD en inglés**
+  (`external_reference`, `origin`, `woo_meta_ok`); **documentación, comentarios, docstrings y
+  `verbose_name` en español**. Los nombres de test siguen en español, como el resto del archivo.
 - 🔒 **Acceso al servidor:** los `ssh` del asistente van **siempre** como `anthropic_readonly@muci.org`.
   **Todo comando que modifique el servidor se le pasa a Carlos** para que lo corra él con `!`.
 - 🔒 **`git add` por nombre, nunca `git add -A`.** El 2026-08-31 un `git add -A` mandó tres archivos
@@ -43,21 +45,23 @@ el trabajo real. `FailedOrder` se extiende en su lugar para ser a la vez cola y 
 |---|---|---|
 | `core/models.py` | `FailedOrder`: estados, identidad, campos de cola | 1, 2 |
 | `core/migrations/0009_*.py` | estados y campos nuevos (aditivo) | 1 |
-| `core/migrations/0010_*.py` | identidad + `unique` + migración de datos | 2 |
-| `core/estados.py` | **nuevo** — helpers de transición, sin dependencias de red | 4 |
+| `core/migrations/0010_*.py` | `external_reference` + `unique` + backfill (expansión) | 2 |
+| `core/states.py` | **nuevo** — helpers de transición, sin dependencias de red | 4 |
 | `core/views.py` | `SalesView`: validar, persistir, `202` | 5 |
-| `core/services.py` | `process_order`: marcar `NO_APLICA`/`PAUSADA`; sin cambios de negocio | 4, 7 |
-| `core/management/commands/procesar_cola.py` | **nuevo** — worker + reaper | 6 |
-| `core/alertas.py` | **nuevo** — cliente de Slack con throttling | 8 |
+| `core/services.py` | `process_order`: marcar `NOT_APPLICABLE`/`PAUSED`; sin cambios de negocio | 4, 7 |
+| `core/management/commands/process_queue.py` | **nuevo** — worker + reaper | 6 |
+| `core/alerts.py` | **nuevo** — cliente de Slack con throttling | 8 |
 | `core/admin.py` | colores y filtros de los estados nuevos | 1, 2 |
 | `core/management/commands/retryfaileds.py` | reencolar por BD, no por HTTP | 5 |
-| `core/management/commands/sync_bims_contacts.py` | leer `PAUSADA`, reencolar por BD | 4, 5 |
-| `procesar-cola.sh` | **nuevo** — envoltorio con `flock` para el cron | 6 |
+| `core/management/commands/sync_bims_contacts.py` | leer el estado `PAUSED`, reencolar por BD | 4, 5 |
+| `process-queue.sh` | **nuevo** — envoltorio con `flock` para el cron | 6 |
 
 **Decisión de secuencia:** todo el trabajo de **esquema** (Tareas 1-2) va primero y se despliega
-**sin cambiar comportamiento** (Tarea 3). Recién después va el cambio de contrato. Así el despliegue
-más riesgoso —la migración de datos sobre la tabla fiscal— viaja solo, y si algo sale mal se sabe
-exactamente qué lo causó.
+**sin cambiar comportamiento** (Tarea 3). Recién después va el cambio de contrato.
+
+Y el esquema se hace **expandiendo, no renombrando**: `order_id` sobrevive intacto y la columna
+nueva convive con él. Borrarla es una tarea diferida (3-bis) que no bloquea nada. Así ningún
+despliegue de este plan puede dejar la tabla fiscal a mitad de camino.
 
 ---
 
@@ -68,7 +72,7 @@ exactamente qué lo causó.
 dos reintentos dejarían de funcionar **en silencio**.
 
 Además, con la cola, reencolar por HTTP contra nosotros mismos deja de tener sentido: es escribir
-`PENDIENTE` en una fila. **La Tarea 5 los convierte a escritura directa en BD.** No es opcional.
+`PENDING` en una fila. **La Tarea 5 los convierte a escritura directa en BD.** No es opcional.
 
 ---
 
@@ -81,8 +85,8 @@ Además, con la cola, reencolar por HTTP contra nosotros mismos deja de tener se
 - Test: `core/tests.py`
 
 **Interfaces:**
-- Produces: `FailedOrder.PENDIENTE=3`, `EN_PROCESO=4`, `PAUSADA=5`, `NO_APLICA=6`; campos
-  `origen`, `intentos_bims`, `proximo_intento_bims`, `meta_woo_ok`, `tomada_en`.
+- Produces: `FailedOrder.PENDING=3`, `PROCESSING=4`, `PAUSED=5`, `NOT_APPLICABLE=6`; campos
+  `origin`, `bims_attempts`, `bims_next_attempt`, `woo_meta_ok`, `claimed_at`.
 
 - [ ] **Step 1: Escribir el test que falla**
 
@@ -94,24 +98,24 @@ class EstadosDeColaTest(TestCase):
         self.assertEqual(FailedOrder.COMPLETED, 2)
 
     def test_los_estados_nuevos_existen_con_sus_valores(self):
-        self.assertEqual(FailedOrder.PENDIENTE, 3)
-        self.assertEqual(FailedOrder.EN_PROCESO, 4)
-        self.assertEqual(FailedOrder.PAUSADA, 5)
-        self.assertEqual(FailedOrder.NO_APLICA, 6)
+        self.assertEqual(FailedOrder.PENDING, 3)
+        self.assertEqual(FailedOrder.PROCESSING, 4)
+        self.assertEqual(FailedOrder.PAUSED, 5)
+        self.assertEqual(FailedOrder.NOT_APPLICABLE, 6)
 
     def test_los_campos_de_cola_tienen_defaults_seguros(self):
         f = FailedOrder.objects.create(order_id=1)
-        self.assertEqual(f.origen, "woo")
-        self.assertEqual(f.intentos_bims, 0)
-        self.assertIsNone(f.proximo_intento_bims)
-        self.assertFalse(f.meta_woo_ok)
-        self.assertIsNone(f.tomada_en)
+        self.assertEqual(f.origin, "woo")
+        self.assertEqual(f.bims_attempts, 0)
+        self.assertIsNone(f.bims_next_attempt)
+        self.assertFalse(f.woo_meta_ok)
+        self.assertIsNone(f.claimed_at)
 ```
 
 - [ ] **Step 2: Correr y verificar que falla**
 
 Run: `.venv/bin/python manage.py test core.tests.EstadosDeColaTest --settings=muci-integrador.test_settings`
-Expected: FAIL con `AttributeError: type object 'FailedOrder' has no attribute 'PENDIENTE'`
+Expected: FAIL con `AttributeError: type object 'FailedOrder' has no attribute 'PENDING'`
 
 - [ ] **Step 3: Implementar en el modelo**
 
@@ -122,22 +126,22 @@ En `core/models.py`, dentro de `FailedOrder`, reemplazar el bloque de estados:
     COMPLETED = 2
     # Los dos de arriba YA EXISTEN en produccion con esos valores: 8588 filas
     # dependen de ellos. Los nuevos se agregan arriba, nunca renumerando.
-    PENDIENTE = 3
-    EN_PROCESO = 4
-    PAUSADA = 5
-    NO_APLICA = 6
+    PENDING = 3
+    PROCESSING = 4
+    PAUSED = 5
+    NOT_APPLICABLE = 6
     STATUS_CHOICES = (
         (FAILED, "Fallido"),
         (COMPLETED, "Completado"),
-        (PENDIENTE, "Pendiente"),
-        (EN_PROCESO, "En proceso"),
-        (PAUSADA, "Pausada"),
-        (NO_APLICA, "No aplica"),
+        (PENDING, "Pendiente"),
+        (PROCESSING, "En proceso"),
+        (PAUSED, "Pausada"),
+        (NOT_APPLICABLE, "No aplica"),
     )
 
-    ORIGEN_WOO = "woo"
-    ORIGEN_CRM = "crm"  # sin uso en el sub-proyecto A; lo estrena F
-    ORIGEN_CHOICES = ((ORIGEN_WOO, "WooCommerce"), (ORIGEN_CRM, "CRM Krayin"))
+    ORIGIN_WOO = "woo"
+    ORIGIN_CRM = "crm"  # sin uso en el sub-proyecto A; lo estrena F
+    ORIGIN_CHOICES = ((ORIGIN_WOO, "WooCommerce"), (ORIGIN_CRM, "CRM Krayin"))
 ```
 
 Y los campos nuevos, después de `bims_invoice_number`:
@@ -146,32 +150,41 @@ Y los campos nuevos, después de `bims_invoice_number`:
     origen = models.CharField(
         verbose_name="Origen",
         max_length=8,
-        choices=ORIGEN_CHOICES,
-        default=ORIGEN_WOO,
+        choices=ORIGIN_CHOICES,
+        default=ORIGIN_WOO,
         db_index=True,
     )
-    intentos_bims = models.PositiveSmallIntegerField(
+    bims_attempts = models.PositiveSmallIntegerField(
         verbose_name="Intentos contra BIMS", default=0
     )
-    proximo_intento_bims = models.DateTimeField(
+    bims_next_attempt = models.DateTimeField(
         verbose_name="Próximo intento", null=True, blank=True, db_index=True
     )
     # La rama de anotar en WooCommerce no lleva backoff propio: es una llamada
     # barata e idempotente, y le alcanza con reintentarse en cada pasada. Ver
     # §5.2 de la spec.
-    meta_woo_ok = models.BooleanField(verbose_name="Anotada en WooCommerce", default=False)
-    tomada_en = models.DateTimeField(
+    woo_meta_ok = models.BooleanField(verbose_name="Anotada en WooCommerce", default=False)
+    claimed_at = models.DateTimeField(
         verbose_name="Tomada por el worker", null=True, blank=True
     )
 ```
 
 - [ ] **Step 4: Generar la migración y correr los tests**
 
+⚠️ **`makemigrations` va con `dev_settings`, NO con `test_settings`.** `core/bims.py:723` tiene
+`bims = BimsApi()` **a nivel de módulo** y el `__init__` hace login, así que cualquier `manage.py`
+con `test_settings` intenta conectarse a `bims.test.local` y **crashea sin generar nada**.
+Verificado el 2026-08-31. `dev_settings.py` existe justo para esto (está gitignorado, es
+herramienta local).
+
 ```bash
-.venv/bin/python manage.py makemigrations core --settings=muci-integrador.test_settings
+.venv/bin/python manage.py makemigrations core --settings=muci-integrador.dev_settings
 .venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings
 ```
 Expected: migración `0009_*` creada; **183 tests + 3 nuevos = 186, OK**.
+
+Renombrar el archivo generado a `0009_estados_y_campos_de_cola.py`: el nombre automático
+(`0009_failedorder_bims_attempts_and_more.py`) no dice qué hace.
 
 - [ ] **Step 5: Actualizar el admin para que los estados nuevos se vean**
 
@@ -182,14 +195,14 @@ En `core/admin.py`, reemplazar el diccionario de colores hardcodeado:
         colors = {
             FailedOrder.FAILED: "red",
             FailedOrder.COMPLETED: "green",
-            FailedOrder.PENDIENTE: "#F37043",
-            FailedOrder.EN_PROCESO: "#6950A1",
-            FailedOrder.PAUSADA: "#F17DB1",
-            FailedOrder.NO_APLICA: "gray",
+            FailedOrder.PENDING: "#F37043",
+            FailedOrder.PROCESSING: "#6950A1",
+            FailedOrder.PAUSED: "#F17DB1",
+            FailedOrder.NOT_APPLICABLE: "gray",
         }
 ```
 
-Y agregar `origen` al filtro: `list_filter = ("status", "origen")`.
+Y agregar `origin` al filtro: `list_filter = ("status", "origin")`.
 
 - [ ] **Step 6: Commit**
 
@@ -203,152 +216,160 @@ produccion dependen de ellos. Sin cambios de comportamiento todavia."
 
 ---
 
-## Task 2: Identidad generalizada (`referencia_externa` + `unique` compuesto)
+## Task 2: Identidad — expandir (agregar `external_reference`, sin tocar `order_id`)
 
-⚠️ **La tarea más riesgosa del plan: es la única que toca datos de la tabla de estado fiscal.**
+> ⚠️ **Esta tarea reemplaza al `RenameField` del plan original.** Ver §"Por qué expandir y
+> contraer" abajo. El cambio se decidió el 2026-08-31, antes de implementarla.
 
 **Files:**
-- Modify: `core/models.py`, `core/admin.py`, `core/services.py`,
-  `core/management/commands/retryfaileds.py`, `core/management/commands/sync_bims_contacts.py`
-- Create: `core/migrations/0010_identidad_por_origen.py` (a mano, no autogenerada)
-- Test: `core/tests.py` (**23 referencias a `order_id` a actualizar**)
+- Modify: `core/models.py`, `core/services.py`, `core/admin.py`
+- Create: `core/migrations/0010_external_reference.py`
+- Test: `core/tests.py`
 
 **Interfaces:**
-- Consumes: los estados de la Tarea 1.
-- Produces: `FailedOrder.referencia_externa: str`, `unique_together = ("origen", "referencia_externa")`.
+- Produces: `FailedOrder.external_reference: str` (nullable en esta tarea),
+  `unique_together = ("origin", "external_reference")`.
 
-- [ ] **Step 1: Escribir el test que falla**
+### Por qué expandir y contraer, y no renombrar
+
+`RenameField` genera un `ALTER TABLE … CHANGE`, que conserva los datos. El problema no es la
+operación en sí, son dos cosas del contexto:
+
+1. **En MySQL/MariaDB el DDL hace commit implícito.** No se deshace dentro de una transacción, así
+   que la atomicidad que Django le da a una migración **no cubre los cambios de esquema**. Una
+   migración con rename + cambio de tipo + `unique` + dos migraciones de datos que falla en la
+   cuarta operación deja la base a mitad de camino, y no vuelve sola.
+2. **No hay dump a mano para ensayarla** (confirmado con Carlos el 2026-08-31), así que el paso
+   "probar contra una copia de los datos reales" no se puede cumplir.
+
+Expandir y contraer nunca deja un estado intermedio peligroso: **`order_id` sigue intacto todo el
+tiempo**, y el rollback de cada paso es volver el código, sin tocar la base.
+
+- [ ] **Step 1: Escribir los tests que fallan**
 
 ```python
 class IdentidadPorOrigenTest(TestCase):
     def test_la_misma_referencia_en_origenes_distintos_convive(self):
-        FailedOrder.objects.create(referencia_externa="204000", origen=FailedOrder.ORIGEN_WOO)
-        FailedOrder.objects.create(referencia_externa="204000", origen=FailedOrder.ORIGEN_CRM)
+        FailedOrder.objects.create(
+            order_id=204000, external_reference="204000", origin=FailedOrder.ORIGIN_WOO
+        )
+        FailedOrder.objects.create(
+            order_id=204000, external_reference="204000", origin=FailedOrder.ORIGIN_CRM
+        )
         self.assertEqual(FailedOrder.objects.count(), 2)
 
     def test_la_misma_referencia_en_el_mismo_origen_no_se_duplica(self):
-        FailedOrder.objects.create(referencia_externa="204000", origen=FailedOrder.ORIGEN_WOO)
+        FailedOrder.objects.create(
+            order_id=204000, external_reference="204000", origin=FailedOrder.ORIGIN_WOO
+        )
         with self.assertRaises(IntegrityError):
             FailedOrder.objects.create(
-                referencia_externa="204000", origen=FailedOrder.ORIGEN_WOO
+                order_id=204000, external_reference="204000", origin=FailedOrder.ORIGIN_WOO
             )
+
+    def test_escribir_por_services_llena_las_dos_columnas(self):
+        """
+        Durante la expansion las dos conviven: `order_id` es la fuente de verdad
+        heredada y `external_reference` la nueva. Escribir solo una dejaria
+        filas que el codigo viejo o el nuevo no puede encontrar.
+        """
+        from core.states import upsert_state
+
+        fila = upsert_state("204000", status=FailedOrder.PENDING)
+        self.assertEqual(fila.order_id, 204000)
+        self.assertEqual(fila.external_reference, "204000")
 ```
 
-- [ ] **Step 2: Correr y verificar que falla**
+- [ ] **Step 2: Correr y verificar que fallan**
 
 Run: `.venv/bin/python manage.py test core.tests.IdentidadPorOrigenTest --settings=muci-integrador.test_settings`
-Expected: FAIL con `TypeError: FailedOrder() got unexpected keyword arguments: 'referencia_externa'`
+Expected: FAIL con `TypeError: FailedOrder() got unexpected keyword arguments: 'external_reference'`
 
-- [ ] **Step 3: Cambiar el modelo**
-
-En `core/models.py`, reemplazar el campo `order_id`:
+- [ ] **Step 3: Agregar el campo, nullable**
 
 ```python
-    # Texto, no entero: el CRM no usa ids numericos. El `unique` es compuesto
-    # con `origen` porque una referencia solo es unica dentro de su sistema.
-    referencia_externa = models.CharField(
-        verbose_name="Referencia externa", max_length=64, db_index=True
+    # Fase de EXPANSION: convive con `order_id`, que sigue siendo la columna
+    # heredada. Nullable a proposito — las 8588 filas existentes se llenan por
+    # migracion de datos, y hasta que eso corra tiene que poder estar vacia.
+    # La contraccion (borrar `order_id`) es una tarea aparte y posterior.
+    external_reference = models.CharField(
+        verbose_name="Referencia externa",
+        max_length=64,
+        null=True,
+        blank=True,
+        db_index=True,
     )
 ```
 
-Y en `class Meta`, agregar:
+En `class Meta`: `unique_together = ("origin", "external_reference")`.
 
-```python
-        unique_together = ("origen", "referencia_externa")
-```
+⚠️ En MariaDB un `UNIQUE` permite **múltiples NULL**, así que el constraint no molesta mientras las
+filas viejas estén sin llenar.
 
-- [ ] **Step 4: Escribir la migración a mano**
-
-`makemigrations` propondría *borrar* `order_id` y *crear* `referencia_externa`, lo que **perdería
-los 8588 valores**. Hay que usar `RenameField` seguido de `AlterField`:
-
-```python
-from django.db import migrations, models
-import datetime
-
-
-def marcar_meta_woo(apps, schema_editor):
-    """
-    Las COMPLETED anteriores al 2026-08-28 no tienen meta porque la feature no
-    existia: marcarlas en falso dispararia ~8000 reintentos inutiles contra Woo.
-    Las del 28/08 en adelante quedan en False a proposito: de esas no sabemos si
-    la meta llego, son una decena, y el worker las repara en la primera pasada.
-    La orden 204000 es una de ellas.
-    """
-    FailedOrder = apps.get_model("core", "FailedOrder")
-    corte = datetime.datetime(2026, 8, 28, tzinfo=datetime.timezone.utc)
-    FailedOrder.objects.filter(status=2, created_at__lt=corte).update(meta_woo_ok=True)
-
-
-def desmarcar_meta_woo(apps, schema_editor):
-    apps.get_model("core", "FailedOrder").objects.update(meta_woo_ok=False)
-
-
-def pausadas_a_estado(apps, schema_editor):
-    """El canal de estado improvisado pasa a ser un estado real."""
-    FailedOrder = apps.get_model("core", "FailedOrder")
-    FailedOrder.objects.filter(
-        status=1, message__startswith="Pausada: Esperando"
-    ).update(status=5)
-
-
-def pausadas_a_mensaje(apps, schema_editor):
-    apps.get_model("core", "FailedOrder").objects.filter(status=5).update(status=1)
-
-
-class Migration(migrations.Migration):
-    dependencies = [("core", "0009_estados_y_campos_de_cola")]
-    operations = [
-        migrations.RenameField("failedorder", "order_id", "referencia_externa"),
-        migrations.AlterField(
-            "failedorder",
-            "referencia_externa",
-            models.CharField(max_length=64, db_index=True, verbose_name="Referencia externa"),
-        ),
-        migrations.AlterUniqueTogether("failedorder", {("origen", "referencia_externa")}),
-        migrations.RunPython(marcar_meta_woo, desmarcar_meta_woo),
-        migrations.RunPython(pausadas_a_estado, pausadas_a_mensaje),
-    ]
-```
-
-- [ ] **Step 5: Actualizar los cinco consumidores**
-
-| archivo | cambio |
-|---|---|
-| `core/services.py` | todo `order_id=order_id` en `update_or_create` → `referencia_externa=str(order_id), origen=FailedOrder.ORIGEN_WOO` |
-| `core/admin.py:21,27,28,29` | `order_id` → `referencia_externa` en `list_display`, `list_display_links`, `search_fields`, `ordering` |
-| `retryfaileds.py:25,44` | `order.order_id` → `order.referencia_externa` |
-| `sync_bims_contacts.py:63,71,73` | `message__startswith(...)` → `status=FailedOrder.PAUSADA`; `order.order_id` → `order.referencia_externa` |
-| `core/tests.py` | las 23 referencias |
-
-- [ ] **Step 6: Correr toda la suite**
-
-Run: `.venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings`
-Expected: **188 OK**. Si algo falla, es un consumidor sin migrar: arreglarlo, no ajustar el test.
-
-- [ ] **Step 7: Probar la migración contra una copia de los datos reales**
-
-**No** contra producción. Restaurar el último dump en una base local y correr `migrate`, después
-verificar los conteos:
+- [ ] **Step 4: Generar la migración y agregarle el backfill**
 
 ```bash
-.venv/bin/python manage.py migrate core --settings=<settings-de-la-copia>
-# Verificar: total de filas identico; 0 con referencia_externa vacia;
-# COMPLETED anteriores al 28/08 con meta_woo_ok=True; las "Pausada: Esperando" en estado 5.
+.venv/bin/python manage.py makemigrations core --settings=muci-integrador.dev_settings
 ```
 
-- [ ] **Step 8: Commit**
+⚠️ **Con `dev_settings`, no con `test_settings`:** `core/bims.py:723` tiene `bims = BimsApi()` a
+nivel de módulo y el `__init__` hace login, así que `manage.py` con `test_settings` intenta
+conectarse a un host inventado y **crashea**. Verificado el 2026-08-31.
+
+Agregar a mano el backfill a la migración generada:
+
+```python
+def llenar_external_reference(apps, schema_editor):
+    """Copia, no movimiento: `order_id` queda intacto."""
+    FailedOrder = apps.get_model("core", "FailedOrder")
+    for fila in FailedOrder.objects.filter(external_reference__isnull=True).iterator():
+        fila.external_reference = str(fila.order_id)
+        fila.save(update_fields=["external_reference"])
+
+
+def vaciar_external_reference(apps, schema_editor):
+    apps.get_model("core", "FailedOrder").objects.update(external_reference=None)
+```
+
+Y las dos migraciones de datos que ya estaban previstas: `woo_meta_ok = True` para las `COMPLETED`
+anteriores al 2026-08-28, y las `FAILED` con `message` que empieza con `"Pausada: Esperando"` →
+`PAUSED`. Las tres con su función inversa.
+
+- [ ] **Step 5: Escribir en las dos columnas**
+
+En `core/states.py`, un único punto de escritura para que ningún call site pueda llenar una sola:
+
+```python
+def upsert_state(referencia: str, **defaults) -> FailedOrder:
+    """
+    Unico lugar que escribe la identidad, para que sea imposible llenar una
+    columna y no la otra durante la expansion.
+    """
+    fila, _ = FailedOrder.objects.update_or_create(
+        origin=FailedOrder.ORIGIN_WOO,
+        external_reference=str(referencia),
+        defaults=dict(defaults, order_id=int(referencia)),
+    )
+    return fila
+```
+
+Migrar los `update_or_create(order_id=...)` de `services.py` a este helper.
+
+- [ ] **Step 6: Correr la suite**
+
+Expected: **189 OK**.
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add core/models.py core/admin.py core/services.py core/tests.py \
-        core/management/commands/retryfaileds.py \
-        core/management/commands/sync_bims_contacts.py \
-        core/migrations/0010_identidad_por_origen.py
-git commit -m "feat(cola): identidad por (origen, referencia_externa)
+git add core/models.py core/services.py core/admin.py core/states.py core/tests.py \
+        core/migrations/0010_external_reference.py
+git commit -m "feat(cola): external_reference por origen, en fase de expansion
 
-RenameField + AlterField, no drop/create: borrar y recrear perderia los 8588
-valores. Migracion de datos reversible para meta_woo_ok y para las pausadas,
-que dejan de vivir en un prefijo de texto."
+Se agrega la columna nueva y se llena por backfill; order_id queda intacto. No
+se usa RenameField: en MariaDB el DDL hace commit implicito, asi que una
+migracion de varias operaciones que falla a mitad no vuelve sola, y no hay dump
+a mano para ensayarla."
 ```
 
 ---
@@ -357,38 +378,43 @@ que dejan de vivir en un prefijo de texto."
 
 **Files:** ninguno. Es un despliegue.
 
-**Por qué va solo:** es la única migración de datos sobre la tabla fiscal. Viajando sola, si algo
-sale mal se sabe exactamente qué lo causó, y el rollback es una sola migración hacia atrás.
+**Qué se despliega:** las migraciones `0009` (aditiva) y `0010` (columna nueva + backfill). El
+comportamiento no cambia: `/sales/` sigue devolviendo 200 y facturando igual.
+
+**Por qué es mucho menos riesgoso que antes:** ninguna columna se renombra ni se borra, y
+`order_id` sigue siendo la fuente de verdad. Si el backfill sale mal, se vuelve a correr — es
+idempotente porque filtra por `external_reference__isnull=True`.
 
 - [ ] **Step 1: Verificar sobre el stack de rollback (lo corre el asistente)**
 
 ```bash
 ./verificar-en-stack-produccion.sh
 ```
-Expected: `VERDE`, 188 tests.
+Expected: `VERDE`, 189 tests.
 
 - [ ] **Step 2: Verificar sobre el stack REAL (lo corre Carlos)**
 
 ```
 ! PYTHON=/root/venv-integrador-52/bin/python SERVIDOR=root@muci.org REMOTO=wt-verificacion-52 ./verificar-en-stack-produccion.sh
 ```
-Expected: `Python 3.10.12 | Django 5.2.17`, 188 OK.
+Expected: `Python 3.10.12 | Django 5.2.17`, 189 OK.
 
 - [ ] **Step 3: Backup inmediatamente antes (lo corre Carlos)**
 
 ```
-! ssh -i ~/.ssh/muci -o IdentitiesOnly=yes root@muci.org 'cd /var/www/integrador && MYSQL_PWD=<pass> ./backup-bases.sh pre-migracion-0010'
+! ssh -i ~/.ssh/muci -o IdentitiesOnly=yes root@muci.org 'cd /var/www/integrador && MYSQL_PWD=<pass> ./backup-bases.sh pre-expansion'
 ```
-Expected: las 4 bases, con `Dump completed on`. **Sin esto no se sigue.**
+Expected: las 4 bases con `Dump completed on`. **Sin esto no se sigue** — y de paso deja el dump
+que hoy no tenemos para ensayar la contracción más adelante.
 
-- [ ] **Step 4: Ver qué va a hacer la migración, sin aplicarla (lo corre Carlos)**
+- [ ] **Step 4: Ver el plan de migración sin aplicarlo (Carlos)**
 
 ```
 ! ssh -i ~/.ssh/muci -o IdentitiesOnly=yes root@muci.org 'cd /var/www/integrador && /root/venv-integrador-52/bin/python manage.py migrate core --plan'
 ```
 Expected: exactamente `0009` y `0010` sin aplicar, nada más.
 
-- [ ] **Step 5: Conteos ANTES (lo corre Carlos)**
+- [ ] **Step 5: Conteos ANTES (Carlos)**
 
 ```
 ! ssh -i ~/.ssh/muci -o IdentitiesOnly=yes root@muci.org 'cd /var/www/integrador && /root/venv-integrador-52/bin/python manage.py shell -c "
@@ -399,41 +425,50 @@ print(list(FailedOrder.objects.values(\"status\").annotate(n=Count(\"id\")).orde
 print(\"total:\", FailedOrder.objects.count())
 "'
 ```
-Anotar la salida. Esperado hoy: `{1: 201, 2: 8387}`, total 8588 (los números pueden haber
-crecido; lo que importa es comparar antes/después).
+Anotar la salida.
 
-- [ ] **Step 6: Desplegar (lo corre Carlos)**
+- [ ] **Step 6: Desplegar (Carlos)**
 
 ```
 ! ssh -i ~/.ssh/muci -o IdentitiesOnly=yes root@muci.org 'cd /var/www/integrador && git pull --ff-only 2>&1 | tail -3 && git log --oneline -1 && /root/venv-integrador-52/bin/python manage.py migrate core 2>&1 | tail -5 && systemctl restart mucintegrador.service && sleep 5 && systemctl is-active mucintegrador.service'
 ```
-Expected: `Applying core.0009… OK`, `Applying core.0010… OK`, `active`.
 
-- [ ] **Step 7: Conteos DESPUÉS y verificación**
+- [ ] **Step 7: Verificar el backfill (Carlos)**
 
-Repetir el Step 5. **El total tiene que ser idéntico.** Además: 0 filas con
-`referencia_externa` vacía, y las que tenían `"Pausada: Esperando"` ahora en estado 5.
+Total de filas idéntico al Step 5; **0 filas con `external_reference` nulo**; y para una muestra,
+`str(order_id) == external_reference`.
 
 - [ ] **Step 8: Confirmar que el comportamiento NO cambió**
 
-Esperar una venta real. Tiene que facturar exactamente como antes: `POST /sales/` → **200**,
-`FailedOrder` en `COMPLETED` con `bims_sale_id`, y metas en la orden de Woo.
+Esperar una venta real: `POST /sales/` → **200**, `FailedOrder` en `COMPLETED` con `bims_sale_id`,
+metas en la orden de Woo. **Y las dos columnas de identidad llenas.**
 
-**Rollback si algo falla:** `migrate core 0008` (las dos migraciones son reversibles), `git reset`
-al commit anterior, `systemctl restart`. Si la reversión de datos fallara, restaurar del backup del
-Step 3.
+**Rollback:** `git reset` al commit anterior y `systemctl restart`. **Las migraciones se pueden
+dejar aplicadas**: una columna nueva que el código viejo ignora es inofensiva. Eso es justamente la
+ventaja de expandir antes de contraer.
+
+---
+
+## Task 3-bis (DIFERIDA): contraer — borrar `order_id`
+
+**No forma parte de este plan.** Se hace cuando las dos columnas lleven semanas coincidiendo en
+producción y exista un dump con el que ensayar. Es el único paso sin vuelta atrás, y no bloquea
+nada: `order_id` de más no molesta a nadie.
+
+Requisitos para abrirla: dump reciente restaurable, verificación de que ningún consumidor lee
+`order_id`, y una ventana sin despliegues encima.
 
 ---
 
 ## Task 4: Los estados nuevos se usan de verdad (todavía sin async)
 
 **Files:**
-- Create: `core/estados.py`
+- Create: `core/states.py`
 - Modify: `core/services.py` (las tres ramas de retorno temprano)
 - Test: `core/tests.py`
 
 **Interfaces:**
-- Produces: `core.estados.marcar_no_aplica(referencia: str, motivo: str) -> None`
+- Produces: `core.states.mark_not_applicable(referencia: str, motivo: str) -> None`
 
 **Por qué antes del 202:** cierra la ambigüedad de la spec §1.3 **sin** tocar el contrato HTTP, así
 que si algo sale mal se sabe que fue esto y no el async.
@@ -460,8 +495,8 @@ class NoAplicaTest(TestCase):
 
         process_order(order_id=202707)
 
-        f = FailedOrder.objects.get(referencia_externa="202707")
-        self.assertEqual(f.status, FailedOrder.NO_APLICA)
+        f = FailedOrder.objects.get(external_reference="202707")
+        self.assertEqual(f.status, FailedOrder.NOT_APPLICABLE)
         self.assertIn("Monto 0", f.message)
         mock_bims.create_sale.assert_not_called()
 ```
@@ -472,7 +507,7 @@ Expected: FAIL con `FailedOrder.DoesNotExist` — que es exactamente el bug.
 
 - [ ] **Step 3: Crear el helper**
 
-`core/estados.py`:
+`core/states.py`:
 
 ```python
 """
@@ -487,12 +522,12 @@ from typing import Optional
 from core.models import FailedOrder
 
 
-def marcar_no_aplica(referencia: str, motivo: str) -> None:
+def mark_not_applicable(referencia: str, motivo: str) -> None:
     """La transaccion no corresponde facturar. Estado terminal, sin reintento."""
     FailedOrder.objects.update_or_create(
-        referencia_externa=str(referencia),
-        origen=FailedOrder.ORIGEN_WOO,
-        defaults={"status": FailedOrder.NO_APLICA, "message": motivo},
+        external_reference=str(referencia),
+        origin=FailedOrder.ORIGIN_WOO,
+        defaults={"status": FailedOrder.NOT_APPLICABLE, "message": motivo},
     )
 ```
 
@@ -501,7 +536,7 @@ def marcar_no_aplica(referencia: str, motivo: str) -> None:
 Reemplazar cada `return {"status": ...}` temprano por una llamada previa:
 
 ```python
-        marcar_no_aplica(order_id, "Descuento 100%" if discount > 0 else "Monto 0")
+        mark_not_applicable(order_id, "Descuento 100%" if discount > 0 else "Monto 0")
         return {"status": "Descuento 100%" if discount > 0 else "Monto 0"}
 ```
 
@@ -514,8 +549,8 @@ Expected: **189 OK**.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add core/estados.py core/services.py core/tests.py
-git commit -m "feat(cola): las ordenes que no corresponde facturar dejan fila NO_APLICA"
+git add core/states.py core/services.py core/tests.py
+git commit -m "feat(cola): las ordenes que no corresponde facturar dejan fila NOT_APPLICABLE"
 ```
 
 ---
@@ -525,12 +560,12 @@ git commit -m "feat(cola): las ordenes que no corresponde facturar dejan fila NO
 ⚠️ **Cambia el contrato con WooCommerce.** No desplegar sin la Tarea 6: sin worker, nada se procesa.
 
 **Files:**
-- Modify: `core/views.py` (`SalesView.post`), `core/estados.py`
+- Modify: `core/views.py` (`SalesView.post`), `core/states.py`
 - Modify: `core/management/commands/retryfaileds.py`, `core/management/commands/sync_bims_contacts.py`
 - Test: `core/tests.py`
 
 **Interfaces:**
-- Produces: `core.estados.encolar(referencia: str, origen: str = "woo") -> FailedOrder`
+- Produces: `core.states.enqueue(referencia: str, origen: str = "woo") -> FailedOrder`
 
 - [ ] **Step 1: Escribir los tests que fallan**
 
@@ -542,8 +577,8 @@ class IngresoAsincronoTest(TestCase):
         self.assertEqual(r.status_code, 202)
         mock_process.assert_not_called()
         self.assertEqual(
-            FailedOrder.objects.get(referencia_externa="204000").status,
-            FailedOrder.PENDIENTE,
+            FailedOrder.objects.get(external_reference="204000").status,
+            FailedOrder.PENDING,
         )
 
     def test_sin_referencia_sigue_siendo_400(self):
@@ -552,20 +587,20 @@ class IngresoAsincronoTest(TestCase):
     def test_una_reentrega_de_orden_completada_no_la_reencola(self):
         """Ya se facturo: reprocesar es riesgo sin beneficio. Spec §4."""
         FailedOrder.objects.create(
-            referencia_externa="204000", status=FailedOrder.COMPLETED, bims_sale_id="31385"
+            external_reference="204000", status=FailedOrder.COMPLETED, bims_sale_id="31385"
         )
         self.client.post("/sales/", {"arg": 204000}, format="json")
         self.assertEqual(
-            FailedOrder.objects.get(referencia_externa="204000").status,
+            FailedOrder.objects.get(external_reference="204000").status,
             FailedOrder.COMPLETED,
         )
 
     def test_una_reentrega_de_orden_fallida_la_reencola(self):
-        FailedOrder.objects.create(referencia_externa="204000", status=FailedOrder.FAILED)
+        FailedOrder.objects.create(external_reference="204000", status=FailedOrder.FAILED)
         self.client.post("/sales/", {"arg": 204000}, format="json")
         self.assertEqual(
-            FailedOrder.objects.get(referencia_externa="204000").status,
-            FailedOrder.PENDIENTE,
+            FailedOrder.objects.get(external_reference="204000").status,
+            FailedOrder.PENDING,
         )
 ```
 
@@ -573,28 +608,28 @@ class IngresoAsincronoTest(TestCase):
 
 Expected: FAIL — el primero con `202 != 200`.
 
-- [ ] **Step 3: Implementar `encolar`**
+- [ ] **Step 3: Implementar `enqueue`**
 
-En `core/estados.py`:
+En `core/states.py`:
 
 ```python
 # Estados desde los que una re-entrega vuelve a encolar. COMPLETED queda afuera
-# (ya se facturo) y PENDIENTE/EN_PROCESO tambien (ya esta en la cola). Spec §4.
-REENCOLABLES = (FailedOrder.FAILED, FailedOrder.NO_APLICA)
+# (ya se facturo) y PENDING/PROCESSING tambien (ya esta en la cola). Spec §4.
+REQUEUEABLE = (FailedOrder.FAILED, FailedOrder.NOT_APPLICABLE)
 
 
-def encolar(referencia: str, origen: str = FailedOrder.ORIGEN_WOO) -> FailedOrder:
+def enqueue(referencia: str, origen: str = FailedOrder.ORIGIN_WOO) -> FailedOrder:
     fila, creada = FailedOrder.objects.get_or_create(
-        referencia_externa=str(referencia),
-        origen=origen,
-        defaults={"status": FailedOrder.PENDIENTE, "message": "Encolada."},
+        external_reference=str(referencia),
+        origin=origen,
+        defaults={"status": FailedOrder.PENDING, "message": "Encolada."},
     )
-    if not creada and fila.status in REENCOLABLES:
-        fila.status = FailedOrder.PENDIENTE
+    if not creada and fila.status in REQUEUEABLE:
+        fila.status = FailedOrder.PENDING
         fila.message = "Reencolada."
-        fila.intentos_bims = 0
-        fila.proximo_intento_bims = None
-        fila.save(update_fields=["status", "message", "intentos_bims", "proximo_intento_bims"])
+        fila.bims_attempts = 0
+        fila.bims_next_attempt = None
+        fila.save(update_fields=["status", "message", "bims_attempts", "bims_next_attempt"])
     return fila
 ```
 
@@ -610,10 +645,10 @@ class SalesView(APIView):
                 data={"status": "fail", "error": "No se recibió 'order_id'"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        # Persistir y salir. El trabajo lo hace `procesar_cola`.
+        # Persistir y salir. El trabajo lo hace `process_queue`.
         # Devolver 202 SIEMPRE es deliberado: Woo deshabilita el webhook a las 5
         # respuestas no-2xx seguidas, y ya mato asi al webhook `Refund order`.
-        encolar(order_id)
+        enqueue(order_id)
         return Response(data={"status": "encolada"}, status=status.HTTP_202_ACCEPTED)
 ```
 
@@ -624,17 +659,17 @@ class SalesView(APIView):
 En `retryfaileds.py`, reemplazar todo el bucle HTTP por:
 
 ```python
-        from core.estados import encolar
+        from core.states import encolar
 
         reencoladas = 0
         for orden in FailedOrder.objects.filter(status=FailedOrder.FAILED):
-            encolar(orden.referencia_externa, orden.origen)
+            enqueue(orden.external_reference, orden.origin)
             reencoladas += 1
         self.stdout.write(self.style.SUCCESS(f"Reencoladas: {reencoladas}"))
 ```
 
 En `sync_bims_contacts.py`, reemplazar el bucle de pausadas por el mismo patrón, filtrando
-`status=FailedOrder.PAUSADA`. Se van los `import requests` que quedan sin uso en ese bloque.
+`status=FailedOrder.PAUSED`. Se van los `import requests` que quedan sin uso en ese bloque.
 
 - [ ] **Step 6: Correr los tests**
 
@@ -644,7 +679,7 @@ del contrato viejo, no regresiones**.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add core/views.py core/estados.py core/tests.py \
+git add core/views.py core/states.py core/tests.py \
         core/management/commands/retryfaileds.py \
         core/management/commands/sync_bims_contacts.py
 git commit -m "feat(cola): el ingreso persiste y devuelve 202
@@ -662,49 +697,49 @@ con el 202 habrian dejado de funcionar en silencio."
 ## Task 6: El worker y el reaper
 
 **Files:**
-- Create: `core/management/commands/procesar_cola.py`, `procesar-cola.sh`
+- Create: `core/management/commands/process_queue.py`, `process-queue.sh`
 - Test: `core/tests.py`
 
 **Interfaces:**
-- Consumes: `encolar`, los estados, `process_order`.
+- Consumes: `enqueue`, los estados, `process_order`.
 
 - [ ] **Step 1: Escribir los tests que fallan**
 
 ```python
 class WorkerDeColaTest(TestCase):
-    @patch("core.management.commands.procesar_cola.process_order")
+    @patch("core.management.commands.process_queue.process_order")
     def test_procesa_las_pendientes_y_no_las_demas(self, mock_process):
-        FailedOrder.objects.create(referencia_externa="1", status=FailedOrder.PENDIENTE)
-        FailedOrder.objects.create(referencia_externa="2", status=FailedOrder.COMPLETED)
-        call_command("procesar_cola")
+        FailedOrder.objects.create(external_reference="1", status=FailedOrder.PENDING)
+        FailedOrder.objects.create(external_reference="2", status=FailedOrder.COMPLETED)
+        call_command("process_queue")
         mock_process.assert_called_once_with(order_id="1")
 
-    @patch("core.management.commands.procesar_cola.process_order")
+    @patch("core.management.commands.process_queue.process_order")
     def test_no_toca_filas_con_proximo_intento_en_el_futuro(self, mock_process):
         FailedOrder.objects.create(
-            referencia_externa="1",
-            status=FailedOrder.PENDIENTE,
-            proximo_intento_bims=now() + timedelta(minutes=30),
+            external_reference="1",
+            status=FailedOrder.PENDING,
+            bims_next_attempt=now() + timedelta(minutes=30),
         )
-        call_command("procesar_cola")
+        call_command("process_queue")
         mock_process.assert_not_called()
 
-    @patch("core.management.commands.procesar_cola.process_order")
+    @patch("core.management.commands.process_queue.process_order")
     def test_el_reaper_recupera_una_fila_colgada(self, mock_process):
-        """Si un worker muere a mitad, la fila queda EN_PROCESO para siempre."""
+        """Si un worker muere a mitad, la fila queda PROCESSING para siempre."""
         FailedOrder.objects.create(
-            referencia_externa="1",
-            status=FailedOrder.EN_PROCESO,
-            tomada_en=now() - timedelta(minutes=30),
+            external_reference="1",
+            status=FailedOrder.PROCESSING,
+            claimed_at=now() - timedelta(minutes=30),
         )
-        call_command("procesar_cola")
+        call_command("process_queue")
         # Reencolada y procesada en la misma corrida.
         mock_process.assert_called_once_with(order_id="1")
 ```
 
 - [ ] **Step 2: Correr y verificar que fallan**
 
-Expected: FAIL con `CommandError: Unknown command: 'procesar_cola'`
+Expected: FAIL con `CommandError: Unknown command: 'process_queue'`
 
 - [ ] **Step 3: Implementar el comando**
 
@@ -713,7 +748,7 @@ Expected: FAIL con `CommandError: Unknown command: 'procesar_cola'`
 Worker de la cola. Corre por cron cada minuto, envuelto en `flock`.
 
 El reaper corre PRIMERO: si un worker murio a mitad de camino su fila quedo en
-EN_PROCESO para siempre. Es seguro porque **BIMS deduplica por `_id`**, asi que
+PROCESSING para siempre. Es seguro porque **BIMS deduplica por `_id`**, asi que
 reprocesar no emite una segunda factura. Sin esa garantia, un reaper sobre datos
 fiscales seria inaceptable.
 """
@@ -727,7 +762,7 @@ from django.utils.timezone import now
 
 from core.models import FailedOrder
 from core.services import process_order
-from core.woocommerce import wc_api  # lo usa `_reparar_metas` en la Tarea 7
+from core.woocommerce import wc_api  # lo usa `_repair_woo_metas` en la Tarea 7
 
 LOTE = 20
 
@@ -736,7 +771,7 @@ class Command(BaseCommand):
     help = "Procesa la cola de transacciones pendientes."
 
     def handle(self, *args, **options):
-        self._recuperar_colgadas()
+        self._reap_stale()
         for referencia in self._tomar():
             try:
                 process_order(order_id=referencia)
@@ -745,11 +780,11 @@ class Command(BaseCommand):
                 # Tragar aca es deliberado: una orden rota no debe frenar el lote.
                 continue
 
-    def _recuperar_colgadas(self) -> None:
-        limite = now() - timedelta(minutes=settings.COLA_REAPER_MINUTOS)
+    def _reap_stale(self) -> None:
+        limite = now() - timedelta(minutes=settings.QUEUE_REAPER_MINUTES)
         FailedOrder.objects.filter(
-            status=FailedOrder.EN_PROCESO, tomada_en__lt=limite
-        ).update(status=FailedOrder.PENDIENTE, tomada_en=None)
+            status=FailedOrder.PROCESSING, claimed_at__lt=limite
+        ).update(status=FailedOrder.PENDING, claimed_at=None)
 
     def _tomar(self) -> List[str]:
         """
@@ -759,19 +794,19 @@ class Command(BaseCommand):
         with transaction.atomic():
             filas = list(
                 FailedOrder.objects.select_for_update(skip_locked=True)
-                .filter(status=FailedOrder.PENDIENTE)
-                .filter(models.Q(proximo_intento_bims__isnull=True)
-                        | models.Q(proximo_intento_bims__lte=now()))
+                .filter(status=FailedOrder.PENDING)
+                .filter(models.Q(bims_next_attempt__isnull=True)
+                        | models.Q(bims_next_attempt__lte=now()))
                 .order_by("id")[:LOTE]
             )
             ids = [f.id for f in filas]
             FailedOrder.objects.filter(id__in=ids).update(
-                status=FailedOrder.EN_PROCESO, tomada_en=now()
+                status=FailedOrder.PROCESSING, claimed_at=now()
             )
-        return [f.referencia_externa for f in filas]
+        return [f.external_reference for f in filas]
 ```
 
-Agregar a `settings.py`: `COLA_REAPER_MINUTOS = int(config.get("COLA_REAPER_MINUTOS", 10))`.
+Agregar a `settings.py`: `QUEUE_REAPER_MINUTES = int(config.get("QUEUE_REAPER_MINUTES", 10))`.
 
 - [ ] **Step 4: Correr los tests**
 
@@ -779,7 +814,7 @@ Expected: **196 OK**.
 
 - [ ] **Step 5: El envoltorio del cron**
 
-`procesar-cola.sh`:
+`process-queue.sh`:
 
 ```bash
 #!/usr/bin/env bash
@@ -787,17 +822,17 @@ Expected: **196 OK**.
 # Worker de la cola, para el cron. `flock -n` sale sin hacer nada si ya hay una
 # corrida en curso: sin eso, una corrida lenta se solaparia con la siguiente.
 set -euo pipefail
-exec /usr/bin/flock -n /var/lock/procesar-cola.lock \
-    /root/venv-integrador-52/bin/python /var/www/integrador/manage.py procesar_cola
+exec /usr/bin/flock -n /var/lock/process-queue.lock \
+    /root/venv-integrador-52/bin/python /var/www/integrador/manage.py process_queue
 ```
 
 `chmod +x`. La línea de cron (la instala Carlos en el Despliegue 2):
-`* * * * * /var/www/integrador/procesar-cola.sh >> /var/log/procesar-cola.log 2>&1`
+`* * * * * /var/www/integrador/process-queue.sh >> /var/log/process-queue.log 2>&1`
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add core/management/commands/procesar_cola.py procesar-cola.sh core/tests.py muci-integrador/settings.py
+git add core/management/commands/process_queue.py process-queue.sh core/tests.py muci-integrador/settings.py
 git commit -m "feat(cola): worker con SKIP LOCKED y reaper de filas colgadas"
 ```
 
@@ -805,46 +840,46 @@ git commit -m "feat(cola): worker con SKIP LOCKED y reaper de filas colgadas"
 
 ## Task 7: Reintentos por rama
 
-**Files:** Modify `core/management/commands/procesar_cola.py`, `core/services.py`; Test `core/tests.py`
+**Files:** Modify `core/management/commands/process_queue.py`, `core/services.py`; Test `core/tests.py`
 
 - [ ] **Step 1: Escribir los tests que fallan**
 
 ```python
 class ReintentosPorRamaTest(TestCase):
-    @patch("core.management.commands.procesar_cola.process_order", side_effect=ValueError("BIMS caido"))
+    @patch("core.management.commands.process_queue.process_order", side_effect=ValueError("BIMS caido"))
     def test_un_fallo_agenda_el_proximo_intento_con_backoff(self, _p):
-        FailedOrder.objects.create(referencia_externa="1", status=FailedOrder.PENDIENTE)
-        call_command("procesar_cola")
-        f = FailedOrder.objects.get(referencia_externa="1")
-        self.assertEqual(f.intentos_bims, 1)
-        self.assertIsNotNone(f.proximo_intento_bims)
-        self.assertEqual(f.status, FailedOrder.PENDIENTE)
+        FailedOrder.objects.create(external_reference="1", status=FailedOrder.PENDING)
+        call_command("process_queue")
+        f = FailedOrder.objects.get(external_reference="1")
+        self.assertEqual(f.bims_attempts, 1)
+        self.assertIsNotNone(f.bims_next_attempt)
+        self.assertEqual(f.status, FailedOrder.PENDING)
 
-    @patch("core.management.commands.procesar_cola.process_order", side_effect=ValueError("BIMS caido"))
+    @patch("core.management.commands.process_queue.process_order", side_effect=ValueError("BIMS caido"))
     def test_agotados_los_intentos_queda_FAILED(self, _p):
         FailedOrder.objects.create(
-            referencia_externa="1", status=FailedOrder.PENDIENTE, intentos_bims=4
+            external_reference="1", status=FailedOrder.PENDING, bims_attempts=4
         )
-        call_command("procesar_cola")
+        call_command("process_queue")
         self.assertEqual(
-            FailedOrder.objects.get(referencia_externa="1").status, FailedOrder.FAILED
+            FailedOrder.objects.get(external_reference="1").status, FailedOrder.FAILED
         )
 
-    @patch("core.management.commands.procesar_cola.wc_api")
+    @patch("core.management.commands.process_queue.wc_api")
     def test_una_venta_facturada_sin_meta_se_repara_en_la_pasada_siguiente(self, mock_wc):
         """El caso 204000: facturo, la meta no quedo, y hoy se perdia."""
         FailedOrder.objects.create(
-            referencia_externa="204000",
+            external_reference="204000",
             status=FailedOrder.COMPLETED,
             bims_sale_id="31385",
             bims_invoice_number="12040",
-            meta_woo_ok=False,
+            woo_meta_ok=False,
         )
-        call_command("procesar_cola")
+        call_command("process_queue")
         mock_wc.update_order_meta.assert_called_once_with(
             "204000", {"_bims_sale_id": "31385", "_bims_invoice_number": "12040"}
         )
-        self.assertTrue(FailedOrder.objects.get(referencia_externa="204000").meta_woo_ok)
+        self.assertTrue(FailedOrder.objects.get(external_reference="204000").woo_meta_ok)
 ```
 
 - [ ] **Step 2: Correr y verificar que fallan**
@@ -854,53 +889,53 @@ class ReintentosPorRamaTest(TestCase):
 ```python
 # Minutos entre intentos. El primero rapido atrapa el error transitorio; los
 # siguientes esperan a que alguien arregle BIMS. Spec §6.4.
-BACKOFF_MINUTOS = (1, 5, 15, 60)
-MAX_INTENTOS_BIMS = 5
-MAX_INTENTOS_META = 20
+BACKOFF_MINUTES = (1, 5, 15, 60)
+MAX_BIMS_ATTEMPTS = 5
+MAX_META_ATTEMPTS = 20
 ```
 
 En `handle`, envolver `process_order` y agregar la pasada de reparación:
 
 ```python
             except Exception:
-                self._agendar_reintento(referencia)
+                self._schedule_retry(referencia)
                 continue
 
-    def _agendar_reintento(self, referencia: str) -> None:
+    def _schedule_retry(self, referencia: str) -> None:
         f = FailedOrder.objects.get(
-            referencia_externa=referencia, origen=FailedOrder.ORIGEN_WOO
+            external_reference=referencia, origin=FailedOrder.ORIGIN_WOO
         )
-        f.intentos_bims += 1
-        if f.intentos_bims >= MAX_INTENTOS_BIMS:
+        f.bims_attempts += 1
+        if f.bims_attempts >= MAX_BIMS_ATTEMPTS:
             f.status = FailedOrder.FAILED
         else:
-            espera = BACKOFF_MINUTOS[min(f.intentos_bims - 1, len(BACKOFF_MINUTOS) - 1)]
-            f.status = FailedOrder.PENDIENTE
-            f.proximo_intento_bims = now() + timedelta(minutes=espera)
-        f.tomada_en = None
+            espera = BACKOFF_MINUTES[min(f.bims_attempts - 1, len(BACKOFF_MINUTES) - 1)]
+            f.status = FailedOrder.PENDING
+            f.bims_next_attempt = now() + timedelta(minutes=espera)
+        f.claimed_at = None
         f.save()
 
-    def _reparar_metas(self) -> None:
+    def _repair_woo_metas(self) -> None:
         """
         La rama de Woo no lleva backoff propio: es barata e idempotente y le
         alcanza con reintentarse en cada pasada. Spec §5.2.
         """
         pendientes = FailedOrder.objects.filter(
-            status=FailedOrder.COMPLETED, meta_woo_ok=False, bims_sale_id__isnull=False
+            status=FailedOrder.COMPLETED, woo_meta_ok=False, bims_sale_id__isnull=False
         )[:LOTE]
         for f in pendientes:
             meta = {"_bims_sale_id": f.bims_sale_id}
             if f.bims_invoice_number:
                 meta["_bims_invoice_number"] = f.bims_invoice_number
             try:
-                wc_api.update_order_meta(f.referencia_externa, meta)
+                wc_api.update_order_meta(f.external_reference, meta)
             except Exception:
                 continue
-            f.meta_woo_ok = True
-            f.save(update_fields=["meta_woo_ok"])
+            f.woo_meta_ok = True
+            f.save(update_fields=["woo_meta_ok"])
 ```
 
-Llamar a `self._reparar_metas()` al final de `handle`.
+Llamar a `self._repair_woo_metas()` al final de `handle`.
 
 - [ ] **Step 4: Correr los tests**
 
@@ -909,7 +944,7 @@ Expected: **199 OK**.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add core/management/commands/procesar_cola.py core/tests.py
+git add core/management/commands/process_queue.py core/tests.py
 git commit -m "feat(cola): backoff para BIMS y auto-reparacion de la meta en Woo"
 ```
 
@@ -917,7 +952,7 @@ git commit -m "feat(cola): backoff para BIMS y auto-reparacion de la meta en Woo
 
 ## Task 8: Alerta a Slack y corrección del logging
 
-**Files:** Create `core/alertas.py`; Modify `core/management/commands/procesar_cola.py`,
+**Files:** Create `core/alerts.py`; Modify `core/management/commands/process_queue.py`,
 `core/bims.py`, `muci-integrador/settings.py`, `.env.example`; Test `core/tests.py`
 
 ⚠️ **Sin esta tarea, A empeora el sistema**: cambia una falla ruidosa por una invisible (spec §7.3).
@@ -926,32 +961,32 @@ git commit -m "feat(cola): backoff para BIMS y auto-reparacion de la meta en Woo
 
 ```python
 class AlertasTest(TestCase):
-    @patch("core.alertas.requests.post")
+    @patch("core.alerts.requests.post")
     def test_alerta_cuando_la_cola_pasa_el_umbral(self, mock_post):
         for i in range(15):
-            FailedOrder.objects.create(referencia_externa=str(i), status=FailedOrder.PENDIENTE)
-        call_command("procesar_cola")
+            FailedOrder.objects.create(external_reference=str(i), status=FailedOrder.PENDING)
+        call_command("process_queue")
         self.assertTrue(mock_post.called)
         self.assertIn("cola", mock_post.call_args[1]["json"]["text"].lower())
 
-    @patch("core.alertas.requests.post")
+    @patch("core.alerts.requests.post")
     def test_el_throttle_evita_la_repeticion(self, mock_post):
-        from core.alertas import avisar
-        avisar("cola_larga", "hola")
-        avisar("cola_larga", "hola")
+        from core.alerts import avisar
+        notify("cola_larga", "hola")
+        notify("cola_larga", "hola")
         self.assertEqual(mock_post.call_count, 1)
 
-    @patch("core.alertas.requests.post")
+    @patch("core.alerts.requests.post")
     def test_sin_webhook_configurado_no_revienta(self, mock_post):
         with self.settings(SLACK_WEBHOOK_URL=""):
-            from core.alertas import avisar
-            avisar("cola_larga", "hola")
+            from core.alerts import avisar
+            notify("cola_larga", "hola")
         mock_post.assert_not_called()
 ```
 
 - [ ] **Step 2: Correr y verificar que fallan**
 
-- [ ] **Step 3: Implementar `core/alertas.py`**
+- [ ] **Step 3: Implementar `core/alerts.py`**
 
 ```python
 """
@@ -968,15 +1003,15 @@ from django.core.cache import cache
 logger = logging.getLogger(__name__)
 
 TIMEOUT = 5
-THROTTLE_SEGUNDOS = 15 * 60
+THROTTLE_SECONDS = 15 * 60
 
 
-def avisar(clave: str, texto: str) -> None:
+def notify(clave: str, texto: str) -> None:
     url: Optional[str] = getattr(settings, "SLACK_WEBHOOK_URL", "")
     if not url:
         return
     # Una caida de BIMS no debe mandar 200 mensajes.
-    if not cache.add(f"alerta:{clave}", 1, THROTTLE_SEGUNDOS):
+    if not cache.add(f"alerta:{clave}", 1, THROTTLE_SECONDS):
         return
     try:
         requests.post(url, json={"text": texto}, timeout=TIMEOUT)
@@ -985,8 +1020,8 @@ def avisar(clave: str, texto: str) -> None:
 ```
 
 `settings.py`: `SLACK_WEBHOOK_URL = config.get("SLACK_WEBHOOK_URL", "")`,
-`COLA_UMBRAL_ALERTA = int(config.get("COLA_UMBRAL_ALERTA", 10))`,
-`COLA_SILENCIO_MINUTOS = int(config.get("COLA_SILENCIO_MINUTOS", 10))`.
+`QUEUE_ALERT_THRESHOLD = int(config.get("QUEUE_ALERT_THRESHOLD", 10))`,
+`QUEUE_SILENCE_MINUTES = int(config.get("QUEUE_SILENCE_MINUTES", 10))`.
 Y las tres líneas en `.env.example`.
 
 - [ ] **Step 4: Los tres disparadores en el worker**
@@ -1008,7 +1043,7 @@ Expected: **202 OK**.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add core/alertas.py core/management/commands/procesar_cola.py core/bims.py \
+git add core/alerts.py core/management/commands/process_queue.py core/bims.py \
         muci-integrador/settings.py .env.example core/tests.py
 git commit -m "feat(cola): alertas a Slack y fallos de negocio fuera de Sentry"
 ```
@@ -1033,7 +1068,7 @@ Igual que el Step 6 de la Tarea 3, sin `migrate` (no hay migraciones nuevas).
 - [ ] **Step 4: Instalar el cron (Carlos)**
 
 ```
-! ssh -i ~/.ssh/muci -o IdentitiesOnly=yes root@muci.org 'grep -q procesar-cola /etc/crontab || echo "* * * * * root /var/www/integrador/procesar-cola.sh >> /var/log/procesar-cola.log 2>&1" >> /etc/crontab; grep -c procesar-cola /etc/crontab'
+! ssh -i ~/.ssh/muci -o IdentitiesOnly=yes root@muci.org 'grep -q process-queue /etc/crontab || echo "* * * * * root /var/www/integrador/process-queue.sh >> /var/log/process-queue.log 2>&1" >> /etc/crontab; grep -c process-queue /etc/crontab'
 ```
 Expected: **`1`**. El `grep -q ||` lo hace idempotente: correrlo dos veces no duplica la línea.
 
@@ -1050,7 +1085,7 @@ corre cada minuto.
 
 - [ ] **Step 7: Vigilar el resto del día**
 
-Que la cola no crezca, que no haya `EN_PROCESO` colgadas, y que la alerta de tamaño no dispare — o
+Que la cola no crezca, que no haya `PROCESSING` colgadas, y que la alerta de tamaño no dispare — o
 que dispare y **ahí tengamos por fin el dato del pico** (spec §7.1).
 
 **Rollback:** sacar la línea del cron, `git reset` al commit anterior, `systemctl restart`. **Las
@@ -1079,9 +1114,9 @@ campo, así que el rollback del Despliegue 2 vuelve al Despliegue 1, no más atr
 
 **Sin huecos.** Los criterios de éxito §9 se verifican en los pasos 6-7 de la Tarea 9.
 
-**Consistencia de nombres:** `referencia_externa`, `origen`, `meta_woo_ok`, `intentos_bims`,
-`proximo_intento_bims`, `tomada_en`, `encolar()`, `marcar_no_aplica()`, `avisar()`,
-`procesar_cola`. Usados igual en todas las tareas.
+**Consistencia de nombres:** `external_reference`, `origin`, `woo_meta_ok`, `bims_attempts`,
+`bims_next_attempt`, `claimed_at`, `enqueue()`, `mark_not_applicable()`, `notify()`,
+`process_queue`. Usados igual en todas las tareas.
 
 **Conteo de tests esperado:** 183 → 186 (T1) → 188 (T2) → 189 (T4) → 193 (T5) → 196 (T6) → 199 (T7)
 → **202** (T8).
