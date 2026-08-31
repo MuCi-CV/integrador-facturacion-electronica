@@ -8,7 +8,11 @@ Este proyecto sirve como un middleware (intermediario) entre WooCommerce y el si
 - **Ejecutar servidor**: `python manage.py runserver`
 - **Migraciones**: `python manage.py makemigrations core` y `python manage.py migrate`
 - **Tests**: `.venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings` (settings mínimos sin `.env`, SQLite en memoria). Alternativa con pipenv: `python manage.py test core/`.
-- **⚠️ Verificación previa a cualquier despliegue**: `./verificar-en-stack-produccion.sh`. Local corre Python 3.12 + Django 6; **producción corre Python 3.7.17 + Django 3.2.25**, así que un "todo en verde" local **no prueba compatibilidad**. El script manda el commit actual al servidor con `git archive`, corre la suite con el `python3.7` del sistema y borra el temporal siempre. No toca producción: `test_settings` es autónomo y el checkout de `/var/www/integrador` no se roza. Salvedad: el sistema tiene Django 3.2.18, no el 3.2.25 exacto del venv.
+- **⚠️ Verificación previa a cualquier despliegue**: `./verificar-en-stack-produccion.sh`. Manda el commit actual al servidor con `git archive`, corre la suite y borra el temporal siempre. No toca producción: `test_settings` es autónomo y el checkout de `/var/www/integrador` no se roza.
+  - **Producción corre Python 3.10.12 + Django 5.2.17** desde el 2026-08-31 (venv `/root/venv-integrador-52`). Local corre Python 3.12 + Django 5.2.17.
+  - **El modo por defecto del script NO es producción:** usa el `python3.7` del sistema + Django 3.2.18, que hoy es el **stack de rollback**. Prueba que el código puede volver atrás; no valida lo que corre hoy. Corre como `anthropic_readonly`, sin root.
+  - Para validar el stack real: `PYTHON=/root/venv-integrador-52/bin/python SERVIDOR=root@muci.org REMOTO=wt-verificacion-52 ./verificar-en-stack-produccion.sh`. **Necesita root, así que esa corrida la hace Carlos** (ver abajo).
+- **🔒 Acceso al servidor**: los `ssh` del asistente van **siempre** como `anthropic_readonly@muci.org`, nunca como `root`, ni siquiera para leer. Todo comando que modifique el servidor (systemd, nginx, `git pull` en producción, `.env`, reinicios, migraciones) se le pasa a Carlos para que lo corra él.
 
 ## Arquitectura y Estructura del Proyecto
 - `core/`: Contiene el dominio principal y lógica de la aplicación.

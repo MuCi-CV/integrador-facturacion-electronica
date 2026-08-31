@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 #
-# Corre la suite de tests sobre el stack REAL de producción (Python 3.7 + Django 3.2)
-# antes de aprobar un despliegue.
+# Corre la suite de tests sobre un stack del servidor antes de aprobar un despliegue.
+#
+# ⚠️ DESDE EL FLIP DEL 2026-08-31, EL MODO POR DEFECTO **NO** ES PRODUCCIÓN
+#   Producción corre **Python 3.10.12 + Django 5.2.17** (venv /root/venv-integrador-52).
+#   El modo por defecto de este script usa el **Python 3.7 del sistema + Django 3.2.18**,
+#   que hoy es el **stack de ROLLBACK**, no el de producción. Sigue siendo útil —prueba
+#   que el código puede volver atrás— pero **no** valida lo que corre hoy.
+#   Para validar producción de verdad: `PYTHON=`, abajo. Necesita root.
 #
 # POR QUÉ EXISTE
-#   Local corre Python 3.12 + Django 6.0.3; producción corre Python 3.7.17 + Django
-#   3.2.25. Un "todo en verde" local NO prueba compatibilidad con producción. Esa
-#   suposición ya falló una vez (2026-08-25).
+#   Local y producción divergen, y un "todo en verde" local NO prueba compatibilidad
+#   con el servidor. Esa suposición ya falló una vez (2026-08-25).
 #
 # CORRE EN EL SERVIDOR, PERO NO TOCA PRODUCCIÓN
 #   Usa el Python 3.7 del sistema, no el venv, y `muci-integrador/test_settings.py`
@@ -16,21 +21,21 @@
 #   servicio no se entera. El directorio temporal se borra siempre, aunque los
 #   tests fallen.
 #
-# SALVEDAD DEL MODO POR DEFECTO
-#   El Python 3.7 del sistema tiene Django 3.2.18, no el 3.2.25 exacto del venv de
-#   producción (7 releases de parche dentro de la misma minor). Prueba
-#   compatibilidad con 3.7 y con la API de Django 3.2; no prueba el venv exacto.
-#   Para eso está `PYTHON=`, abajo, que sí necesita root.
+# QUÉ PRUEBA CADA MODO
+#   Por defecto (3.7 del sistema + Django 3.2.18): compatibilidad con el stack de
+#   ROLLBACK. Corre como `anthropic_readonly`, sin root.
+#   Con `PYTHON=/root/venv-integrador-52/bin/python`: el stack REAL de producción.
+#   Necesita root, así que esa corrida la hace Carlos.
 #
 # USO
 #   ./verificar-en-stack-produccion.sh            # verifica HEAD
 #   ./verificar-en-stack-produccion.sh <rama>     # verifica otra ref
 #
-#   Sobre el venv EXACTO de producción (Django 3.2.25), con root:
-#     PYTHON=/root/.local/share/virtualenvs/integrador-ObaHlHmv/bin/python \
-#       SERVIDOR=root@muci.org REMOTO=wt-verificacion-venv \
+#   Sobre el venv REAL de producción (Python 3.10 + Django 5.2), con root:
+#     PYTHON=/root/venv-integrador-52/bin/python \
+#       SERVIDOR=root@muci.org REMOTO=wt-verificacion-52 \
 #       ./verificar-en-stack-produccion.sh
-#   Corrido así el 2026-08-27 sobre 11d4780: 152/152 en 3.7.17 + Django 3.2.25.
+#   Corrido así el 2026-08-31 sobre 348fd83: 179/179 en 3.10.12 + Django 5.2.17.
 #
 # OJO CON LA LLAVE
 #   Los `ssh` fuerzan `IdentitiesOnly=yes`. Sin eso, una máquina con varias llaves
@@ -87,9 +92,9 @@ CODIGO=$?
 set -e
 
 if [ "$CODIGO" -eq 0 ]; then
-    echo "==> VERDE sobre el stack de producción ($COMMIT)"
+    echo "==> VERDE sobre $PYTHON en $SERVIDOR ($COMMIT)"
 else
-    echo "==> ROJO sobre el stack de producción ($COMMIT) — código $CODIGO" >&2
+    echo "==> ROJO sobre $PYTHON en $SERVIDOR ($COMMIT) — código $CODIGO" >&2
 fi
 
 exit "$CODIGO"
