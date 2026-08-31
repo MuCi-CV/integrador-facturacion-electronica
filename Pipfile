@@ -4,17 +4,23 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-django = "~=3.2.7"
-djangorestframework = "*"
-django-cors-headers = "*"
+django = "~=5.2.0"
+djangorestframework = ">=3.16"
+django-cors-headers = ">=4.6"
 djangorestframework-camel-case = "*"
-drf-yasg = {extras = ["validation"], version = "*"}
+drf-yasg = {extras = ["validation"], version = "==1.21.15"}
 python-dotenv = "*"
-mysqlclient = "*"
-djangorestframework-simplejwt = "*"
 gunicorn = "*"
 requests = "*"
 woocommerce = "*"
-pymysql = "*"
+# Piso en 1.2 a proposito: `install_as_MySQLdb()` hace que Django compare contra
+# un `version_info` que PyMySQL falsea, y el valor cambio entre versiones.
+# 1.1.x reporta (1,4,6) y pasa el umbral de Django 5.2 (>=1.4.3) pero NO el de
+# Django 6 (>=2.2.1). 1.2.0 reporta (2,2,8) y pasa los dos. Sin este piso, un
+# `pipenv install` podria dejar un venv que arranca en 5.2 y no en 6.
+pymysql = ">=1.2"
 cryptography = "*"
 sentry-sdk = {version = "*", extras = ["django"]}
+
+[requires]
+python_version = "3.10"
