@@ -37,3 +37,13 @@ sentry-error-*.md
 
 # Scratch de subagent-driven-development (ledger, briefs, reportes)
 .superpowers/
+
+# Andamiaje de desarrollo local: un settings/urls minimo para abrir el admin de
+# sucursales sin levantar el settings real (que instancia BimsApi() en el import
+# y haria un login de verdad contra BIMS), mas su base SQLite.
+# Se agregan por un `git add -A` distraido el 2026-08-31, que los mando a main y
+# de ahi a produccion. Ahi son inertes —el unit fija DJANGO_SETTINGS_MODULE=
+# muci-integrador.settings— pero no tienen por que estar en el repo.
+dev_settings.py
+dev_urls.py
+dev-*.sqlite3
