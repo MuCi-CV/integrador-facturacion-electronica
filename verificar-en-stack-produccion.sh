@@ -16,15 +16,26 @@
 #   servicio no se entera. El directorio temporal se borra siempre, aunque los
 #   tests fallen.
 #
-# SALVEDAD
+# SALVEDAD DEL MODO POR DEFECTO
 #   El Python 3.7 del sistema tiene Django 3.2.18, no el 3.2.25 exacto del venv de
 #   producción (7 releases de parche dentro de la misma minor). Prueba
 #   compatibilidad con 3.7 y con la API de Django 3.2; no prueba el venv exacto.
-#   Esa corrida necesita root.
+#   Para eso está `PYTHON=`, abajo, que sí necesita root.
 #
 # USO
 #   ./verificar-en-stack-produccion.sh            # verifica HEAD
 #   ./verificar-en-stack-produccion.sh <rama>     # verifica otra ref
+#
+#   Sobre el venv EXACTO de producción (Django 3.2.25), con root:
+#     PYTHON=/root/.local/share/virtualenvs/integrador-ObaHlHmv/bin/python \
+#       SERVIDOR=root@muci.org REMOTO=wt-verificacion-venv \
+#       ./verificar-en-stack-produccion.sh
+#   Corrido así el 2026-08-27 sobre 11d4780: 152/152 en 3.7.17 + Django 3.2.25.
+#
+# OJO CON LA LLAVE
+#   Los `ssh` fuerzan `IdentitiesOnly=yes`. Sin eso, una máquina con varias llaves
+#   en el agente las ofrece todas y el server corta con "Too many authentication
+#   failures" antes de llegar a la de $LLAVE.
 #
 # Devuelve el código de salida de la suite, así que sirve en un pipeline.
 
@@ -34,6 +45,10 @@ LLAVE="${LLAVE:-$HOME/.ssh/muci}"
 SERVIDOR="${SERVIDOR:-anthropic_readonly@muci.org}"
 REMOTO="${REMOTO:-wt-verificacion}"
 REF="${1:-HEAD}"
+# Intérprete remoto. Por defecto el 3.7 del sistema (Django 3.2.18). Para probar el venv
+# exacto de producción (Django 3.2.25) exportá:
+#   PYTHON=/root/.local/share/virtualenvs/integrador-ObaHlHmv/bin/python SERVIDOR=root@muci.org
+PYTHON="${PYTHON:-/usr/bin/python3.7}"
 
 if [ ! -f "$LLAVE" ]; then
     echo "ERROR: no encuentro la llave ssh en $LLAVE" >&2
@@ -47,27 +62,27 @@ echo "==> Enviando $REF ($COMMIT) a $SERVIDOR:~/$REMOTO"
 # `git archive` manda solo archivos trackeados del commit: nada de .venv,
 # __pycache__, logs ni el .env local.
 git archive --format=tar "$REF" \
-    | ssh -i "$LLAVE" -o ConnectTimeout=20 "$SERVIDOR" \
+    | ssh -i "$LLAVE" -o IdentitiesOnly=yes -o ConnectTimeout=20 "$SERVIDOR" \
         "rm -rf ~/'$REMOTO' && mkdir -p ~/'$REMOTO' && tar -x -C ~/'$REMOTO'"
 
 limpiar() {
     echo "==> Borrando ~/$REMOTO del servidor"
-    ssh -i "$LLAVE" -o ConnectTimeout=20 "$SERVIDOR" "rm -rf ~/'$REMOTO'" || true
+    ssh -i "$LLAVE" -o IdentitiesOnly=yes -o ConnectTimeout=20 "$SERVIDOR" "rm -rf ~/'$REMOTO'" || true
 }
 trap limpiar EXIT
 
 echo "==> Stack y compilación"
-ssh -i "$LLAVE" -o ConnectTimeout=30 "$SERVIDOR" "
+ssh -i "$LLAVE" -o IdentitiesOnly=yes -o ConnectTimeout=30 "$SERVIDOR" "
     cd ~/'$REMOTO'
-    /usr/bin/python3.7 -c 'import sys, django; print(\"Python\", sys.version.split()[0], \"| Django\", django.get_version())'
-    find core muci-integrador -name '*.py' -print0 | xargs -0 /usr/bin/python3.7 -m py_compile
-    echo 'Todos los .py compilan en 3.7'
+    $PYTHON -c 'import sys, django; print(\"Python\", sys.version.split()[0], \"| Django\", django.get_version())'
+    find core muci-integrador -name '*.py' -print0 | xargs -0 $PYTHON -m py_compile
+    echo 'Todos los .py compilan'
 "
 
 echo "==> Suite completa"
 set +e
-ssh -i "$LLAVE" -o ConnectTimeout=120 "$SERVIDOR" \
-    "cd ~/'$REMOTO' && /usr/bin/python3.7 manage.py test core/ --settings=muci-integrador.test_settings"
+ssh -i "$LLAVE" -o IdentitiesOnly=yes -o ConnectTimeout=120 "$SERVIDOR" \
+    "cd ~/'$REMOTO' && $PYTHON manage.py test core/ --settings=muci-integrador.test_settings"
 CODIGO=$?
 set -e
 
