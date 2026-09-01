@@ -20,6 +20,34 @@ aborta limpio dejando la `0010` aplicada. Un chequeo de hace horas no es un inva
 **Backup previo hecho:** `/root/bk/db-pre-expansion.sql.gz`, 226 MB, las 4 bases, dump verificado.
 Es el primer dump que existe, y cierra el requisito que le faltaba a la Tarea 3-bis.
 
+## Despliegue 1 — HECHO el 2026-09-01, `main` @ `7704044`
+
+`0009`, `0010` y `0011` aplicadas. Verificación previa sobre el stack REAL (Python 3.10.12 +
+Django 5.2.17): 193 OK. Verificación posterior sobre los datos:
+
+| chequeo | resultado |
+|---|---|
+| total | 8702, idéntico al de antes |
+| nulos en `external_reference` | **0** |
+| discrepancias `str(order_id)` vs `external_reference` | **0** |
+| `woo_meta_ok=True` | 8433 = exactamente las `COMPLETED` sin `bims_sale_id` |
+
+**68 órdenes** (8501 − 8433) facturadas desde el 28/08 quedaron en `woo_meta_ok=False` a propósito:
+son el conjunto que el reaper de la Tarea 7 va a verificar contra WooCommerce.
+
+**Rollback:** código a **`43fd813`** y `systemctl restart`. Las migraciones se pueden dejar
+aplicadas — una columna nueva que el código viejo ignora es inofensiva.
+
+⚠️ **Hueco de cobertura asumido a conciencia:** la suite corre sobre SQLite en memoria y los ensayos
+con datos también fueron sobre SQLite, así que el `AlterUniqueTogether` se ejecutó por primera vez
+contra MariaDB **en producción**. Se aceptó porque era un `ADD UNIQUE` estándar sobre 8702 filas con
+0 duplicados medidos, el índice pesa 288 bytes (muy bajo el límite de InnoDB), la guarda aborta
+antes de tocar el esquema, y había dump. Salió bien; el hueco queda anotado por si el próximo
+cambio de esquema es más grande.
+
+**Falta:** confirmar con una venta real que `POST /sales/` sigue dando **200** con las dos columnas
+de identidad llenas.
+
 ---
 
 ## Dónde encaja esto
@@ -46,7 +74,7 @@ fundraising va a cargar donaciones desde Krayin y esas nunca pasan por WooCommer
 |---|---|---|---|
 | 1 | Estados y campos de cola (aditivo) | ✅ **hecha** | `51f2798` |
 | 2 | Identidad: expandir con `external_reference` | ✅ **hecha** | |
-| 3 | 🚀 Despliegue 1 — solo esquema | ⬜ **siguiente** | |
+| 3 | 🚀 Despliegue 1 — solo esquema | ✅ **desplegado 2026-09-01** | `7704044` |
 | 3-bis | Contraer: borrar `order_id` | 🔵 **diferida** a propósito | |
 | 4 | `NOT_APPLICABLE` y `PAUSED` en uso | ✅ **hecha** | |
 | 5 | Ingreso 202 + persistencia | ⬜ | |
