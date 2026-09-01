@@ -2,7 +2,7 @@
 # 0010 y detras de una guarda, por dos razones:
 #
 # 1. Hoy `order_id` NO tiene constraint unico y `update_or_create` es
-#    competible, asi que puede haber `order_id` repetidos entre las 8588 filas
+#    competible, asi que puede haber `order_id` repetidos entre las 8702 filas
 #    de produccion. Tras el backfill de la 0010 esos duplicados se vuelven
 #    `(woo, "204000")` repetidos y el constraint FALLA.
 # 2. En MariaDB el DDL hace commit implicito. Si el constraint fallara dentro de

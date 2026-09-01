@@ -20,7 +20,7 @@ class FailedOrder(models.Model):
 
     FAILED = 1
     COMPLETED = 2
-    # ⚠️ Los dos de arriba YA EXISTEN en producción con esos valores y hay 8588
+    # ⚠️ Los dos de arriba YA EXISTEN en producción con esos valores y hay 8702
     # filas que dependen de ellos. Los nuevos se agregan arriba; renumerar
     # reescribiría el estado fiscal de toda la historia.
     PENDING = 3
@@ -48,7 +48,7 @@ class FailedOrder(models.Model):
 
     order_id = models.IntegerField(verbose_name="ID de la orden")
     # Fase de EXPANSIÓN: convive con `order_id`, que sigue siendo la columna
-    # heredada y la fuente de verdad. Nullable a propósito — las 8588 filas
+    # heredada y la fuente de verdad. Nullable a propósito — las 8702 filas
     # existentes se llenan por migración de datos, y hasta que eso corra tiene
     # que poder estar vacía. La CONTRACCIÓN (borrar `order_id`) es una tarea
     # aparte y posterior: no se usa `RenameField` porque en MariaDB el DDL hace

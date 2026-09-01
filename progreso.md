@@ -3,7 +3,22 @@
 **Spec:** `docs/superpowers/specs/2026-08-31-hub-ingreso-cola-estado-design.md`
 **Plan:** `docs/superpowers/plans/2026-08-31-hub-ingreso-cola-estado.md`
 **Rama:** `feature/hub-ingreso-cola`
-**Actualizado:** 2026-08-31
+**Actualizado:** 2026-09-01
+
+## Medición sobre producción del 2026-09-01 — resuelve las dos incógnitas abiertas
+
+| | resultado | consecuencia |
+|---|---|---|
+| `order_id` duplicados | **0** | el `unique_together` **es aplicable**: la `0011` entra en el Despliegue 1, ya no diferida |
+| filas `"Pausada: Esperando"` | **0** | la `0012` es un **no-op confirmado**; el canal estaba muerto desde el 2026-03-17 |
+| por estado | 201 `FAILED`, 8.501 `COMPLETED` | coincide con las 201 en `FAILED` del backlog viejo |
+| total | **8.702** | la cifra de "8588" que repetían los docs estaba vieja; corregida en código y docs |
+
+La guarda de la `0011` se queda igual: si entrara un duplicado entre la medición y la migración,
+aborta limpio dejando la `0010` aplicada. Un chequeo de hace horas no es un invariante.
+
+**Backup previo hecho:** `/root/bk/db-pre-expansion.sql.gz`, 226 MB, las 4 bases, dump verificado.
+Es el primer dump que existe, y cierra el requisito que le faltaba a la Tarea 3-bis.
 
 ---
 
@@ -47,18 +62,20 @@ fundraising va a cargar donaciones desde Krayin y esas nunca pasan por WooCommer
 La spec §5 y el plan tratan `"Pausada: Esperando"` como un canal vivo. **No lo es:** el escritor de
 ese mensaje se eliminó el **2026-03-17** en `96e08b9` (`core/views.py`), junto con el
 `return Response({"status": "paused", ...})` que `sync_bims_contacts.py:83` todavía espera. Desde
-marzo no se crean filas nuevas por ese camino, así que la migración `0012` es limpieza histórica y
-puede ser un no-op según cuántas filas queden.
+marzo no se crean filas nuevas por ese camino. **Medido el 2026-09-01: quedan 0 filas**, así que la
+`0012` es un no-op confirmado.
 
-**Consecuencia a decidir en la Tarea 5:** con el filtro por estado y sin escritor, el bloque de
-auto-reintento de pausadas de `sync_bims_contacts` queda comprobadamente muerto. O se le da un
-escritor nuevo, o se borra — pero dejarlo como está es código que parece hacer algo y no hace nada.
+**Consecuencia a decidir en la Tarea 5:** el bloque de auto-reintento de pausadas de
+`sync_bims_contacts` está comprobadamente muerto — sin escritor desde marzo y con 0 filas que
+atender. Recomendación: **borrarlo**. Además de sacar ~25 líneas que parecen hacer algo y no hacen
+nada, elimina **uno de los cuatro consumidores** que había que arreglar por el 202, y su trabajo lo
+va a hacer el worker de la Tarea 6 de todos modos.
 
 ### Desvíos del plan en la Tarea 2 — decididos el 2026-09-01
 
 1. **El `unique_together` va en una migración aparte (`0011`), detrás de una guarda.** Hoy
    `order_id` **no tiene constraint único** y `update_or_create` es competible, así que puede haber
-   `order_id` repetidos entre las 8588 filas. Tras el backfill esos duplicados rompen el constraint,
+   `order_id` repetidos entre las 8702 filas. Tras el backfill esos duplicados rompen el constraint,
    y en MariaDB el DDL ya hizo commit → la `0010` quedaría a mitad de camino, que es justo lo que
    expandir/contraer venía a evitar. La guarda corre **antes de todo DDL** y aborta con los
    duplicados listados. **Ensayado sobre SQLite con datos:** aborta, deja el esquema consistente en
@@ -103,8 +120,8 @@ escritor nuevo, o se borra — pero dejarlo como está es código que parece hac
 - ⚠️ **`makemigrations` va con `dev_settings`, no con `test_settings`.** `core/bims.py:723` tiene
   `bims = BimsApi()` a nivel de módulo y el `__init__` hace login: con `test_settings` el comando
   intenta conectarse a un host inventado y **crashea sin generar nada**.
-- ⚠️ **`FAILED=1` y `COMPLETED=2` no se renumeran nunca.** Hay 8.588 filas en producción que
-  dependen de esos valores.
+- ⚠️ **`FAILED=1` y `COMPLETED=2` no se renumeran nunca.** Hay **8.702** filas en producción que
+  dependen de esos valores (medido el 2026-09-01: 201 en `FAILED`, 8.501 en `COMPLETED`).
 - ⚠️ **La rama de Woo se repara sola a partir de la Tarea 7.** Hasta entonces, un fallo al anotar la
   meta solo deja un `WARNING`.
 - **`black` no está instalado y el código no está formateado con él.** Correrlo ahora enterraría

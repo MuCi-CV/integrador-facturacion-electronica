@@ -3003,7 +3003,7 @@ class SmokeUrlsTest(TestCase):
 class EstadosDeColaTest(TestCase):
     """
     `FailedOrder` pasa a ser cola además de tabla de estado. Los estados nuevos
-    se agregan ARRIBA de los existentes, nunca renumerando: hay 8588 filas en
+    se agregan ARRIBA de los existentes, nunca renumerando: hay 8702 filas en
     producción que dependen de que FAILED sea 1 y COMPLETED sea 2.
     """
 
@@ -3019,7 +3019,7 @@ class EstadosDeColaTest(TestCase):
 
     def test_los_campos_de_cola_tienen_defaults_seguros(self):
         """
-        Los defaults importan: la migración los aplica a las 8588 filas
+        Los defaults importan: la migración los aplica a las 8702 filas
         existentes, así que un default equivocado toca datos fiscales.
         """
         fila = FailedOrder.objects.create(order_id=1)

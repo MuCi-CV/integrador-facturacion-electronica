@@ -17,8 +17,8 @@ def llenar_external_reference(apps, schema_editor):
     """
     Copia, no movimiento: `order_id` queda intacto.
 
-    Un UPDATE unico y no un bucle con `.save()`: son 8588 filas en produccion y
-    8588 round trips sostenidos contra la base, dentro de una migracion, es
+    Un UPDATE unico y no un bucle con `.save()`: son 8702 filas en produccion y
+    8702 round trips sostenidos contra la base, dentro de una migracion, es
     tiempo de bloqueo que no hace falta pagar.
 
     Idempotente por el filtro `isnull=True`: si el backfill sale mal se vuelve a
