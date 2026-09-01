@@ -33,14 +33,26 @@ fundraising va a cargar donaciones desde Krayin y esas nunca pasan por WooCommer
 | 2 | Identidad: expandir con `external_reference` | ✅ **hecha** | |
 | 3 | 🚀 Despliegue 1 — solo esquema | ⬜ **siguiente** | |
 | 3-bis | Contraer: borrar `order_id` | 🔵 **diferida** a propósito | |
-| 4 | `NOT_APPLICABLE` y `PAUSED` en uso | ⬜ | |
+| 4 | `NOT_APPLICABLE` y `PAUSED` en uso | ✅ **hecha** | |
 | 5 | Ingreso 202 + persistencia | ⬜ | |
 | 6 | Worker + reaper | ⬜ | |
 | 7 | Reintentos por rama | ⬜ | |
 | 8 | Alerta a Slack + corrección del logging | ⬜ | |
 | 9 | 🚀 Despliegue 2 — el cambio de contrato | ⬜ | |
 
-**Tests:** 183 (base) → 186 (Tarea 1) → **193** (Tarea 2) → ~209 esperados al terminar.
+**Tests:** 183 (base) → 186 (T1) → 193 (T2) → **201** (T4) → ~215 esperados al terminar.
+
+### Hallazgo de la Tarea 4: el canal `PAUSADA` ya estaba muerto
+
+La spec §5 y el plan tratan `"Pausada: Esperando"` como un canal vivo. **No lo es:** el escritor de
+ese mensaje se eliminó el **2026-03-17** en `96e08b9` (`core/views.py`), junto con el
+`return Response({"status": "paused", ...})` que `sync_bims_contacts.py:83` todavía espera. Desde
+marzo no se crean filas nuevas por ese camino, así que la migración `0012` es limpieza histórica y
+puede ser un no-op según cuántas filas queden.
+
+**Consecuencia a decidir en la Tarea 5:** con el filtro por estado y sin escritor, el bloque de
+auto-reintento de pausadas de `sync_bims_contacts` queda comprobadamente muerto. O se le da un
+escritor nuevo, o se borra — pero dejarlo como está es código que parece hacer algo y no hace nada.
 
 ### Desvíos del plan en la Tarea 2 — decididos el 2026-09-01
 

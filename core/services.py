@@ -11,7 +11,7 @@ from core import deadline
 from core.bims import bims, BimsBusinessError
 from core.ruc import get_razon_social
 from core.models import ContactCache, FailedOrder
-from core.states import upsert_state
+from core.states import mark_not_applicable, upsert_state
 from core.woocommerce import wc_api, WooCommerceAPI
 from core.constants import (
     DISCOUNT_PRICE_PRODUCT_IDS,
@@ -535,10 +535,13 @@ def _process_order(order_id: int) -> dict:
     if total == 0:
         motivo = "descuento del 100%" if discount > 0 else "monto 0"
         logger.info(f"Order {order_id}: ignorada por {motivo}.")
-        return {"status": "Descuento 100%" if discount > 0 else "Monto 0"}
+        estado = "Descuento 100%" if discount > 0 else "Monto 0"
+        mark_not_applicable(order_id, estado)
+        return {"status": estado}
 
     result = resolve_pos_and_payments(meta_data, total, order.get("payment_method_title", ""))
     if result is None:
+        mark_not_applicable(order_id, "No procesado")
         return {"status": "No procesado"}
     posale_id, sales_payment_methods = result
 
@@ -576,6 +579,7 @@ def _process_order(order_id: int) -> dict:
         # descarte esperado, no un fallo. No se registra FailedOrder ni se reintenta.
         if _all_skips_are_zero_price(skipped_messages):
             logger.info(f"Order {order_id}: ignorada, todos los productos tienen precio 0.")
+            mark_not_applicable(order_id, "Productos en 0")
             return {"status": "Productos en 0"}
 
         contains_sku_issue = any("sin SKU" in msg for msg in skipped_messages)

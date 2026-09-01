@@ -60,7 +60,11 @@ class Command(BaseCommand):
         import requests
         from django.conf import settings
         
-        paused_orders = FailedOrder.objects.filter(status=FailedOrder.FAILED, message__startswith="Pausada: Esperando")
+        # Antes esto filtraba por (FAILED, message startswith "Pausada:
+        # Esperando"): el estado de pausa viajaba en el TEXTO del mensaje, así
+        # que reformular ese texto rompía el comando en silencio. Ahora es un
+        # estado de verdad. La migración 0012 movió las filas históricas.
+        paused_orders = FailedOrder.objects.filter(status=FailedOrder.PAUSED)
         
         if not paused_orders.exists():
             self.stdout.write("No hay órdenes pausadas actualmente.")

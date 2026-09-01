@@ -73,3 +73,22 @@ def upsert_state(referencia: Any, **campos: Any) -> FailedOrder:
     # toca si no está en la lista.
     fila.save(update_fields=["external_reference", "order_id", *campos, "updated_at"])
     return fila
+
+
+def mark_not_applicable(referencia: Any, motivo: str) -> FailedOrder:
+    """
+    La transacción no corresponde facturar. Estado TERMINAL, sin reintento.
+
+    Antes estas órdenes salían por un `return` temprano sin dejar rastro, y esa
+    ausencia era ambigua: una orden sin `_bims_sale_id` podía ser "no
+    correspondía facturar" o "se perdió en el camino". Con el CRM entrando como
+    segundo origen, esa ambigüedad se vuelve una respuesta equivocada a la única
+    pregunta que el CRM va a hacer.
+
+    Pasa por `upsert_state` y no por `update_or_create` a propósito: `order_id`
+    sigue siendo NOT NULL durante la expansión, así que escribir solo
+    `external_reference` da `IntegrityError` al crear la fila.
+    """
+    return upsert_state(
+        referencia, status=FailedOrder.NOT_APPLICABLE, message=motivo
+    )

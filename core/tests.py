@@ -955,7 +955,13 @@ class ProcessOrderZeroPriceItemsTest(TestCase):
 
         mock_bims.create_sale.assert_not_called()
         self.assertEqual(result["status"], "Productos en 0")
-        self.assertEqual(FailedOrder.objects.count(), 0)
+        # Antes esta orden NO dejaba fila, y esa ausencia era ambigua: "no está
+        # la meta" podía significar "no correspondía facturar" o "se perdió".
+        # Ahora deja una fila terminal en NOT_APPLICABLE. Ver spec §1.3.
+        self.assertEqual(FailedOrder.objects.count(), 1)
+        self.assertEqual(
+            FailedOrder.objects.get(order_id=555).status, FailedOrder.NOT_APPLICABLE
+        )
 
     @patch("core.services.resolve_contact_id", return_value=(999, None))
     @patch("core.services.bims")
@@ -3148,3 +3154,218 @@ class IdentidadPorOrigenTest(TestCase):
         fila = FailedOrder.objects.get(external_reference="204000")
         self.assertEqual(fila.order_id, 204000)
         self.assertEqual(fila.status, FailedOrder.COMPLETED)
+
+
+class NoAplicaTest(TestCase):
+    """
+    Las transacciones que no corresponde facturar dejan fila en `NOT_APPLICABLE`.
+
+    Hasta ahora salían por un `return` temprano **sin dejar rastro**, y esa
+    ausencia era ambigua: una orden sin `_bims_sale_id` en WooCommerce podía ser
+    "no correspondía facturar" o "se perdió en el camino". Con el CRM entrando
+    como segundo origen, esa ambigüedad se vuelve una respuesta equivocada a la
+    única pregunta que el CRM va a hacer. Ver spec §1.3.
+    """
+
+    def _order(self, total="0", discount_total="0", line_items=None, fee_lines=None):
+        return {
+            "total": total,
+            "discount_total": discount_total,
+            "meta_data": [],
+            "billing": {},
+            "shipping": {},
+            "line_items": line_items
+            if line_items is not None
+            else [
+                {
+                    "product_id": 162,
+                    "variation_id": 0,
+                    "quantity": 1,
+                    "total": total,
+                    "total_tax": "0",
+                    "name": "Entrada",
+                }
+            ],
+            "fee_lines": fee_lines or [],
+        }
+
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_una_orden_de_monto_cero_deja_fila_en_no_aplica(
+        self, mock_wc, mock_bims, _mock_contact
+    ):
+        mock_wc.get_order.return_value = self._order(total="0")
+        mock_wc.get_product.return_value = {"sku": "500"}
+
+        process_order(order_id=202707)
+
+        fila = FailedOrder.objects.get(external_reference="202707")
+        self.assertEqual(fila.status, FailedOrder.NOT_APPLICABLE)
+        self.assertIn("Monto 0", fila.message)
+        mock_bims.create_sale.assert_not_called()
+
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_un_descuento_del_cien_por_ciento_se_distingue_del_monto_cero(
+        self, mock_wc, mock_bims, _mock_contact
+    ):
+        """
+        El motivo va en el mensaje: una entrada gratis de origen y una con
+        descuento total son dos decisiones comerciales distintas, y quien mire
+        la pantalla necesita poder separarlas.
+        """
+        mock_wc.get_order.return_value = self._order(total="0", discount_total="40000")
+        mock_wc.get_product.return_value = {"sku": "500"}
+
+        process_order(order_id=202708)
+
+        fila = FailedOrder.objects.get(external_reference="202708")
+        self.assertEqual(fila.status, FailedOrder.NOT_APPLICABLE)
+        self.assertIn("Descuento 100%", fila.message)
+
+    @patch("core.services.resolve_pos_and_payments", return_value=None)
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_una_orden_sin_punto_de_venta_resoluble_deja_fila_en_no_aplica(
+        self, mock_wc, mock_bims, _mock_pos
+    ):
+        mock_wc.get_order.return_value = self._order(total="40000")
+        mock_wc.get_product.return_value = {"sku": "500"}
+
+        process_order(order_id=202709)
+
+        fila = FailedOrder.objects.get(external_reference="202709")
+        self.assertEqual(fila.status, FailedOrder.NOT_APPLICABLE)
+        self.assertIn("No procesado", fila.message)
+        mock_bims.create_sale.assert_not_called()
+
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_todos_los_productos_en_cero_deja_fila_en_no_aplica(
+        self, mock_wc, mock_bims, _mock_contact
+    ):
+        mock_wc.get_order.return_value = self._order(
+            total="10000",
+            line_items=[
+                {
+                    "product_id": 1,
+                    "variation_id": 0,
+                    "quantity": 1,
+                    "total": "0",
+                    "total_tax": "0",
+                    "name": "Merch",
+                }
+            ],
+        )
+        mock_wc.get_product.return_value = {"sku": "500"}
+
+        process_order(order_id=202710)
+
+        fila = FailedOrder.objects.get(external_reference="202710")
+        self.assertEqual(fila.status, FailedOrder.NOT_APPLICABLE)
+        self.assertIn("Productos en 0", fila.message)
+        mock_bims.create_sale.assert_not_called()
+
+    def test_no_aplica_llena_las_dos_columnas_de_identidad(self):
+        """
+        `order_id` es NOT NULL durante la expansión: un helper que escriba solo
+        `external_reference` da IntegrityError al crear. Este test lo fija.
+        """
+        from core.states import mark_not_applicable
+
+        mark_not_applicable(202711, "Monto 0")
+
+        fila = FailedOrder.objects.get(external_reference="202711")
+        self.assertEqual(fila.order_id, 202711)
+        self.assertEqual(fila.status, FailedOrder.NOT_APPLICABLE)
+
+    def test_no_aplica_es_terminal_y_saca_la_fila_de_la_cola_de_reintentos(self):
+        """
+        `retryfaileds` y el admin filtran por FAILED. Una orden que antes quedó
+        marcada como fallida y resulta que no correspondía facturar tiene que
+        dejar de reintentarse, no quedar girando para siempre.
+        """
+        from core.states import mark_not_applicable
+
+        FailedOrder.objects.create(
+            order_id=202712,
+            external_reference="202712",
+            status=FailedOrder.FAILED,
+            message="Error al crear la venta en BIMS.",
+        )
+
+        mark_not_applicable(202712, "Monto 0")
+
+        self.assertEqual(FailedOrder.objects.count(), 1)
+        self.assertFalse(
+            FailedOrder.objects.filter(status=FailedOrder.FAILED).exists()
+        )
+
+
+class SyncBimsContactsPausadasTest(TestCase):
+    """
+    El auto-reintento de pausadas pasa a filtrar por ESTADO y no por el texto
+    del mensaje. Antes el estado de pausa viajaba en `message`, así que
+    reformular una cadena rompía el comando sin que nada avisara.
+
+    Nota: el escritor de `"Pausada: Esperando"` se eliminó el 2026-03-17
+    (`96e08b9`), así que hoy no se crean filas nuevas por ese camino. Estos tests
+    fijan la semántica igual, porque `PAUSED` va a tener un escritor nuevo.
+    """
+
+    def _post_ok(self):
+        return MagicMock(
+            status_code=200,
+            json=lambda: {"status": "ok", "message": "Procesado con éxito."},
+        )
+
+    @patch("core.management.commands.sync_bims_contacts.bims")
+    @patch("requests.post")
+    def test_reintenta_las_ordenes_en_estado_pausada(self, mock_post, mock_bims):
+        from django.core.management import call_command
+
+        mock_bims.get_contacts.return_value = {"data": []}
+        mock_post.return_value = self._post_ok()
+        FailedOrder.objects.create(
+            order_id=300,
+            external_reference="300",
+            status=FailedOrder.PAUSED,
+            message="Pausada: Esperando sincronización de BIMS",
+        )
+
+        call_command("sync_bims_contacts")
+
+        self.assertEqual(mock_post.call_count, 1)
+        self.assertEqual(
+            FailedOrder.objects.get(order_id=300).status, FailedOrder.COMPLETED
+        )
+
+    @patch("core.management.commands.sync_bims_contacts.bims")
+    @patch("requests.post")
+    def test_una_fallida_con_el_mensaje_viejo_ya_no_se_reintenta_por_aca(
+        self, mock_post, mock_bims
+    ):
+        """
+        Las filas históricas las movió la migración 0012. Una que siga en FAILED
+        es un fallo de verdad y le corresponde `retryfaileds`, no este camino.
+        """
+        from django.core.management import call_command
+
+        mock_bims.get_contacts.return_value = {"data": []}
+        mock_post.return_value = self._post_ok()
+        FailedOrder.objects.create(
+            order_id=301,
+            external_reference="301",
+            status=FailedOrder.FAILED,
+            message="Pausada: Esperando sincronización de BIMS",
+        )
+
+        call_command("sync_bims_contacts")
+
+        mock_post.assert_not_called()
+        self.assertEqual(
+            FailedOrder.objects.get(order_id=301).status, FailedOrder.FAILED
+        )
