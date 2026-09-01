@@ -3540,3 +3540,169 @@ class ReintentosEscribenEnLaColaTest(TestCase):
             FailedOrder.COMPLETED,
         )
         mock_post.assert_not_called()
+
+
+class WorkerDeColaTest(TestCase):
+    """
+    `process_queue` es lo que convierte el 202 del ingreso en una factura.
+
+    Sin este comando la Tarea 5 es una cola que nadie vacía, y por eso las dos no
+    se pueden desplegar por separado.
+
+    El reaper corre PRIMERO y en la misma pasada: si un worker murió a mitad de
+    camino su fila quedó en `PROCESSING` para siempre. Reprocesar es seguro
+    porque **BIMS deduplica por `_id`**; sin esa garantía, un reaper sobre datos
+    fiscales sería inaceptable.
+    """
+
+    def _pendiente(self, referencia, **campos):
+        from core.states import upsert_state
+
+        return upsert_state(referencia, status=FailedOrder.PENDING, **campos)
+
+    @patch("core.management.commands.process_queue.process_order")
+    def test_procesa_las_pendientes_y_no_las_demas(self, mock_process):
+        from django.core.management import call_command
+
+        from core.states import upsert_state
+
+        self._pendiente(1)
+        upsert_state(2, status=FailedOrder.COMPLETED, bims_sale_id="31385")
+
+        call_command("process_queue")
+
+        mock_process.assert_called_once_with(order_id="1")
+
+    @patch("core.management.commands.process_queue.process_order")
+    def test_no_toca_filas_con_proximo_intento_en_el_futuro(self, mock_process):
+        from datetime import timedelta
+
+        from django.core.management import call_command
+        from django.utils.timezone import now
+
+        self._pendiente(1, bims_next_attempt=now() + timedelta(minutes=30))
+
+        call_command("process_queue")
+
+        mock_process.assert_not_called()
+        # Y la deja PENDING: no es un descarte, es un "todavía no".
+        self.assertEqual(
+            FailedOrder.objects.get(external_reference="1").status,
+            FailedOrder.PENDING,
+        )
+
+    @patch("core.management.commands.process_queue.process_order")
+    def test_procesa_una_fila_cuyo_proximo_intento_ya_paso(self, mock_process):
+        from datetime import timedelta
+
+        from django.core.management import call_command
+        from django.utils.timezone import now
+
+        self._pendiente(1, bims_next_attempt=now() - timedelta(minutes=1))
+
+        call_command("process_queue")
+
+        mock_process.assert_called_once_with(order_id="1")
+
+    @patch("core.management.commands.process_queue.process_order")
+    def test_el_reaper_recupera_una_fila_colgada(self, mock_process):
+        """Si un worker muere a mitad, la fila queda PROCESSING para siempre."""
+        from datetime import timedelta
+
+        from django.core.management import call_command
+        from django.utils.timezone import now
+
+        from core.states import upsert_state
+
+        upsert_state(
+            1,
+            status=FailedOrder.PROCESSING,
+            claimed_at=now() - timedelta(minutes=30),
+        )
+
+        call_command("process_queue")
+
+        # Reencolada y procesada en la misma corrida.
+        mock_process.assert_called_once_with(order_id="1")
+
+    @patch("core.management.commands.process_queue.process_order")
+    def test_el_reaper_no_toca_una_fila_recien_tomada(self, mock_process):
+        """
+        Sin esta guarda el reaper le robaría la fila a un worker que todavía está
+        trabajando, y dos workers llamarían a BIMS por la misma orden a la vez.
+        """
+        from datetime import timedelta
+
+        from django.core.management import call_command
+        from django.utils.timezone import now
+
+        from core.states import upsert_state
+
+        upsert_state(
+            1,
+            status=FailedOrder.PROCESSING,
+            claimed_at=now() - timedelta(seconds=5),
+        )
+
+        call_command("process_queue")
+
+        mock_process.assert_not_called()
+        self.assertEqual(
+            FailedOrder.objects.get(external_reference="1").status,
+            FailedOrder.PROCESSING,
+        )
+
+    @patch("core.management.commands.process_queue.process_order")
+    def test_una_orden_rota_no_frena_el_lote(self, mock_process):
+        """
+        La que sigue se procesa igual. `process_order` ya dejó la fila rota en su
+        estado correcto, así que tragar la excepción acá no pierde información.
+        """
+        from django.core.management import call_command
+
+        mock_process.side_effect = [RuntimeError("BIMS explotó"), None]
+        self._pendiente(1)
+        self._pendiente(2)
+
+        call_command("process_queue")
+
+        self.assertEqual(mock_process.call_count, 2)
+
+    @patch("core.management.commands.process_queue.process_order")
+    def test_toma_una_fila_heredada_sin_external_reference(self, mock_process):
+        """
+        Las filas creadas entre el `migrate` y el `restart` tienen la referencia
+        en NULL. Pasarle ese NULL a `process_order` dejaría la orden sin facturar
+        y sin que nadie se entere.
+        """
+        from django.core.management import call_command
+
+        FailedOrder.objects.create(order_id=703, status=FailedOrder.PENDING)
+
+        call_command("process_queue")
+
+        mock_process.assert_called_once_with(order_id="703")
+
+    @patch("core.management.commands.process_queue.process_order")
+    def test_marca_PROCESSING_lo_que_toma(self, mock_process):
+        """
+        La fila tiene que quedar tomada ANTES de llamar a BIMS. Si el proceso
+        muere en la llamada, el reaper la encuentra; si se marcara después, la
+        fila quedaría PENDING y otro worker la tomaría en paralelo.
+        """
+        from django.core.management import call_command
+
+        vistas = {}
+
+        def espiar(order_id):
+            fila = FailedOrder.objects.get(external_reference=order_id)
+            vistas["status"] = fila.status
+            vistas["claimed_at"] = fila.claimed_at
+
+        mock_process.side_effect = espiar
+        self._pendiente(1)
+
+        call_command("process_queue")
+
+        self.assertEqual(vistas["status"], FailedOrder.PROCESSING)
+        self.assertIsNotNone(vistas["claimed_at"])

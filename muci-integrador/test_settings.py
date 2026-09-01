@@ -78,5 +78,6 @@ RUC_URL = None
 RUC_API_URL = "http://turuc.test.local"
 BASE_URL = "http://localhost"
 POS_LOOKUP_TOKEN = "test-token"
+QUEUE_REAPER_MINUTES = 10
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

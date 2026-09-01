@@ -230,6 +230,11 @@ WOOCOMMERCE_URL = config["WOOCOMMERCE_URL"]
 WOOCOMMERCE_KEY = config["WOOCOMMERCE_KEY"]
 WOOCOMMERCE_SECRET = config["WOOCOMMERCE_SECRET"]
 WOOCOMMERCE_VERIFY_SSL = config.get("WOOCOMMERCE_VERIFY_SSL", "true").lower() not in ("false", "0")
+# Minutos que el reaper de `process_queue` espera antes de dar por muerta una
+# fila en PROCESSING. Tiene que ser holgadamente mayor que lo que tarda una orden
+# en facturarse: si se queda corto, el reaper le roba la fila a un worker vivo.
+QUEUE_REAPER_MINUTES = int(config.get("QUEUE_REAPER_MINUTES", 10))
+
 BIMS_URL = config.get("BIMS_URL")
 BIMS_FALLBACK_URL = config.get("BIMS_FALLBACK_URL")
 BIMS_API_KEY = config.get("BIMS_API_KEY")
