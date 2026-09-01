@@ -1,7 +1,7 @@
 import email
 import json
 import requests
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -3023,3 +3023,128 @@ class EstadosDeColaTest(TestCase):
         self.assertIsNone(fila.bims_next_attempt)
         self.assertFalse(fila.woo_meta_ok)
         self.assertIsNone(fila.claimed_at)
+
+
+class IdentidadPorOrigenTest(TestCase):
+    """
+    Fase de EXPANSIÓN de la identidad: se agrega `external_reference` y
+    `order_id` queda intacto. La unicidad pasa a ser por (origen, referencia),
+    porque el mismo número puede existir en WooCommerce y en el CRM sin ser la
+    misma transacción.
+    """
+
+    def test_la_misma_referencia_en_origenes_distintos_convive(self):
+        FailedOrder.objects.create(
+            order_id=204000, external_reference="204000", origin=FailedOrder.ORIGIN_WOO
+        )
+        FailedOrder.objects.create(
+            order_id=204000, external_reference="204000", origin=FailedOrder.ORIGIN_CRM
+        )
+
+        self.assertEqual(FailedOrder.objects.count(), 2)
+
+    def test_la_misma_referencia_en_el_mismo_origen_no_se_duplica(self):
+        FailedOrder.objects.create(
+            order_id=204000, external_reference="204000", origin=FailedOrder.ORIGIN_WOO
+        )
+
+        # El `atomic` interno es necesario: sin él la IntegrityError deja la
+        # transacción del TestCase inutilizable para cualquier query posterior.
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                FailedOrder.objects.create(
+                    order_id=204000,
+                    external_reference="204000",
+                    origin=FailedOrder.ORIGIN_WOO,
+                )
+
+    def test_escribir_por_el_helper_llena_las_dos_columnas(self):
+        """
+        Durante la expansión las dos conviven: `order_id` es la fuente de verdad
+        heredada y `external_reference` la nueva. Escribir solo una dejaría
+        filas que el código viejo o el nuevo no puede encontrar.
+        """
+        from core.states import upsert_state
+
+        fila = upsert_state("204000", status=FailedOrder.PENDING)
+
+        self.assertEqual(fila.order_id, 204000)
+        self.assertEqual(fila.external_reference, "204000")
+
+    def test_el_helper_actualiza_la_fila_existente_en_vez_de_duplicarla(self):
+        from core.states import upsert_state
+
+        upsert_state("204000", status=FailedOrder.PENDING)
+        fila = upsert_state("204000", status=FailedOrder.COMPLETED, message="listo")
+
+        self.assertEqual(FailedOrder.objects.count(), 1)
+        self.assertEqual(fila.status, FailedOrder.COMPLETED)
+        self.assertEqual(fila.message, "listo")
+
+    def test_el_helper_rescata_la_fila_que_dejo_el_codigo_viejo(self):
+        """
+        En el despliegue, `migrate` corre con el código viejo todavía sirviendo:
+        una venta que entre entre el fin de la migración y el `restart` deja una
+        fila con `external_reference` en NULL. El helper tiene que adoptarla, no
+        crear una segunda fila para la misma orden.
+        """
+        from core.states import upsert_state
+
+        FailedOrder.objects.create(
+            order_id=204000, external_reference=None, status=FailedOrder.FAILED
+        )
+
+        fila = upsert_state("204000", status=FailedOrder.COMPLETED)
+
+        self.assertEqual(FailedOrder.objects.count(), 1)
+        self.assertEqual(fila.external_reference, "204000")
+        self.assertEqual(fila.status, FailedOrder.COMPLETED)
+
+    def test_el_helper_rechaza_una_referencia_no_numerica(self):
+        """
+        Mientras `order_id` siga siendo NOT NULL no se puede persistir una
+        referencia del CRM. Que falle acá y no con un IntegrityError opaco.
+        """
+        from core.states import upsert_state
+
+        with self.assertRaises(ValueError):
+            upsert_state("KRAYIN-77")
+
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_una_orden_facturada_deja_las_dos_columnas_llenas(
+        self, mock_wc, mock_bims, _mock_contact
+    ):
+        """
+        End-to-end sobre `process_order`, no sobre el helper: es el test que
+        detecta un call site de `services.py` que quedó escribiendo solo
+        `order_id`. Sin esto, migrar seis de siete llamadas pasa desapercibido.
+        """
+        mock_wc.get_order.return_value = {
+            "total": "10000",
+            "discount_total": "0",
+            "meta_data": [],
+            "billing": {},
+            "shipping": {},
+            "line_items": [
+                {
+                    "product_id": 162,
+                    "variation_id": 0,
+                    "quantity": 1,
+                    "total": "10000",
+                    "total_tax": "0",
+                    "name": "Tazas Pequeñas SC",
+                }
+            ],
+            "fee_lines": [],
+        }
+        mock_wc.get_product.return_value = {"sku": "500"}
+        mock_wc.update_order_meta.return_value = None
+        mock_bims.create_sale.return_value = (31301, 12000, None)
+
+        process_order(order_id=204000)
+
+        fila = FailedOrder.objects.get(external_reference="204000")
+        self.assertEqual(fila.order_id, 204000)
+        self.assertEqual(fila.status, FailedOrder.COMPLETED)

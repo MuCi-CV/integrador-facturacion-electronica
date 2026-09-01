@@ -30,8 +30,8 @@ fundraising va a cargar donaciones desde Krayin y esas nunca pasan por WooCommer
 | # | tarea | estado | commit |
 |---|---|---|---|
 | 1 | Estados y campos de cola (aditivo) | ✅ **hecha** | `51f2798` |
-| 2 | Identidad: expandir con `external_reference` | ⬜ siguiente | |
-| 3 | 🚀 Despliegue 1 — solo esquema | ⬜ | |
+| 2 | Identidad: expandir con `external_reference` | ✅ **hecha** | |
+| 3 | 🚀 Despliegue 1 — solo esquema | ⬜ **siguiente** | |
 | 3-bis | Contraer: borrar `order_id` | 🔵 **diferida** a propósito | |
 | 4 | `NOT_APPLICABLE` y `PAUSED` en uso | ⬜ | |
 | 5 | Ingreso 202 + persistencia | ⬜ | |
@@ -40,7 +40,28 @@ fundraising va a cargar donaciones desde Krayin y esas nunca pasan por WooCommer
 | 8 | Alerta a Slack + corrección del logging | ⬜ | |
 | 9 | 🚀 Despliegue 2 — el cambio de contrato | ⬜ | |
 
-**Tests:** 183 (base) → **186** (Tarea 1) → 202 esperados al terminar.
+**Tests:** 183 (base) → 186 (Tarea 1) → **193** (Tarea 2) → ~209 esperados al terminar.
+
+### Desvíos del plan en la Tarea 2 — decididos el 2026-09-01
+
+1. **El `unique_together` va en una migración aparte (`0011`), detrás de una guarda.** Hoy
+   `order_id` **no tiene constraint único** y `update_or_create` es competible, así que puede haber
+   `order_id` repetidos entre las 8588 filas. Tras el backfill esos duplicados rompen el constraint,
+   y en MariaDB el DDL ya hizo commit → la `0010` quedaría a mitad de camino, que es justo lo que
+   expandir/contraer venía a evitar. La guarda corre **antes de todo DDL** y aborta con los
+   duplicados listados. **Ensayado sobre SQLite con datos:** aborta, deja el esquema consistente en
+   `0010`, y aplica bien tras deduplicar.
+2. **La migración de datos a `PAUSED` se difiere a la Tarea 4.** `sync_bims_contacts.py:63` filtra
+   por `status=FAILED, message__startswith="Pausada: Esperando"`: flipear los estados sin cambiar
+   ese filtro deja al comando **sin encontrar nada y sin avisar**. Viaja junto al cambio de código.
+3. **`woo_meta_ok` se llena por dato, no por fecha.** El plan cortaba por
+   `created_at < 2026-08-28`; ahora es `status=COMPLETED AND bims_sale_id IS NULL`, porque una fila
+   sin `bims_sale_id` **no se puede anotar** — no tenemos el número que habría que escribirle. No
+   depende de adivinar la hora del despliegue de A′ y el flag no afirma algo falso.
+4. **`upsert_state` rescata la fila que dejó el código viejo.** En el despliegue, `migrate` corre
+   con el código viejo todavía sirviendo: una venta en esa ventana deja `external_reference` en NULL
+   y el código nuevo crearía una **segunda fila para la misma orden**. Se busca por referencia y, si
+   no hay, por `order_id` con referencia nula.
 
 ---
 

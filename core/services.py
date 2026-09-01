@@ -11,6 +11,7 @@ from core import deadline
 from core.bims import bims, BimsBusinessError
 from core.ruc import get_razon_social
 from core.models import ContactCache, FailedOrder
+from core.states import upsert_state
 from core.woocommerce import wc_api, WooCommerceAPI
 from core.constants import (
     DISCOUNT_PRICE_PRODUCT_IDS,
@@ -519,10 +520,7 @@ def _process_order(order_id: int) -> dict:
     try:
         order = wc_api.get_order(order_id)
     except Exception as e:
-        FailedOrder.objects.update_or_create(
-            order_id=order_id,
-            defaults={"message": f"No se pudo obtener la orden. {e}"},
-        )
+        upsert_state(order_id, message=f"No se pudo obtener la orden. {e}")
         raise
 
     meta_data = order.get("meta_data", [])
@@ -555,10 +553,7 @@ def _process_order(order_id: int) -> dict:
             is_pos=is_pos,
         )
     except Exception as e:
-        FailedOrder.objects.update_or_create(
-            order_id=order_id,
-            defaults={"message": f"Error al crear el contacto en BIMS. {e}"},
-        )
+        upsert_state(order_id, message=f"Error al crear el contacto en BIMS. {e}")
         raise
 
     try:
@@ -569,12 +564,10 @@ def _process_order(order_id: int) -> dict:
             discount=discount,
         )
     except Exception as e:
-        FailedOrder.objects.update_or_create(
-            order_id=order_id,
-            defaults={
-                "status": FailedOrder.FAILED,
-                "message": f"Error al leer los productos en WooCommerce. {e}",
-            },
+        upsert_state(
+            order_id,
+            status=FailedOrder.FAILED,
+            message=f"Error al leer los productos en WooCommerce. {e}",
         )
         raise
 
@@ -590,10 +583,7 @@ def _process_order(order_id: int) -> dict:
         final_message = "No se pudo procesar la orden: todos los productos fueron omitidos." + detail
         db_message = "No procesado por falta de sku." if contains_sku_issue else final_message
 
-        FailedOrder.objects.update_or_create(
-            order_id=order_id,
-            defaults={"message": db_message, "status": FailedOrder.FAILED},
-        )
+        upsert_state(order_id, message=db_message, status=FailedOrder.FAILED)
         sentry_sdk.capture_message(
             f"Order {order_id}: no hay productos válidos para procesar.", level="warning"
         )
@@ -609,18 +599,16 @@ def _process_order(order_id: int) -> dict:
             order=order_id,
         )
     except Exception as e:
-        FailedOrder.objects.update_or_create(
-            order_id=order_id,
-            defaults={"status": FailedOrder.FAILED, "message": f"Error al crear la venta en BIMS. {e}"},
+        upsert_state(
+            order_id,
+            status=FailedOrder.FAILED,
+            message=f"Error al crear la venta en BIMS. {e}",
         )
         raise
 
     if not sale_id:
         error_message = f"Rechazado por BIMS: {bims_error}"
-        FailedOrder.objects.update_or_create(
-            order_id=order_id,
-            defaults={"status": FailedOrder.FAILED, "message": error_message},
-        )
+        upsert_state(order_id, status=FailedOrder.FAILED, message=error_message)
         raise ValueError(error_message)
 
     status_message = "Procesado con éxito."
@@ -637,14 +625,12 @@ def _process_order(order_id: int) -> dict:
     logger.info(f"Order {order_id} procesada. BIMS Sale ID: {sale_id}. {status_message}")
     sale_id_txt = str(sale_id)
     invoice_txt = str(invoice_number) if invoice_number is not None else None
-    FailedOrder.objects.update_or_create(
-        order_id=order_id,
-        defaults={
-            "status": FailedOrder.COMPLETED,
-            "message": status_message,
-            "bims_sale_id": sale_id_txt,
-            "bims_invoice_number": invoice_txt,
-        },
+    upsert_state(
+        order_id,
+        status=FailedOrder.COMPLETED,
+        message=status_message,
+        bims_sale_id=sale_id_txt,
+        bims_invoice_number=invoice_txt,
     )
 
     # La factura también se anota en la orden de WooCommerce, que es donde

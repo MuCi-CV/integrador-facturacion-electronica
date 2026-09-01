@@ -47,6 +47,20 @@ class FailedOrder(models.Model):
     )
 
     order_id = models.IntegerField(verbose_name="ID de la orden")
+    # Fase de EXPANSIÓN: convive con `order_id`, que sigue siendo la columna
+    # heredada y la fuente de verdad. Nullable a propósito — las 8588 filas
+    # existentes se llenan por migración de datos, y hasta que eso corra tiene
+    # que poder estar vacía. La CONTRACCIÓN (borrar `order_id`) es una tarea
+    # aparte y posterior: no se usa `RenameField` porque en MariaDB el DDL hace
+    # commit implícito, así que la atomicidad que Django le da a una migración
+    # no cubre el esquema y un fallo a mitad de camino no vuelve solo.
+    external_reference = models.CharField(
+        verbose_name="Referencia externa",
+        max_length=64,
+        null=True,
+        blank=True,
+        db_index=True,
+    )
     status = models.PositiveSmallIntegerField(
         verbose_name="Estado", choices=STATUS_CHOICES, default=FAILED, db_index=True
     )
@@ -95,6 +109,11 @@ class FailedOrder(models.Model):
     class Meta:
         verbose_name = "Orden fallida"
         verbose_name_plural = "Órdenes fallidas"
+        # La unicidad es por (origen, referencia) y no por referencia sola: el
+        # mismo número puede existir en WooCommerce y en el CRM sin ser la misma
+        # transacción. En MariaDB un UNIQUE admite múltiples NULL, así que el
+        # constraint no molesta mientras las filas viejas estén sin llenar.
+        unique_together = ("origin", "external_reference")
 
     def __str__(self):
         return f"Orden {self.order_id}"

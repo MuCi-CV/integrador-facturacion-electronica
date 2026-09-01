@@ -19,13 +19,21 @@ from django.db import connection
 class FailedOrderAdmin(admin.ModelAdmin):
     list_display = (
         "order_id",
+        # Durante la expansión se muestran las dos: si alguna vez difieren, la
+        # pantalla lo delata sin necesidad de entrar a la base.
+        "external_reference",
         "colored_status",
         "bims_invoice_number",
         "bims_sale_id",
         "message",
     )
     list_display_links = ("order_id", "colored_status")
-    search_fields = ("order_id", "bims_sale_id", "bims_invoice_number")
+    search_fields = (
+        "order_id",
+        "external_reference",
+        "bims_sale_id",
+        "bims_invoice_number",
+    )
     ordering = ("status", "order_id")
     list_filter = ("status", "origin")
     actions = ["retry_selected_orders", "mark_as_failed"]
