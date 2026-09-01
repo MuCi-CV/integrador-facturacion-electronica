@@ -1,149 +1,118 @@
-# Handoff sesión del 2026-08-31
+# Handoff — sesión del 2026-09-01
 
-> **Producción migró a Python 3.10 + Django 5.2 LTS.** Aparecieron dos regresiones: una se cerró
-> con una línea en nginx y la otra sigue abierta pero ya es visible. Además quedó diseñado y
-> planificado el sub-proyecto A, con la Tarea 1 implementada.
->
-> Tres correcciones a cosas que dábamos por ciertas, y **dos errores míos del lado del servidor**
-> que conviene leer antes de repetirlos.
-
-## Estado al cierre
-
-| | |
-|---|---|
-| **Producción** | `main` @ **`43fd813`** — **Python 3.10.12 + Django 5.2.17** |
-| Servicio | último arranque **13:57:39 UTC** |
-| Tests | **186** en la rama de trabajo; 183 en `main` |
-| Rama activa | `feature/hub-ingreso-cola` @ `0e4b3b4`, **sin pushear** |
-| Rollback | `mucintegrador.service.pre-django52` + venv viejo intacto |
+**Rama:** `feature/hub-ingreso-cola` @ `55146bc` — **3 commits sin pushear, nada desplegado.**
+**Tests:** 217 OK en local (3.12 + Django 5.2.17) y **VERDE también sobre el stack de rollback**
+(3.7 + Django 3.2), verificado con `./verificar-en-stack-produccion.sh`.
 
 ---
 
-## 1. El flip a Django 5.2 — HECHO y validado
+## 1. La notebook se colgó tres veces, y la causa era nuestra
 
-Producción pasó de **Python 3.7.17 + Django 3.2.25** a **3.10.12 + 5.2.17** a las 13:08:36 UTC.
-Cierra más de dos años sin parches de seguridad del framework.
+Antes de programar nada hubo que resolver esto, porque impedía trabajar.
 
-| verificación | resultado |
-|---|---|
-| Suite en el stack viejo | 179/179 → el rollback es seguro |
-| Suite en el venv nuevo, contra el commit final | 179/179 |
-| `corsheaders` / `drf-yasg` / `pymysql` | 4.9.0 / 1.21.15 / **1.2.0** |
-| `migrate` | **`No migrations to apply.`** → rollback completo |
-| Venta real | orden **204000 → BIMS 31385, factura 12040**, certificada ante la SET |
+**Causa raíz:** `IngresoAsincronoTest` mockeaba `process_order` **sin `return_value`**. La vista
+síncrona entregaba ese `MagicMock` a `Response(data=...)` y el encoder de DRF entraba en recursión
+infinita: pregunta `hasattr(obj, "tolist")`, que un `MagicMock` siempre inventa, y cada vuelta
+retiene un mock nuevo. **~22 GiB de RSS en unos 4 minutos.**
 
-**El chequeo funcional del plan dio 404 con el deploy sano.** `curl http://localhost/swagger.json`
-cae en un server block de nginx que no es el del integrador —el host real es
-`integrador.muci.org`— así que las requests **nunca llegaron a gunicorn**, y el access log de
-journald lo prueba. Por el socket daban 200 y 302 desde el principio.
+Repro mínima, sin base de datos ni red: `JSONRenderer().render(MagicMock())`.
 
-**Lección, ya escrita en el plan:** un chequeo de verificación que nunca se corrió contra el estado
-ANTERIOR no distingue una regresión de un chequeo mal escrito. Ante un rojo, probar el componente
-**sin la capa de infraestructura de por medio** antes de disparar el rollback.
+Lo engañoso es que **el síntoma no se parece a la causa**: el traceback muere en
+`unittest/result.py:205` (`''.join(msgLines)`), o sea al *formatear* el error, no en el render.
 
-## 2. Regresión 1: CSRF 403 en el admin — CERRADA
+**No era headroom ni Chrome.** El proxy de headroom siguió logueando normal después de los dos OOM
+kills; su RSS está estable en 1,67 GiB.
 
-El admin devolvía *"Origin checking failed"*. **La causa raíz no estaba en Django: estaba en nginx,
-y llevaba años mal.**
+Los tres cuelgues: 11:30 (el kernel **no llegó a loguear nada** — congelamiento total), 11:36:27 y
+11:37:50 (esos dos sí dejaron `Out of memory: Killed process (python)` con ~22 GiB de anon-rss).
 
-El server block de `integrador.muci.org` no mandaba **`X-Forwarded-Proto`**. Sin ese header,
-`SECURE_PROXY_SSL_HEADER` nunca dispara, `request.is_secure()` da **False**, y Django compara el
-`Origin: https://…` del browser contra un `good_origin` armado con `http://`.
+**Arreglado** en `76b8c82`. Después, al implementar la Tarea 5, la vista dejó de importar
+`process_order` y la clase pasó a no mockear nada: la garantía es estructural y el riesgo
+desapareció del todo.
 
-**Por qué apareció recién ahora, verificado en el fuente y no asumido:** `_origin_verified` aparece
-**0 veces** en el `csrf.py` de Django 3.2 y **2 veces** en el de 5.2. La verificación del header
-`Origin` **se agregó en Django 4.0**. Nginx estuvo mal todo este tiempo y 3.2 no miraba.
+**Mitigación de máquina:** se instaló `systemd-oomd` (255.4-1ubuntu8.17) y se agregó un drop-in
+propio para el corte por swap. Quedaron activas las dos redes:
 
-Arreglo: una línea (`proxy_set_header X-Forwarded-Proto $scheme;`). Backup en
-`integrador.muci.org.pre-xfp` — ⚠️ **ese backup ya tiene el header**, no es el original.
-Verificado sin ssh: `curl https://integrador.muci.org/swagger.json` reporta `"schemes": ["https"]`.
+| cgroup | política | dispara cuando |
+|---|---|---|
+| `-.slice` | `ManagedOOMSwap=kill` (drop-in propio en `/etc/systemd/system/-.slice.d/`) | swap > 90% |
+| `user@1000.service` | `ManagedOOMMemoryPressure=kill` (50%) | presión PSI ≥50% por 20 s |
 
-## 3. Regresión 2: las metas de BIMS no llegaron a Woo — INSTRUMENTADA, causa abierta
+⚠️ **Dos advertencias.** oomd **mata el cgroup entero**, o sea la pestaña de terminal completa con
+el `claude` que corra adentro. Y está verificada la **configuración**, no el comportamiento: no se
+probó en vivo, porque la única prueba honesta es desbocar un proceso de verdad.
 
-La orden 204000 facturó y **no** quedó con `_bims_sale_id` en WooCommerce. El corte parecía
-limpio: cinco órdenes con metas antes del flip, la primera sin metas después.
+Para trabajo pesado sigue siendo más preciso el techo explícito, que mata solo el comando y deja el
+traceback:
 
-**Afirmé que el flip lo había roto y estaba equivocado.** Se probó el camino completo sobre el venv
-nuevo: sin redirect, el PUT sigue siendo PUT, 200, y las metas **quedan persistidas**. La orden se
-reparó de paso. La hipótesis del redirect (un 302 convierte cualquier método en GET, verificado en
-`SessionRedirectMixin.rebuild_method`) quedó **refutada**: el redirect de nginx para `muci.org` es
-un **301**, que un PUT sobrevive.
-
-**Sospecha principal: carrera de escritura perdida.** El PUT salió 24 s después de creada la orden,
-con el plugin de Krayin escribiendo a los 9 s. Si otro proceso cargó la orden antes y la guardó
-después, nos pisa la meta y Woo igual responde 200.
-
-**Lección:** con `n=1` del lado nuevo, un corte temporal limpio **no** distingue una regresión de
-una coincidencia.
-
-**Lo que sí se hizo:** `update_order_meta` ahora verifica que las claves vuelvan en la respuesta del
-PUT con el valor que mandamos, y lanza `ServerException` si no — que `services.py` ya captura y
-loguea como `WARNING` sin romper la orden. **Cuatro tests, los cuatro vistos fallar antes.** Se
-corrigió además un mock que devolvía `{"id": ...}` sin `meta_data`, cosa que Woo no hace nunca:
-**ese mock irreal era la razón por la que el agujero podía existir con la suite en verde.**
-
-⚠️ Esto **no arregla** la pérdida, la hace visible. La Tarea 7 del plan de A la vuelve
-auto-reparable.
-
-## 4. Sub-proyecto A — spec, plan y Tarea 1
-
-Objetivo de Carlos: que el CRM sepa si una donación se facturó de verdad, porque **fundraising va a
-cargar donaciones desde Krayin** y esas nunca pasan por WooCommerce.
-
-**Corrección importante de la sesión:** afirmé que "el CRM como origen no está contemplado en
-ninguna parte". **Falso.** El documento publicado el 26/08 ya tiene el diagrama de **dos orígenes**
-con Krayin entrando al integrador, rotulado "entrada nueva". El `.md` de arquitectura en disco es de
-**julio** y quedó superado. La memoria de Carlos era mejor que la mía.
-
-- **Spec:** `docs/superpowers/specs/2026-08-31-hub-ingreso-cola-estado-design.md`
-- **Plan:** `docs/superpowers/plans/2026-08-31-hub-ingreso-cola-estado.md` — 9 tareas, 2 despliegues
-- **Progreso:** `progreso.md`
-
-**Tarea 1 hecha** (`51f2798`): estados `PENDING`/`PROCESSING`/`PAUSED`/`NOT_APPLICABLE` y campos
-`origin`, `bims_attempts`, `bims_next_attempt`, `woo_meta_ok`, `claimed_at`. Migración `0009`
-aditiva: **ningún dato se toca**. 183 → **186 tests**.
-
-**Se abandonó el `RenameField`** por pedido de Carlos, y con razón: en MySQL/MariaDB el DDL hace
-commit implícito, así que la atomicidad que Django le da a una migración **no cubre el esquema**, y
-no hay dump a mano para ensayarla. Ahora se **expande y contrae**: `order_id` queda intacto y
-borrarlo es una tarea diferida.
+```bash
+( ulimit -v 6291456; .venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings )
+```
 
 ---
 
-## Cabos sueltos y hallazgos
+## 2. Tarea 5 — el ingreso devuelve 202 y persiste (`e2066a1`)
 
-- ⚠️ **CUATRO consumidores se rompen con el 202, no dos.** Además de `retryfaileds.py:28` y
-  `sync_bims_contacts.py:78`, el admin tiene **dos más**: `retry_failed_orders_button`
-  (`admin.py:111`) y `retry_selected_orders` (`admin.py:152`). Los cuatro hacen `POST` a `/sales/`
-  y chequean `status_code == 200`, que con el 202 **nunca vuelve a ser cierto**. El plan solo lista
-  dos: **hay que actualizarlo antes de la Tarea 5.**
-- **`makemigrations` no funciona con `test_settings`.** `core/bims.py:723` tiene `bims = BimsApi()`
-  a nivel de módulo y el `__init__` hace login, así que el comando intenta conectarse a un host
-  inventado y crashea. Usar `--settings=muci-integrador.dev_settings`.
-- **`black` no está instalado ni en el `Pipfile`, y el código no está formateado con él** (hay
-  líneas de 108 caracteres; su default es 88). `CLAUDE.md` lo recomienda pero nunca se aplicó.
-  Correrlo ahora reformatearía medio proyecto: conviene como commit aislado, después del
-  Despliegue 2.
-- **`DEBUG=True` en producción.** Confirmado por dos caminos: la página de error 403 mostró la
-  sección de ayuda, y el SentryUptimeBot recibe **302 en `/`**, redirect que `urls.py` solo agrega
-  `if settings.DEBUG`. **Previo al flip.** Sale del `.env`.
-- **`admin.py` tiene un botón que corre `call_command("migrate")` desde la UI** (`:84`). Preexistente.
-- **`admin.py:53-62` registra la misma URL dos veces.** Preexistente e inofensivo.
-- **El reporte a BIMS sigue sin enviar** (`docs/reportes/2026-08-27-reporte-a-bims.md`). Es lo único
-  que puede lograr que roten la credencial. Carlos decidió postergarlo.
-- Del backlog viejo: **201 órdenes en FAILED**, los **67 parches de terceros**, y
-  `traces_sample_rate`/`profiles_sample_rate` en 1.0.
+`SalesView` deja de facturar en línea: persiste con `enqueue()` y devuelve **202**. El único no-2xx
+que queda es el 400 por request malformado, que depende de quien llama y no de BIMS. Con eso, una
+caída de BIMS ya no puede apagar el webhook de Woo.
 
-## ⚠️ Dos errores míos del lado del servidor, para no repetirlos
+Los **cuatro consumidores** pasaron a escribir en la BD: `retryfaileds`, el bloque de pausadas de
+`sync_bims_contacts` y los dos botones del admin — estos con el mensaje corregido a "encolada(s)".
 
-1. **Un `sed` no idempotente duplicó una directiva de nginx.** Se corrió dos veces y quedaron dos
-   `proxy_set_header X-Forwarded-Proto`. Con el header duplicado nginx lo manda dos veces y Django
-   puede leer `https,https`, que tampoco matchea: el CSRF habría seguido roto por otra razón.
-   **Todo comando de parcheo sobre el servidor debe chequear antes de escribir.**
-2. **Un `git add -A` mandó tres archivos de dev a producción** (`dev-sucursales.sqlite3`,
-   `dev_settings.py`, `dev_urls.py`). Sin credenciales y inertes allá, pero no iban. **Agregar por
-   nombre, siempre.** Quedaron gitignorados, y `dev_settings.py` resultó ser una herramienta útil.
+**Tres desvíos del plan, deliberados:**
 
-**Y una regla nueva de Carlos:** los `ssh` del asistente van **siempre** como
-`anthropic_readonly@muci.org`, nunca como root, ni para leer. Todo lo que modifica el servidor se lo
-pasa a Carlos para que lo corra él.
+1. **`PAUSED` entra en `REQUEUEABLE`.** El plan listaba `(FAILED, NOT_APPLICABLE)`, pero entonces el
+   reintento de `sync_bims_contacts` no podía reencolar nada: el plan se contradecía a sí mismo.
+2. **Los cuatro llaman `enqueue(external_reference or order_id, origin)`.** Las filas creadas entre
+   el `migrate` y el `restart` tienen la referencia en NULL; sin el rescate, `enqueue` reventaría
+   con "referencia no numérica" y esa orden no se reintentaría nunca más.
+3. **`enqueue` se apoya en `upsert_state`**, no en el `get_or_create` del plan: `order_id` sigue
+   siendo `NOT NULL` en la expansión.
+
+**Tests borrados a propósito:** `RetryFailedsCommandTest` (4) y el test de pausadas por HTTP.
+Probaban que los comandos interpretaran un `200`, un camino que ya no existe. Antes de borrarlos se
+verificó que la garantía de fondo —que las órdenes terminales queden en `NOT_APPLICABLE`— sigue
+cubierta por los tests de la Tarea 4.
+
+---
+
+## 3. Tarea 6 — worker y reaper (`55146bc`)
+
+`process_queue` toma lotes de 20 con `SKIP LOCKED`, respeta `bims_next_attempt`, y marca
+`PROCESSING` **antes** de llamar a BIMS y en la misma transacción que la selección. Si se marcara
+después, una muerte durante la llamada dejaría la fila `PENDING` y otro worker la tomaría en
+paralelo. Hay test que lo fija espiando el estado desde adentro de `process_order`.
+
+El reaper corre primero, con umbral `QUEUE_REAPER_MINUTES` (default 10, nuevo en `.env.example`)
+para no robarle la fila a un worker vivo.
+
+**Bug del plan corregido:** `process-queue.sh` necesita **`cd /var/www/integrador`**. `settings.py`
+carga la config con `dotenv_values(".env")`, ruta **relativa**; desde el home del cron no hay `.env`
+y settings revienta con `AttributeError: 'NoneType' object has no attribute 'lower'` antes de llegar
+a Django. Comprobado corriendo el comando desde otro directorio. Sin ese `cd`, el cron habría
+fallado en el primer minuto.
+
+**Rutas verificadas por SSH** (como `anthropic_readonly`): el checkout real es `/var/www/integrador`
+y el intérprete `/root/venv-integrador-52/bin/python` (sacado del `ps` de gunicorn).
+
+---
+
+## 4. Para mañana
+
+**Siguiente: Tarea 7** (reintentos por rama / backoff), después la 8 (alerta a Slack) y la 9
+(Despliegue 2).
+
+**Antes de desplegar, tres cosas:**
+
+1. ⚠️ **Las Tareas 5 y 6 van juntas o no van.** La 5 deja de facturar en línea y la 6 es lo único
+   que vacía la cola: subir solo la 5 es dejar de facturar del todo.
+2. ⚠️ **La línea de cron la instala Carlos** (necesita root):
+   `* * * * * /var/www/integrador/process-queue.sh >> /var/log/process-queue.log 2>&1`
+3. ⚠️ **`SKIP LOCKED` no está cubierto por los tests.** Django lo ignora sin error en SQLite, así
+   que la exclusión entre workers concurrentes solo se ejerce en MariaDB.
+
+**Pendiente de revisar, posible problema vivo:** `runretryfaileds.sh` apunta a
+`/var/www/integrador.muci.org/backend`, que **no existe** en el servidor. Si esa es la ruta que usa
+el cron, el reintento de fallidas lleva tiempo sin correr. No se pudo confirmar: el crontab de root
+no es legible como `anthropic_readonly`.

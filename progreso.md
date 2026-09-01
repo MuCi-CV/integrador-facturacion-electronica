@@ -3,7 +3,7 @@
 **Spec:** `docs/superpowers/specs/2026-08-31-hub-ingreso-cola-estado-design.md`
 **Plan:** `docs/superpowers/plans/2026-08-31-hub-ingreso-cola-estado.md`
 **Rama:** `feature/hub-ingreso-cola`
-**Actualizado:** 2026-09-01
+**Actualizado:** 2026-09-01 (cierre de sesión: Tareas 5 y 6 hechas, rama @ `55146bc` sin pushear)
 
 ## Medición sobre producción del 2026-09-01 — resuelve las dos incógnitas abiertas
 
@@ -77,13 +77,16 @@ fundraising va a cargar donaciones desde Krayin y esas nunca pasan por WooCommer
 | 3 | 🚀 Despliegue 1 — solo esquema | ✅ **desplegado 2026-09-01** | `7704044` |
 | 3-bis | Contraer: borrar `order_id` | 🔵 **diferida** a propósito | |
 | 4 | `NOT_APPLICABLE` y `PAUSED` en uso | ✅ **hecha** | |
-| 5 | Ingreso 202 + persistencia | ⬜ | |
-| 6 | Worker + reaper | ⬜ | |
+| 5 | Ingreso 202 + persistencia | ✅ **hecha** | `e2066a1` |
+| 6 | Worker + reaper | ✅ **hecha** | `55146bc` |
 | 7 | Reintentos por rama | ⬜ | |
 | 8 | Alerta a Slack + corrección del logging | ⬜ | |
 | 9 | 🚀 Despliegue 2 — el cambio de contrato | ⬜ | |
 
-**Tests:** 183 (base) → 186 (T1) → 193 (T2) → **201** (T4) → ~215 esperados al terminar.
+**Tests:** 183 (base) → 186 (T1) → 193 (T2) → 201 (T4) → 209 (T5) → **217** (T6).
+
+⚠️ **Las Tareas 5 y 6 no se pueden desplegar por separado.** La 5 deja de facturar en línea y la 6
+es lo único que vacía la cola: subir solo la 5 sería dejar de facturar del todo.
 
 ### Hallazgo de la Tarea 4: el canal `PAUSADA` ya estaba muerto
 
@@ -93,11 +96,15 @@ ese mensaje se eliminó el **2026-03-17** en `96e08b9` (`core/views.py`), junto 
 marzo no se crean filas nuevas por ese camino. **Medido el 2026-09-01: quedan 0 filas**, así que la
 `0012` es un no-op confirmado.
 
-**Consecuencia a decidir en la Tarea 5:** el bloque de auto-reintento de pausadas de
-`sync_bims_contacts` está comprobadamente muerto — sin escritor desde marzo y con 0 filas que
-atender. Recomendación: **borrarlo**. Además de sacar ~25 líneas que parecen hacer algo y no hacen
-nada, elimina **uno de los cuatro consumidores** que había que arreglar por el 202, y su trabajo lo
-va a hacer el worker de la Tarea 6 de todos modos.
+**Decidido por Carlos el 2026-09-01: se conserva y se convierte, no se borra.** La recomendación
+había sido borrarlo (sin escritor desde marzo, 0 filas que atender), pero el bloque queda vivo con
+el patrón nuevo: filtra `PAUSED` y encola. El costo es mantener un cuarto call site; el beneficio,
+que el canal siga funcionando si `PAUSED` vuelve a tener escritor.
+
+**Consecuencia en el código:** `PAUSED` tuvo que entrar en `REQUEUEABLE`, que el plan definía como
+`(FAILED, NOT_APPLICABLE)`. Con esa lista el bloque no podía reencolar nada — el plan se contradecía
+a sí mismo. `PAUSED` no es "ya se hizo" ni "ya está en la cola": es una orden trabada esperando un
+contacto, que es justo lo que hay que reencolar.
 
 ### Desvíos del plan en la Tarea 2 — decididos el 2026-09-01
 
@@ -139,12 +146,22 @@ va a hacer el worker de la Tarea 6 de todos modos.
 
 ## Trampas conocidas — leer antes de tocar
 
-- ⚠️ **CUATRO consumidores se rompen con el 202** — ✅ **ya corregido en el plan (Tarea 5)**:
-  `retryfaileds.py:28`, `sync_bims_contacts.py:78`, y en el admin `retry_failed_orders_button`
-  (`:111`) y `retry_selected_orders` (`:152`). Los cuatro chequean `status_code == 200`, que con el
-  202 **nunca vuelve a ser cierto**: no explotan, **dejan de hacer nada sin avisar**.
-  Los dos del admin además le dicen al usuario "procesadas correctamente", así que la pantalla
-  mentiría. El plan ahora corrige también ese mensaje, no solo el código.
+- ✅ **CUATRO consumidores se rompen con el 202 — CORREGIDO EN CÓDIGO** en `e2066a1` (Tarea 5). Los
+  cuatro pasaron a escribir en la BD con `enqueue()` y los dos del admin ahora dicen "encolada(s)"
+  en vez de "procesadas correctamente". **Ninguno de los cuatro tenía test**: la suite entera seguía
+  verde con el ingreso ya convertido, que es exactamente la falla silenciosa que A viene a eliminar.
+  Ahora los cubre `ReintentosEscribenEnLaColaTest`.
+- ⚠️ **`runretryfaileds.sh` apunta a una ruta que NO existe** (`/var/www/integrador.muci.org/backend`;
+  el checkout real es `/var/www/integrador`, verificado por SSH el 2026-09-01). Si esa es la ruta que
+  usa el cron, el reintento de fallidas lleva tiempo sin correr. **No se pudo confirmar**: el crontab
+  de root no es legible como `anthropic_readonly`. Lo tiene que mirar Carlos.
+- ⚠️ **`SKIP LOCKED` no está cubierto por los tests.** Django lo ignora sin error en SQLite, así que
+  la exclusión entre workers concurrentes **solo se ejerce en MariaDB**. Los tests cubren la lógica
+  de selección y marcado, no la concurrencia.
+- ⚠️ **Los scripts del cron necesitan `cd` al checkout.** `settings.py` carga la config con
+  `dotenv_values(".env")`, que es ruta **relativa**: desde el home del cron no hay `.env` y settings
+  revienta con `AttributeError: 'NoneType' object has no attribute 'lower'` antes de llegar a
+  Django. `process-queue.sh` ya lo hace; comprobado en la sesión del 2026-09-01.
 - ⚠️ **`makemigrations` va con `dev_settings`, no con `test_settings`.** `core/bims.py:723` tiene
   `bims = BimsApi()` a nivel de módulo y el `__init__` hace login: con `test_settings` el comando
   intenta conectarse a un host inventado y **crashea sin generar nada**.
