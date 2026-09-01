@@ -3369,3 +3369,114 @@ class SyncBimsContactsPausadasTest(TestCase):
         self.assertEqual(
             FailedOrder.objects.get(order_id=301).status, FailedOrder.FAILED
         )
+
+
+class IngresoAsincronoTest(TestCase):
+    """
+    `POST /sales/` deja de facturar en línea: persiste y devuelve **202**.
+
+    El motivo es concreto y ya costó un webhook: hoy la vista devuelve **503 ante
+    cualquier excepción** y WooCommerce deshabilita un webhook a las 5 respuestas
+    no-2xx seguidas. Una caída de BIMS de cinco órdenes apaga `Venta Entrada` y
+    la facturación se corta **en silencio**. Así murió `Refund order`, que quedó
+    con `failure_count 6`.
+
+    Este endpoint no tenía NINGÚN test antes de esta tarea.
+
+    El `return_value` de cada `@patch` es obligatorio, no decorativo. Sin él el
+    mock devuelve un MagicMock, la vista síncrona lo entrega a
+    `Response(data=...)` y el encoder de DRF entra en recursión infinita: le
+    pregunta `hasattr(obj, "tolist")`, que un MagicMock siempre inventa, y cada
+    vuelta retiene un mock nuevo. Son ~22 GiB de RAM y la notebook se congela
+    antes de que el OOM killer alcance a matar el proceso.
+    """
+
+    @patch("core.views.process_order", return_value={"status": "ok"})
+    def test_el_ingreso_responde_202_y_no_procesa_nada(self, mock_process):
+        r = self.client.post("/sales/", {"arg": 204000}, format="json")
+
+        self.assertEqual(r.status_code, 202)
+        mock_process.assert_not_called()
+        fila = FailedOrder.objects.get(external_reference="204000")
+        self.assertEqual(fila.status, FailedOrder.PENDING)
+        self.assertEqual(fila.order_id, 204000)
+
+    def test_sin_referencia_sigue_siendo_400(self):
+        r = self.client.post("/sales/", {}, format="json")
+
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(FailedOrder.objects.count(), 0)
+
+    def test_una_referencia_no_numerica_es_400_y_no_500(self):
+        """
+        Un 500 le cuenta a Woo como falla igual que un 503. Una referencia
+        malformada es culpa del request, no de un tercero: 400 y no se encola.
+        """
+        r = self.client.post("/sales/", {"arg": "KRAYIN-77"}, format="json")
+
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(FailedOrder.objects.count(), 0)
+
+    @patch("core.views.process_order", return_value={"status": "ok"})
+    def test_una_reentrega_de_orden_completada_no_la_reencola(self, _mock):
+        """Ya se facturó: reprocesar es riesgo sin beneficio. Spec §4."""
+        FailedOrder.objects.create(
+            order_id=204000,
+            external_reference="204000",
+            status=FailedOrder.COMPLETED,
+            bims_sale_id="31385",
+        )
+
+        r = self.client.post("/sales/", {"arg": 204000}, format="json")
+
+        self.assertEqual(r.status_code, 202)
+        fila = FailedOrder.objects.get(external_reference="204000")
+        self.assertEqual(fila.status, FailedOrder.COMPLETED)
+        self.assertEqual(fila.bims_sale_id, "31385")
+
+    @patch("core.views.process_order", return_value={"status": "ok"})
+    def test_una_reentrega_de_orden_fallida_la_reencola(self, _mock):
+        FailedOrder.objects.create(
+            order_id=204000,
+            external_reference="204000",
+            status=FailedOrder.FAILED,
+            bims_attempts=4,
+        )
+
+        self.client.post("/sales/", {"arg": 204000}, format="json")
+
+        fila = FailedOrder.objects.get(external_reference="204000")
+        self.assertEqual(fila.status, FailedOrder.PENDING)
+        # El presupuesto de intentos se reinicia: es una entrega nueva, no la
+        # continuación de la anterior. Sin esto una orden que ya agotó sus
+        # reintentos nunca volvería a intentarse.
+        self.assertEqual(fila.bims_attempts, 0)
+
+    @patch("core.views.process_order", return_value={"status": "ok"})
+    def test_una_reentrega_de_no_aplica_la_reencola(self, _mock):
+        """
+        Si a una orden de monto 0 le corrigen el precio, Woo reentrega y esta vez
+        sí corresponde facturar. `NOT_APPLICABLE` es terminal para el worker,
+        no para una entrega nueva.
+        """
+        FailedOrder.objects.create(
+            order_id=204000,
+            external_reference="204000",
+            status=FailedOrder.NOT_APPLICABLE,
+            message="Monto 0",
+        )
+
+        self.client.post("/sales/", {"arg": 204000}, format="json")
+
+        self.assertEqual(
+            FailedOrder.objects.get(external_reference="204000").status,
+            FailedOrder.PENDING,
+        )
+
+    @patch("core.views.process_order", return_value={"status": "ok"})
+    def test_una_reentrega_de_una_ya_encolada_no_la_duplica(self, _mock):
+        """Woo puede reentregar el mismo webhook: dos filas serían dos verdades."""
+        self.client.post("/sales/", {"arg": 204000}, format="json")
+        self.client.post("/sales/", {"arg": 204000}, format="json")
+
+        self.assertEqual(FailedOrder.objects.count(), 1)
