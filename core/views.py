@@ -1,18 +1,30 @@
 import logging
 
-import sentry_sdk
 from django.views.generic import TemplateView
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from core.services import process_order
+from core.states import enqueue
 from core.woocommerce import wc_api
 
 logger = logging.getLogger(__name__)
 
 
 class SalesView(APIView):
+    """
+    Persiste la transacción y sale. El trabajo lo hace el worker de la cola.
+
+    Devolver 202 y no el resultado de la facturación es deliberado: WooCommerce
+    deshabilita un webhook a las 5 respuestas no-2xx seguidas, y la vista vieja
+    contestaba 503 ante cualquier excepción. Una caída de BIMS de cinco órdenes
+    apagaba `Venta Entrada` y la facturación se cortaba en silencio — así murió
+    el webhook `Refund order`, que quedó con `failure_count 6`.
+
+    El único no-2xx que queda es el 400 por request malformado, que depende de
+    quien llama y no de un tercero.
+    """
+
     def post(self, request):
         order_id = request.data.get("arg")
 
@@ -23,24 +35,20 @@ class SalesView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        with sentry_sdk.configure_scope() as scope:
-            scope.set_tag("order_id", order_id)
+        try:
+            enqueue(order_id)
+        except ValueError as e:
+            # Referencia malformada: culpa del request, no de un tercero. Un 500
+            # le contaría a Woo como falla igual que el 503 que acabamos de sacar.
+            logger.error(f"Referencia inválida en el ingreso: {e}")
+            return Response(
+                data={"status": "fail", "error": str(e)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-            try:
-                result = process_order(order_id)
-                return Response(data=result)
-            except ValueError as e:
-                # Error de negocio (sin productos válidos, rechazado por BIMS)
-                return Response(
-                    data={"status": "fail", "error": str(e)},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            except Exception as e:
-                logger.error(f"Error procesando orden {order_id}: {e}", exc_info=True)
-                return Response(
-                    data={"status": "fail", "error": str(e)},
-                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
-                )
+        return Response(
+            data={"status": "encolada"}, status=status.HTTP_202_ACCEPTED
+        )
 
 
 class RefundView(APIView):

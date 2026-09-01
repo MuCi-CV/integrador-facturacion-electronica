@@ -55,39 +55,37 @@ class Command(BaseCommand):
             time.sleep(1)  # Prevenir rate limiting si lo hubiera
         self.stdout.write(self.style.SUCCESS(f"Sincronización completa. Total guardados: {total_synced}"))
 
-        self.stdout.write("Buscando órdenes pausadas para auto-reintento...")
+        self.stdout.write("Buscando órdenes pausadas para reencolar...")
         from core.models import FailedOrder
-        import requests
-        from django.conf import settings
-        
+        from core.states import enqueue
+
         # Antes esto filtraba por (FAILED, message startswith "Pausada:
         # Esperando"): el estado de pausa viajaba en el TEXTO del mensaje, así
         # que reformular ese texto rompía el comando en silencio. Ahora es un
         # estado de verdad. La migración 0012 movió las filas históricas.
         paused_orders = FailedOrder.objects.filter(status=FailedOrder.PAUSED)
-        
+
         if not paused_orders.exists():
             self.stdout.write("No hay órdenes pausadas actualmente.")
             return
 
-        url = settings.BASE_URL + "/sales/"
+        # Escribe en la cola en vez de hacer un POST a `/sales/`. El código viejo
+        # exigía `status_code == 200` y además ramificaba sobre `status ==
+        # "paused"`, una respuesta que la vista dejó de dar el 2026-03-17: con el
+        # 202 del ingreso asíncrono habría quedado sin hacer nada y sin avisar.
+        reencoladas = 0
         for order in paused_orders:
-            self.stdout.write(f"Reintentando orden pausada {order.order_id}...")
             try:
-                response = requests.post(url, json={"arg": order.order_id}, verify=True, timeout=30)
-                resp_json = response.json()
-                resp_status = resp_json.get("status")
-                resp_message = resp_json.get("message", "")
-                
-                if response.status_code == 200 and resp_status == "ok":
-                    order.status = FailedOrder.COMPLETED
-                    order.message = f"Procesado con éxito tras sincronización asíncrona. Detalle: {resp_message}"
-                    order.save()
-                    self.stdout.write(self.style.SUCCESS(f"Orden {order.order_id} procesada exitosamente en BIMS."))
-                elif resp_status == "paused":
-                    self.stderr.write(f"Orden {order.order_id} se volvió a pausar (email aún no encontrado en caché). Se reintentará en la próxima sincronización.")
-                else:
-                    error_detail = resp_json.get("error", response.text)
-                    self.stderr.write(f"Fallo al reintentar orden {order.order_id}: {error_detail}")
-            except Exception as e:
-                self.stderr.write(f"Error HTTP al reintentar orden {order.order_id}: {e}")
+                enqueue(order.external_reference or order.order_id, order.origin)
+                reencoladas += 1
+            except ValueError as e:
+                self.stderr.write(
+                    f"No se pudo reencolar la orden pausada {order.order_id}: {e}"
+                )
+
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"Reencoladas {reencoladas} orden(es) pausada(s). "
+                "Las procesa el worker de la cola."
+            )
+        )

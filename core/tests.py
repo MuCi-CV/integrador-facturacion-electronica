@@ -1087,62 +1087,6 @@ class ProcessOrderZeroPriceItemsTest(TestCase):
         mock_sentry.capture_message.assert_called_once()
 
 
-class RetryFailedsCommandTest(TestCase):
-    """El reintento debe cerrar las órdenes que nunca van a llegar a BIMS."""
-
-    def _response(self, status_code, payload):
-        return MagicMock(status_code=status_code, json=lambda: payload)
-
-    @patch("core.management.commands.retryfaileds.requests.post")
-    def test_estado_terminal_cierra_la_orden(self, mock_post):
-        from django.core.management import call_command
-
-        order = FailedOrder.objects.create(order_id=601, status=FailedOrder.FAILED)
-        mock_post.return_value = self._response(200, {"status": "Productos en 0"})
-
-        call_command("retryfaileds")
-
-        order.refresh_from_db()
-        self.assertEqual(order.status, FailedOrder.COMPLETED)
-        self.assertIn("Productos en 0", order.message)
-
-    @patch("core.management.commands.retryfaileds.requests.post")
-    def test_monto_cero_tambien_cierra_la_orden(self, mock_post):
-        from django.core.management import call_command
-
-        order = FailedOrder.objects.create(order_id=602, status=FailedOrder.FAILED)
-        mock_post.return_value = self._response(200, {"status": "Monto 0"})
-
-        call_command("retryfaileds")
-
-        order.refresh_from_db()
-        self.assertEqual(order.status, FailedOrder.COMPLETED)
-
-    @patch("core.management.commands.retryfaileds.requests.post")
-    def test_orden_procesada_con_exito_se_marca_completada(self, mock_post):
-        from django.core.management import call_command
-
-        order = FailedOrder.objects.create(order_id=603, status=FailedOrder.FAILED)
-        mock_post.return_value = self._response(200, {"status": "ok", "message": "Procesado con éxito."})
-
-        call_command("retryfaileds")
-
-        order.refresh_from_db()
-        self.assertEqual(order.status, FailedOrder.COMPLETED)
-
-    @patch("core.management.commands.retryfaileds.requests.post")
-    def test_fallo_real_sigue_pendiente_de_reintento(self, mock_post):
-        from django.core.management import call_command
-
-        order = FailedOrder.objects.create(order_id=604, status=FailedOrder.FAILED)
-        mock_post.return_value = self._response(400, {"status": "fail", "error": "Rechazado por BIMS"})
-
-        call_command("retryfaileds")
-
-        order.refresh_from_db()
-        self.assertEqual(order.status, FailedOrder.FAILED)
-
-
 class SucursalResolucionTest(TestCase):
     """
     `resolve_pos_and_payments` resuelve el punto de venta leyendo la BD.
@@ -3314,34 +3258,11 @@ class SyncBimsContactsPausadasTest(TestCase):
     Nota: el escritor de `"Pausada: Esperando"` se eliminó el 2026-03-17
     (`96e08b9`), así que hoy no se crean filas nuevas por ese camino. Estos tests
     fijan la semántica igual, porque `PAUSED` va a tener un escritor nuevo.
+
+    Que una fila `PAUSED` efectivamente se reencole lo cubre
+    `ReintentosEscribenEnLaColaTest`, junto con los otros tres consumidores que
+    dejaron de depender del `200` de `/sales/`.
     """
-
-    def _post_ok(self):
-        return MagicMock(
-            status_code=200,
-            json=lambda: {"status": "ok", "message": "Procesado con éxito."},
-        )
-
-    @patch("core.management.commands.sync_bims_contacts.bims")
-    @patch("requests.post")
-    def test_reintenta_las_ordenes_en_estado_pausada(self, mock_post, mock_bims):
-        from django.core.management import call_command
-
-        mock_bims.get_contacts.return_value = {"data": []}
-        mock_post.return_value = self._post_ok()
-        FailedOrder.objects.create(
-            order_id=300,
-            external_reference="300",
-            status=FailedOrder.PAUSED,
-            message="Pausada: Esperando sincronización de BIMS",
-        )
-
-        call_command("sync_bims_contacts")
-
-        self.assertEqual(mock_post.call_count, 1)
-        self.assertEqual(
-            FailedOrder.objects.get(order_id=300).status, FailedOrder.COMPLETED
-        )
 
     @patch("core.management.commands.sync_bims_contacts.bims")
     @patch("requests.post")
@@ -3355,7 +3276,6 @@ class SyncBimsContactsPausadasTest(TestCase):
         from django.core.management import call_command
 
         mock_bims.get_contacts.return_value = {"data": []}
-        mock_post.return_value = self._post_ok()
         FailedOrder.objects.create(
             order_id=301,
             external_reference="301",
@@ -3383,20 +3303,22 @@ class IngresoAsincronoTest(TestCase):
 
     Este endpoint no tenía NINGÚN test antes de esta tarea.
 
-    El `return_value` de cada `@patch` es obligatorio, no decorativo. Sin él el
-    mock devuelve un MagicMock, la vista síncrona lo entrega a
-    `Response(data=...)` y el encoder de DRF entra en recursión infinita: le
-    pregunta `hasattr(obj, "tolist")`, que un MagicMock siempre inventa, y cada
-    vuelta retiene un mock nuevo. Son ~22 GiB de RAM y la notebook se congela
-    antes de que el OOM killer alcance a matar el proceso.
+    La clase no mockea nada: la vista dejó de importar `process_order`, así que
+    la garantía de que no factura en línea es estructural y no depende de un
+    mock. Si alguna vez vuelve a hacer falta mockear algo que termine en
+    `Response(data=...)`, el `return_value` es obligatorio — un MagicMock hace
+    entrar al encoder de DRF en recursión infinita (~22 GiB). Ver `76b8c82`.
     """
 
-    @patch("core.views.process_order", return_value={"status": "ok"})
-    def test_el_ingreso_responde_202_y_no_procesa_nada(self, mock_process):
+    @patch("requests.post")
+    def test_el_ingreso_responde_202_y_no_procesa_nada(self, mock_post):
         r = self.client.post("/sales/", {"arg": 204000}, format="json")
 
         self.assertEqual(r.status_code, 202)
-        mock_process.assert_not_called()
+        # Garantia estructural: la vista ni siquiera importa `process_order`.
+        # Esto cubre el camino entero — durante el ingreso no sale una sola
+        # peticion, ni a BIMS ni a WooCommerce.
+        mock_post.assert_not_called()
         fila = FailedOrder.objects.get(external_reference="204000")
         self.assertEqual(fila.status, FailedOrder.PENDING)
         self.assertEqual(fila.order_id, 204000)
@@ -3417,8 +3339,7 @@ class IngresoAsincronoTest(TestCase):
         self.assertEqual(r.status_code, 400)
         self.assertEqual(FailedOrder.objects.count(), 0)
 
-    @patch("core.views.process_order", return_value={"status": "ok"})
-    def test_una_reentrega_de_orden_completada_no_la_reencola(self, _mock):
+    def test_una_reentrega_de_orden_completada_no_la_reencola(self):
         """Ya se facturó: reprocesar es riesgo sin beneficio. Spec §4."""
         FailedOrder.objects.create(
             order_id=204000,
@@ -3434,8 +3355,7 @@ class IngresoAsincronoTest(TestCase):
         self.assertEqual(fila.status, FailedOrder.COMPLETED)
         self.assertEqual(fila.bims_sale_id, "31385")
 
-    @patch("core.views.process_order", return_value={"status": "ok"})
-    def test_una_reentrega_de_orden_fallida_la_reencola(self, _mock):
+    def test_una_reentrega_de_orden_fallida_la_reencola(self):
         FailedOrder.objects.create(
             order_id=204000,
             external_reference="204000",
@@ -3452,8 +3372,7 @@ class IngresoAsincronoTest(TestCase):
         # reintentos nunca volvería a intentarse.
         self.assertEqual(fila.bims_attempts, 0)
 
-    @patch("core.views.process_order", return_value={"status": "ok"})
-    def test_una_reentrega_de_no_aplica_la_reencola(self, _mock):
+    def test_una_reentrega_de_no_aplica_la_reencola(self):
         """
         Si a una orden de monto 0 le corrigen el precio, Woo reentrega y esta vez
         sí corresponde facturar. `NOT_APPLICABLE` es terminal para el worker,
@@ -3473,10 +3392,151 @@ class IngresoAsincronoTest(TestCase):
             FailedOrder.PENDING,
         )
 
-    @patch("core.views.process_order", return_value={"status": "ok"})
-    def test_una_reentrega_de_una_ya_encolada_no_la_duplica(self, _mock):
+    def test_una_reentrega_de_una_ya_encolada_no_la_duplica(self):
         """Woo puede reentregar el mismo webhook: dos filas serían dos verdades."""
         self.client.post("/sales/", {"arg": 204000}, format="json")
         self.client.post("/sales/", {"arg": 204000}, format="json")
 
         self.assertEqual(FailedOrder.objects.count(), 1)
+
+
+class ReintentosEscribenEnLaColaTest(TestCase):
+    """
+    Los cuatro reintentos dejan de hablar HTTP con `/sales/` y escriben en la cola.
+
+    No es un cambio de estilo. Los cuatro chequeaban `status_code == 200`, que con
+    el 202 no vuelve a ser cierto nunca: no fallan con error, **dejan de hacer nada
+    y no avisan**. Ninguno de los cuatro tenía un test que lo detectara — por eso
+    la suite entera seguía en verde con el ingreso ya convertido.
+
+    Cada test afirma `mock_post.assert_not_called()` sobre `requests.post`: es la
+    forma directa de decir "este camino ya no depende de una respuesta HTTP".
+    """
+
+    def _admin(self):
+        from django.contrib.admin.sites import site
+
+        from core.admin import FailedOrderAdmin
+
+        instancia = FailedOrderAdmin(FailedOrder, site)
+        instancia.message_user = MagicMock()
+        return instancia
+
+    def _request(self):
+        from django.test import RequestFactory
+
+        return RequestFactory().post("/")
+
+    @patch("requests.post")
+    def test_retryfaileds_reencola_las_fallidas(self, mock_post):
+        from django.core.management import call_command
+
+        from core.states import upsert_state
+
+        upsert_state(701, status=FailedOrder.FAILED, bims_attempts=5)
+
+        call_command("retryfaileds")
+
+        fila = FailedOrder.objects.get(external_reference="701")
+        self.assertEqual(fila.status, FailedOrder.PENDING)
+        self.assertEqual(fila.bims_attempts, 0)
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_retryfaileds_no_toca_lo_que_no_esta_fallido(self, mock_post):
+        from django.core.management import call_command
+
+        from core.states import upsert_state
+
+        upsert_state(702, status=FailedOrder.COMPLETED, bims_sale_id="31385")
+
+        call_command("retryfaileds")
+
+        fila = FailedOrder.objects.get(external_reference="702")
+        self.assertEqual(fila.status, FailedOrder.COMPLETED)
+        self.assertEqual(fila.bims_sale_id, "31385")
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_retryfaileds_reencola_una_fila_heredada_sin_referencia(self, mock_post):
+        """
+        Una venta que entre entre el `migrate` y el `restart` del despliegue deja
+        la fila con `external_reference` en NULL. Si el reintento le pasara ese
+        NULL a `enqueue`, reventaría con "referencia no numérica" y la orden se
+        quedaría sin reintentar para siempre — justo la falla silenciosa que este
+        sub-proyecto viene a eliminar.
+        """
+        from django.core.management import call_command
+
+        FailedOrder.objects.create(order_id=703, status=FailedOrder.FAILED)
+
+        call_command("retryfaileds")
+
+        fila = FailedOrder.objects.get(order_id=703)
+        self.assertEqual(fila.status, FailedOrder.PENDING)
+        # La reencolada además completa la identidad que faltaba, en vez de
+        # crear una segunda fila para la misma orden.
+        self.assertEqual(fila.external_reference, "703")
+        self.assertEqual(FailedOrder.objects.count(), 1)
+        mock_post.assert_not_called()
+
+    @patch("core.management.commands.sync_bims_contacts.bims")
+    @patch("requests.post")
+    def test_sync_bims_contacts_reencola_las_pausadas(self, mock_post, mock_bims):
+        from django.core.management import call_command
+
+        from core.states import upsert_state
+
+        mock_bims.get_contacts.return_value = {"data": []}
+        upsert_state(704, status=FailedOrder.PAUSED)
+
+        call_command("sync_bims_contacts")
+
+        self.assertEqual(
+            FailedOrder.objects.get(external_reference="704").status,
+            FailedOrder.PENDING,
+        )
+        mock_post.assert_not_called()
+
+    @patch("requests.post")
+    def test_el_boton_del_admin_reencola_y_el_mensaje_dice_la_verdad(self, mock_post):
+        """
+        El mensaje importa tanto como el código: es un botón que aprieta una
+        persona. Si dice "procesadas correctamente" cuando en realidad encoló, la
+        pantalla miente y alguien va a concluir que el reintento no sirve.
+        """
+        from core.states import upsert_state
+
+        upsert_state(705, status=FailedOrder.FAILED)
+        admin_obj = self._admin()
+
+        admin_obj.retry_failed_orders_button(self._request())
+
+        self.assertEqual(
+            FailedOrder.objects.get(external_reference="705").status,
+            FailedOrder.PENDING,
+        )
+        mock_post.assert_not_called()
+        mensaje = admin_obj.message_user.call_args[0][1].lower()
+        self.assertIn("encolada", mensaje)
+        self.assertNotIn("procesadas correctamente", mensaje)
+
+    @patch("requests.post")
+    def test_la_accion_del_admin_solo_reencola_las_fallidas(self, mock_post):
+        from core.states import upsert_state
+
+        upsert_state(706, status=FailedOrder.FAILED)
+        upsert_state(707, status=FailedOrder.COMPLETED, bims_sale_id="31385")
+        admin_obj = self._admin()
+
+        admin_obj.retry_selected_orders(self._request(), FailedOrder.objects.all())
+
+        self.assertEqual(
+            FailedOrder.objects.get(external_reference="706").status,
+            FailedOrder.PENDING,
+        )
+        self.assertEqual(
+            FailedOrder.objects.get(external_reference="707").status,
+            FailedOrder.COMPLETED,
+        )
+        mock_post.assert_not_called()

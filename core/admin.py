@@ -1,13 +1,12 @@
-import requests
 from datetime import datetime
 from django.contrib import admin, messages
 from django.utils.html import format_html
-from django.conf import settings
 from django.urls import path
 from django.http import HttpResponseRedirect
 from django.shortcuts import render
 from core.forms import SucursalForm
 from core.models import FailedOrder, Sucursal
+from core.states import enqueue
 from core.sucursales import completar_desde_woocommerce
 from core.woocommerce import wc_api
 
@@ -113,80 +112,79 @@ class FailedOrderAdmin(admin.ModelAdmin):
         return HttpResponseRedirect("..")
 
     def retry_failed_orders_button(self, request):
-        """Processes all failed orders."""
+        """
+        Reencola todas las fallidas. El worker de la cola las procesa después.
+
+        El mensaje al usuario dice "encolada" y no "procesada" a propósito: esto
+        ya no factura nada en el momento. Si la pantalla dijera lo segundo,
+        estaría mintiendo, y alguien que mire la lista un segundo después
+        concluiría que el botón no sirve.
+        """
         try:
-            failed_orders = FailedOrder.objects.filter(status=FailedOrder.FAILED)
-            url = settings.BASE_URL + "/sales/"
+            ordenes = FailedOrder.objects.filter(status=FailedOrder.FAILED)
 
-            for order in failed_orders:
+            reencoladas = 0
+            for order in ordenes:
                 try:
-                    response = requests.post(
-                        url, json={"arg": order.order_id}, verify=True
-                    )
-
-                    if (
-                        response.status_code == 200
-                        and response.json().get("status") == "ok"
-                    ):
-                        order.status = FailedOrder.COMPLETED
-                        order.message = "Procesado con éxito."
-                        order.save()
-
-                except Exception as e:
+                    enqueue(order.external_reference or order.order_id, order.origin)
+                    reencoladas += 1
+                except ValueError as e:
                     current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
                     order.message = (
-                        f"{current_time} | Error processing order {order.order_id}: {e}"
+                        f"{current_time} | No se pudo reencolar la orden "
+                        f"{order.order_id}: {e}"
                     )
                     order.save()
 
             self.message_user(
                 request,
-                "Las órdenes fallidas han sido procesadas correctamente.",
+                f"{reencoladas} orden(es) encolada(s). Se procesan en el próximo "
+                "minuto; la pantalla no cambia al instante.",
                 level=messages.SUCCESS,
             )
         except Exception as e:
             self.message_user(
                 request,
-                f"Ocurrió un error inesperado al procesar las órdenes fallidas: {str(e)}",
+                f"Ocurrió un error inesperado al encolar las órdenes fallidas: {str(e)}",
                 level=messages.ERROR,
             )
 
         return HttpResponseRedirect("..")
 
     def retry_selected_orders(self, request, queryset):
-        """Retries processing the selected orders."""
-        try:
-            url = settings.BASE_URL + "/sales/"
+        """
+        Reencola las seleccionadas que estén fallidas.
 
+        Conserva el filtro por `FAILED` que ya tenía: seleccionar la lista entera
+        y apretar el botón no debe reprocesar una orden ya facturada.
+        """
+        try:
+            reencoladas = 0
             for order in queryset:
                 if order.status == FailedOrder.FAILED:
                     try:
-                        response = requests.post(
-                            url, json={"arg": order.order_id}, verify=True
+                        enqueue(
+                            order.external_reference or order.order_id, order.origin
                         )
-
-                        if (
-                            response.status_code == 200
-                            and response.json().get("status") == "ok"
-                        ):
-                            order.status = FailedOrder.COMPLETED
-                            order.message = "Procesado con éxito."
-                            order.save()
-
-                    except Exception as e:
+                        reencoladas += 1
+                    except ValueError as e:
                         current_time = datetime.now().strftime("%d/%m/%Y %H:%M")
-                        order.message = f"{current_time} | Error processing order {order.order_id}: {e}"
+                        order.message = (
+                            f"{current_time} | No se pudo reencolar la orden "
+                            f"{order.order_id}: {e}"
+                        )
                         order.save()
 
             self.message_user(
                 request,
-                "Las órdenes seleccionadas han sido procesadas correctamente.",
+                f"{reencoladas} orden(es) encolada(s). Se procesan en el próximo "
+                "minuto; la pantalla no cambia al instante.",
                 level=messages.SUCCESS,
             )
         except Exception as e:
             self.message_user(
                 request,
-                f"Ocurrió un error inesperado al procesar las órdenes seleccionadas: {str(e)}",
+                f"Ocurrió un error inesperado al encolar las órdenes seleccionadas: {str(e)}",
                 level=messages.ERROR,
             )
 

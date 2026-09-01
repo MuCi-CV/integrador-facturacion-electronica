@@ -7,7 +7,7 @@ helper de estado no tiene por qué arrastrar eso — es lo que hace que
 `makemigrations` con `test_settings` crashee.
 """
 
-from typing import Any
+from typing import Any, Optional
 
 from core.models import FailedOrder
 
@@ -29,13 +29,11 @@ def _como_order_id(referencia: Any) -> int:
         )
 
 
-def upsert_state(referencia: Any, **campos: Any) -> FailedOrder:
+def _buscar_fila(
+    order_id: int, referencia: str, origen: str
+) -> Optional[FailedOrder]:
     """
-    Único lugar que escribe la identidad de una fila de `FailedOrder`.
-
-    Existe para que sea imposible llenar una columna de identidad y no la otra
-    durante la expansión: una fila con solo `order_id` no la encuentra el código
-    nuevo, y una con solo `external_reference` no la encuentra el viejo.
+    La fila de esta transacción, o `None` si todavía no existe.
 
     El rescate por `order_id` no es defensivo de más. En el despliegue, `migrate`
     corre con el código VIEJO todavía sirviendo: una venta que entre entre el fin
@@ -44,22 +42,36 @@ def upsert_state(referencia: Any, **campos: Any) -> FailedOrder:
     **segunda fila para la misma orden**, que es justo la doble fuente de verdad
     sobre si una orden se facturó que esta tabla existe para evitar.
     """
-    order_id = _como_order_id(referencia)
-    referencia = str(referencia)
-
     fila = FailedOrder.objects.filter(
-        origin=FailedOrder.ORIGIN_WOO, external_reference=referencia
+        origin=origen, external_reference=referencia
     ).first()
     if fila is None:
         fila = FailedOrder.objects.filter(
-            origin=FailedOrder.ORIGIN_WOO,
+            origin=origen,
             external_reference__isnull=True,
             order_id=order_id,
         ).first()
+    return fila
+
+
+def upsert_state(
+    referencia: Any, origen: str = FailedOrder.ORIGIN_WOO, **campos: Any
+) -> FailedOrder:
+    """
+    Único lugar que escribe la identidad de una fila de `FailedOrder`.
+
+    Existe para que sea imposible llenar una columna de identidad y no la otra
+    durante la expansión: una fila con solo `order_id` no la encuentra el código
+    nuevo, y una con solo `external_reference` no la encuentra el viejo.
+    """
+    order_id = _como_order_id(referencia)
+    referencia = str(referencia)
+
+    fila = _buscar_fila(order_id, referencia, origen)
 
     if fila is None:
         return FailedOrder.objects.create(
-            origin=FailedOrder.ORIGIN_WOO,
+            origin=origen,
             external_reference=referencia,
             order_id=order_id,
             **campos,
@@ -91,4 +103,46 @@ def mark_not_applicable(referencia: Any, motivo: str) -> FailedOrder:
     """
     return upsert_state(
         referencia, status=FailedOrder.NOT_APPLICABLE, message=motivo
+    )
+
+
+# Estados desde los que una re-entrega vuelve a encolar. `COMPLETED` queda
+# afuera porque ya se facturó y reprocesar es riesgo sin beneficio; `PENDING` y
+# `PROCESSING` porque ya están en la cola. Spec §4.
+#
+# `PAUSED` entra aunque el plan no lo listaba: no es "ya se hizo" ni "ya está en
+# la cola", es una orden trabada esperando que aparezca un contacto. Dejarla
+# afuera volvía imposible el reintento que hace `sync_bims_contacts`, que es
+# justo para lo que ese estado existe.
+REQUEUEABLE = (
+    FailedOrder.FAILED,
+    FailedOrder.NOT_APPLICABLE,
+    FailedOrder.PAUSED,
+)
+
+
+def enqueue(referencia: Any, origen: str = FailedOrder.ORIGIN_WOO) -> FailedOrder:
+    """
+    Deja la transacción lista para que la tome el worker, y no hace nada más.
+
+    `NOT_APPLICABLE` es reencolable a propósito: es terminal para el worker, no
+    para una entrega nueva. Si a una orden de monto 0 le corrigen el precio, Woo
+    reentrega el webhook y esta vez sí corresponde facturar.
+
+    El reinicio de `bims_attempts` tampoco es cosmético: sin él, una orden que ya
+    agotó su presupuesto de reintentos quedaría encolada y el worker la
+    descartaría en el acto, así que una re-entrega manual no serviría de nada.
+    """
+    fila = _buscar_fila(_como_order_id(referencia), str(referencia), origen)
+
+    if fila is not None and fila.status not in REQUEUEABLE:
+        return fila
+
+    return upsert_state(
+        referencia,
+        origen=origen,
+        status=FailedOrder.PENDING,
+        message="Reencolada." if fila is not None else "Encolada.",
+        bims_attempts=0,
+        bims_next_attempt=None,
     )
