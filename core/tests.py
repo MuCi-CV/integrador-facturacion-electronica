@@ -3555,6 +3555,25 @@ class WorkerDeColaTest(TestCase):
     fiscales sería inaceptable.
     """
 
+    def setUp(self):
+        """
+        Ninguna prueba de esta clase debe salir a la red.
+
+        Desde la Tarea 7 `process_queue` cierra cada pasada reparando las metas
+        de WooCommerce, y varias de estas pruebas dejan filas `COMPLETED` con
+        `bims_sale_id` para verificar que el worker NO las toma. Esas filas caen
+        justo en el filtro de la reparación: sin este parche el comando hacía un
+        GET real a WooCommerce, que sólo pasaba desapercibido porque el fallo de
+        DNS lo tragaba el `except` del lote.
+        """
+        parche = patch("core.management.commands.process_queue.wc_api")
+        self.mock_wc = parche.start()
+        self.addCleanup(parche.stop)
+        # Woo ya tiene la meta: la reparación no escribe nada y no distrae.
+        self.mock_wc.get_order.return_value = {
+            "meta_data": [{"key": "_bims_sale_id", "value": "31385"}]
+        }
+
     def _pendiente(self, referencia, **campos):
         from core.states import upsert_state
 
