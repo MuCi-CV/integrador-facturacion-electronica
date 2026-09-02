@@ -1,6 +1,7 @@
 import email
 import json
 import time
+from io import StringIO
 import requests
 from django.db import IntegrityError, transaction
 from types import SimpleNamespace
@@ -4740,3 +4741,201 @@ class EscrituraDeStockEnWooTest(TestCase):
 
         self.assertEqual(api.wcapi.get.call_args[0][0], "products/187056/variations")
         self.assertEqual(variaciones[0]["id"], 188079)
+
+
+class BarridoDeStockTest(TestCase):
+    """
+    El comando completo. Los tres casos que importan son las guardas: que una
+    lectura fallida no escriba, que un apagón masivo aborte, y que el modo seco
+    no toque nada.
+    """
+
+    def setUp(self):
+        self.wc = patch("core.management.commands.sync_stock.wc_api").start()
+        self.bims = patch("core.management.commands.sync_stock.bims").start()
+        self.notify = patch("core.management.commands.sync_stock.notify").start()
+        self.addCleanup(patch.stopall)
+
+        # Un producto simple con SKU 13 y stock 5 en Woo.
+        self.wc.get_products.side_effect = [
+            [{"id": 100, "type": "simple", "sku": "13", "stock_quantity": 5}],
+            [],
+        ]
+        self.wc.get_variations.return_value = []
+        self._bims_devuelve({"13": "7"})
+
+    def _bims_devuelve(self, stock_por_id):
+        data = [
+            {
+                "Product": {
+                    "id": pid,
+                    "name": f"Producto {pid}",
+                    "stockable": True,
+                    "AvailabilityFull": [
+                        {"Availability": {"warehouse_id": "6", "total": total}}
+                    ],
+                }
+            }
+            for pid, total in stock_por_id.items()
+        ]
+        self.bims.get_products_with_stock.side_effect = [
+            {"status": "ok", "data": data},
+            {"status": "ok", "data": []},
+        ]
+
+    def _claves_avisadas(self):
+        return [c[0][0] for c in self.notify.call_args_list]
+
+    def test_en_seco_no_escribe_nada(self):
+        from django.core.management import call_command
+
+        with self.settings(STOCK_SYNC_ENABLED=False):
+            call_command("sync_stock", stdout=StringIO())
+
+        self.wc.update_product_stock.assert_not_called()
+
+    def test_con_aplicar_escribe_la_diferencia(self):
+        from django.core.management import call_command
+
+        with self.settings(STOCK_SYNC_ENABLED=True):
+            call_command("sync_stock", stdout=StringIO())
+
+        self.wc.update_product_stock.assert_called_once_with("100", 7.0)
+
+    def test_un_producto_que_bims_no_trajo_no_se_toca(self):
+        """La guarda 1: una lectura fallida no puede apagar el catálogo."""
+        from django.core.management import call_command
+
+        self.bims.get_products_with_stock.side_effect = [{"status": "ok", "data": []}]
+
+        with self.settings(STOCK_SYNC_ENABLED=True):
+            call_command("sync_stock", stdout=StringIO())
+
+        self.wc.update_product_stock.assert_not_called()
+
+    def test_una_pagina_de_bims_que_falla_no_apaga_nada(self):
+        from django.core.management import call_command
+
+        self.bims.get_products_with_stock.side_effect = requests.RequestException(
+            "BIMS caído"
+        )
+
+        with self.settings(STOCK_SYNC_ENABLED=True):
+            call_command("sync_stock", stdout=StringIO(), stderr=StringIO())
+
+        self.wc.update_product_stock.assert_not_called()
+        self.assertIn("stock_lectura_fallida", self._claves_avisadas())
+
+    def test_un_apagon_masivo_aborta_y_avisa(self):
+        """La guarda 2: seis productos a cero con tope 5 no se escribe."""
+        from django.core.management import call_command
+
+        self.wc.get_products.side_effect = [
+            [
+                {"id": 100 + i, "type": "simple", "sku": str(20 + i), "stock_quantity": 9}
+                for i in range(6)
+            ],
+            [],
+        ]
+        self._bims_devuelve({str(20 + i): "0" for i in range(6)})
+
+        with self.settings(STOCK_SYNC_ENABLED=True, STOCK_ZERO_GUARD=5):
+            call_command("sync_stock", stdout=StringIO(), stderr=StringIO())
+
+        self.wc.update_product_stock.assert_not_called()
+        self.assertIn("stock_apagon_masivo", self._claves_avisadas())
+
+    def test_muchas_subidas_no_disparan_la_guarda(self):
+        """El primer barrido enciende decenas de productos: es lo esperado."""
+        from django.core.management import call_command
+
+        self.wc.get_products.side_effect = [
+            [
+                {"id": 100 + i, "type": "simple", "sku": str(20 + i), "stock_quantity": 0}
+                for i in range(20)
+            ],
+            [],
+        ]
+        self._bims_devuelve({str(20 + i): "9" for i in range(20)})
+
+        with self.settings(STOCK_SYNC_ENABLED=True, STOCK_ZERO_GUARD=5):
+            call_command("sync_stock", stdout=StringIO())
+
+        self.assertEqual(self.wc.update_product_stock.call_count, 20)
+        self.assertNotIn("stock_apagon_masivo", self._claves_avisadas())
+
+    def test_un_producto_no_inventariable_se_ignora(self):
+        """Las entradas tienen `stockable: false` y quedan afuera solas."""
+        from django.core.management import call_command
+
+        self.bims.get_products_with_stock.side_effect = [
+            {
+                "status": "ok",
+                "data": [
+                    {
+                        "Product": {
+                            "id": "13",
+                            "name": "Ticket",
+                            "stockable": False,
+                            "AvailabilityFull": [
+                                {"Availability": {"warehouse_id": "6", "total": "0"}}
+                            ],
+                        }
+                    }
+                ],
+            },
+            {"status": "ok", "data": []},
+        ]
+
+        with self.settings(STOCK_SYNC_ENABLED=True):
+            call_command("sync_stock", stdout=StringIO())
+
+        self.wc.update_product_stock.assert_not_called()
+
+    def test_reporta_los_productos_de_bims_que_woo_no_tiene(self):
+        """
+        La spec dice que un producto de BIMS sin contraparte en Woo **se
+        reporta** y no se crea. Sin este reporte, el merch que existe en BIMS y
+        nunca se cargó en la web queda invisible para siempre.
+        """
+        from django.core.management import call_command
+
+        self._bims_devuelve({"13": "7", "999": "42"})
+
+        salida = StringIO()
+        with self.settings(STOCK_SYNC_ENABLED=False):
+            call_command("sync_stock", stdout=salida)
+
+        self.assertIn("sin contraparte", salida.getvalue())
+        self.assertIn("999", salida.getvalue())
+
+    def test_el_reporte_dice_de_que_deposito_salio_el_numero(self):
+        """Sin el desglose, el número publicado no se puede explicar después."""
+        from django.core.management import call_command
+
+        salida = StringIO()
+        with self.settings(STOCK_SYNC_ENABLED=False):
+            call_command("sync_stock", stdout=salida)
+
+        self.assertIn("dep 6", salida.getvalue())
+
+    def test_una_escritura_que_falla_no_frena_el_resto(self):
+        from django.core.management import call_command
+
+        self.wc.get_products.side_effect = [
+            [
+                {"id": 100, "type": "simple", "sku": "13", "stock_quantity": 5},
+                {"id": 101, "type": "simple", "sku": "14", "stock_quantity": 5},
+            ],
+            [],
+        ]
+        self._bims_devuelve({"13": "7", "14": "8"})
+        self.wc.update_product_stock.side_effect = [
+            requests.RequestException("Woo caído"),
+            {"id": 101},
+        ]
+
+        with self.settings(STOCK_SYNC_ENABLED=True):
+            call_command("sync_stock", stdout=StringIO(), stderr=StringIO())
+
+        self.assertEqual(self.wc.update_product_stock.call_count, 2)
