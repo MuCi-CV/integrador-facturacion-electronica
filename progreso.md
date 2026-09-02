@@ -149,7 +149,7 @@ fundraising va a cargar donaciones desde Krayin y esas nunca pasan por WooCommer
 | 6 | Worker + reaper | ✅ **hecha** | `55146bc` |
 | 7 | Reintentos por rama | ✅ **hecha** | `9e264b3` |
 | 8 | Alerta a Slack + corrección del logging | ✅ **hecha** | `a756906` |
-| 9 | 🚀 Despliegue 2 — el cambio de contrato | ⬜ | |
+| 9 | 🚀 Despliegue 2 — el cambio de contrato | ✅ **desplegado 2026-09-02 18:40 UTC** | `8ad502f` |
 
 **Tests:** 183 (base) → 186 (T1) → 193 (T2) → 201 (T4) → 209 (T5) → 217 (T6) → 228 (T7) → **241** (T8).
 
