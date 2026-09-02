@@ -10,7 +10,7 @@ import y hace login. Es la misma razón por la que `core/states.py` vive aparte.
 """
 
 import re
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, Optional, Tuple
 
 _SKU_NUMERICO = re.compile(r"^\d+$")
 
@@ -111,3 +111,44 @@ def stock_vendible(
     al volumen de venta: es una salida acumulada.
     """
     return sum(desglose_por_deposito(availability_full, depositos).values())
+
+
+SKU_SIN_VINCULO = "sin_vinculo"
+SKU_AMBIGUO = "ambiguo"
+SKU_DADO_DE_BAJA = "dado_de_baja"
+
+
+def resolver_bims_id(
+    sku_propio: Optional[str],
+    sku_padre: Optional[str],
+    hermanas_sin_sku: int,
+) -> Tuple[Optional[int], Optional[str]]:
+    """
+    El id de BIMS de un producto de Woo, o el motivo por el que no se puede.
+
+    Devuelve `(bims_id, None)` cuando hay vínculo y `(None, motivo)` cuando no.
+    `hermanas_sin_sku` es cuántas variaciones publicadas del mismo padre están
+    sin SKU propio, **contándose a sí misma**.
+
+    La herencia del padre es la semántica de WooCommerce, pero sólo vale cuando
+    la variación es la única sin SKU. Con varias, todas heredarían el mismo id de
+    BIMS y se escribiría el mismo stock N veces: inventario multiplicado.
+    """
+    try:
+        propio = bims_product_id(sku_propio)
+    except SkuDadoDeBaja:
+        return None, SKU_DADO_DE_BAJA
+    if propio is not None:
+        return propio, None
+
+    if hermanas_sin_sku > 1:
+        return None, SKU_AMBIGUO
+
+    try:
+        heredado = bims_product_id(sku_padre)
+    except SkuDadoDeBaja:
+        return None, SKU_DADO_DE_BAJA
+    if heredado is not None:
+        return heredado, None
+
+    return None, SKU_SIN_VINCULO

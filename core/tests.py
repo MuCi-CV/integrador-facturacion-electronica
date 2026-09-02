@@ -4438,3 +4438,72 @@ class StockVendibleTest(TestCase):
         ]
 
         self.assertEqual(stock_vendible(av, [6, 7]), 5.0)
+
+
+class HerenciaDeSkuTest(TestCase):
+    """
+    Heredar el SKU del padre es la semántica de WooCommerce
+    (`WC_Product_Variation::get_sku()` lo hace), así que no es un parche. Pero se
+    rompe con varias hermanas sin SKU: `Taza pequeña` tiene SKU 27 en el padre y
+    **9 variaciones sin SKU** —nueve diseños de la misma taza— y en BIMS el
+    producto 27 tiene UN stock. Heredar ahí escribiría el mismo número nueve
+    veces: inventario multiplicado por 9.
+
+    Medido el 2026-09-02: 323 variaciones tienen SKU propio, 32 padres tienen
+    exactamente una variación sin SKU, y 12 padres tienen varias (59
+    variaciones, con `Libros Ttklab` en 23).
+    """
+
+    def test_el_sku_propio_de_la_variacion_manda(self):
+        from core.stock import resolver_bims_id
+
+        bims_id, motivo = resolver_bims_id("13", "999", hermanas_sin_sku=1)
+
+        self.assertEqual(bims_id, 13)
+        self.assertIsNone(motivo)
+
+    def test_sin_sku_propio_y_unica_hermana_hereda_del_padre(self):
+        from core.stock import resolver_bims_id
+
+        bims_id, motivo = resolver_bims_id(None, "575", hermanas_sin_sku=1)
+
+        self.assertEqual(bims_id, 575)
+        self.assertIsNone(motivo)
+
+    def test_con_varias_hermanas_sin_sku_no_se_hereda(self):
+        """El caso `Taza pequeña`: heredar multiplicaría el stock por 9."""
+        from core.stock import SKU_AMBIGUO, resolver_bims_id
+
+        bims_id, motivo = resolver_bims_id(None, "27", hermanas_sin_sku=9)
+
+        self.assertIsNone(bims_id)
+        self.assertEqual(motivo, SKU_AMBIGUO)
+
+    def test_ni_la_variacion_ni_el_padre_tienen_sku(self):
+        from core.stock import SKU_SIN_VINCULO, resolver_bims_id
+
+        bims_id, motivo = resolver_bims_id(None, None, hermanas_sin_sku=1)
+
+        self.assertIsNone(bims_id)
+        self.assertEqual(motivo, SKU_SIN_VINCULO)
+
+    def test_un_producto_dado_de_baja_se_saltea_sin_frenar_el_barrido(self):
+        """
+        En el barrido, a diferencia de la facturación, una baja NO es un error:
+        se saltea y se cuenta. Frenar un barrido entero porque un producto está
+        de baja sería absurdo.
+        """
+        from core.stock import SKU_DADO_DE_BAJA, resolver_bims_id
+
+        bims_id, motivo = resolver_bims_id("7-19", None, hermanas_sin_sku=1)
+
+        self.assertIsNone(bims_id)
+        self.assertEqual(motivo, SKU_DADO_DE_BAJA)
+
+    def test_un_padre_dado_de_baja_no_se_hereda(self):
+        from core.stock import SKU_DADO_DE_BAJA, resolver_bims_id
+
+        bims_id, motivo = resolver_bims_id(None, "442-1", hermanas_sin_sku=1)
+
+        self.assertIsNone(bims_id)
+        self.assertEqual(motivo, SKU_DADO_DE_BAJA)
