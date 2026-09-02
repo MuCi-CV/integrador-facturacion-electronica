@@ -10,7 +10,7 @@ import y hace login. Es la misma razón por la que `core/states.py` vive aparte.
 """
 
 import re
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 _SKU_NUMERICO = re.compile(r"^\d+$")
 
@@ -152,3 +152,66 @@ def resolver_bims_id(
         return heredado, None
 
     return None, SKU_SIN_VINCULO
+
+
+class Cambio(NamedTuple):
+    """
+    Una escritura pendiente a WooCommerce.
+
+    `ruta_woo` es lo que va después de `products/`: `"100"` para un producto
+    simple y `"187056/variations/188079"` para una variación, porque WooCommerce
+    escribe las variaciones en un endpoint anidado.
+    """
+
+    woo_id: int
+    ruta_woo: str
+    bims_id: int
+    stock_actual: float
+    stock_nuevo: float
+    apaga: bool
+
+
+def calcular_cambios(candidatos: list, stock_por_bims_id: dict) -> List[Cambio]:
+    """
+    Las escrituras necesarias, y sólo ésas.
+
+    Un producto que **no está** en `stock_por_bims_id` no se toca: significa que
+    BIMS no lo devolvió, y eso es "no hay dato", no "el dato es cero". Es la
+    guarda que evita que una lectura fallida apague el catálogo público.
+    """
+    cambios = []
+
+    for candidato in candidatos:
+        bims_id = candidato["bims_id"]
+        if bims_id not in stock_por_bims_id:
+            continue
+
+        nuevo = float(stock_por_bims_id[bims_id])
+        actual = float(candidato["stock_actual"])
+        if nuevo == actual:
+            continue
+
+        cambios.append(
+            Cambio(
+                woo_id=candidato["woo_id"],
+                ruta_woo=candidato["ruta_woo"],
+                bims_id=bims_id,
+                stock_actual=actual,
+                stock_nuevo=nuevo,
+                apaga=nuevo <= 0 < actual,
+            )
+        )
+
+    return cambios
+
+
+def radio_excedido(cambios: Iterable[Cambio], tope: int) -> int:
+    """
+    Cuántos productos se apagarían, si eso pasa el tope. `0` si está dentro.
+
+    Sólo cuenta los que **apagan**: el primer barrido real va a encender decenas
+    de productos que hoy figuran agotados teniendo stock, y eso es el resultado
+    esperado, no una anomalía.
+    """
+    apagados = sum(1 for c in cambios if c.apaga)
+    return apagados if apagados > tope else 0

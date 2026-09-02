@@ -4507,3 +4507,113 @@ class HerenciaDeSkuTest(TestCase):
 
         self.assertIsNone(bims_id)
         self.assertEqual(motivo, SKU_DADO_DE_BAJA)
+
+
+class CalculoDeCambiosTest(TestCase):
+    """Sólo se escribe donde el número difiere, y no se apaga en masa."""
+
+    def test_solo_devuelve_los_que_cambian(self):
+        from core.stock import calcular_cambios
+
+        candidatos = [
+            {"woo_id": 100, "ruta_woo": "100", "bims_id": 13, "stock_actual": 5.0},
+            {"woo_id": 200, "ruta_woo": "200", "bims_id": 128, "stock_actual": 128.0},
+        ]
+
+        cambios = calcular_cambios(candidatos, {13: 7.0, 128: 128.0})
+
+        self.assertEqual(len(cambios), 1)
+        self.assertEqual(cambios[0].woo_id, 100)
+        self.assertEqual(cambios[0].stock_nuevo, 7.0)
+
+    def test_una_variacion_lleva_la_ruta_anidada(self):
+        """WooCommerce escribe una variación en `products/{padre}/variations/{id}`."""
+        from core.stock import calcular_cambios
+
+        candidatos = [
+            {
+                "woo_id": 188079,
+                "ruta_woo": "187056/variations/188079",
+                "bims_id": 575,
+                "stock_actual": 49.0,
+            }
+        ]
+
+        cambios = calcular_cambios(candidatos, {575: 16.0})
+
+        self.assertEqual(cambios[0].ruta_woo, "187056/variations/188079")
+
+    def test_no_escribe_un_producto_que_bims_no_devolvio(self):
+        """
+        Si BIMS no trajo ese producto, no hay dato: no se toca. Esta es la guarda
+        que evita que una lectura fallida apague el catálogo.
+        """
+        from core.stock import calcular_cambios
+
+        candidatos = [{"woo_id": 100, "ruta_woo": "100", "bims_id": 13, "stock_actual": 5.0}]
+
+        self.assertEqual(calcular_cambios(candidatos, {}), [])
+
+    def test_marca_los_que_apagan_la_venta(self):
+        from core.stock import calcular_cambios
+
+        candidatos = [
+            {"woo_id": 100, "ruta_woo": "100", "bims_id": 13, "stock_actual": 5.0},
+            {"woo_id": 200, "ruta_woo": "200", "bims_id": 14, "stock_actual": 0.0},
+        ]
+
+        cambios = calcular_cambios(candidatos, {13: 0.0, 14: 3.0})
+
+        apagados = [c for c in cambios if c.apaga]
+        self.assertEqual([c.woo_id for c in apagados], [100])
+
+    def test_una_diferencia_de_decimales_no_es_un_cambio(self):
+        """Woo guarda '5' y BIMS '5.0000000000000000': es el mismo número."""
+        from core.stock import calcular_cambios
+
+        candidatos = [{"woo_id": 100, "ruta_woo": "100", "bims_id": 13, "stock_actual": 5.0}]
+
+        self.assertEqual(calcular_cambios(candidatos, {13: 5.0}), [])
+
+
+class GuardaDeRadioTest(TestCase):
+    """
+    Si un barrido apagaría más de N productos de golpe, casi siempre es un
+    problema de la consulta o del depósito configurado, no que se haya vendido
+    todo.
+
+    N = 5 elegido con medición el 2026-09-02: hay 44 productos publicados con
+    stock > 0 en Woo (41 con SKU propio), y el ritmo real fue de 3 a 20 productos
+    DISTINTOS vendidos por día — pero eso es vendidos, no llegados a cero. En una
+    ventana de 15 minutos lo esperable es 0 o 1.
+    """
+
+    def _cambio(self, woo_id, apaga):
+        from core.stock import Cambio
+
+        return Cambio(
+            woo_id=woo_id, ruta_woo=str(woo_id), bims_id=woo_id, stock_actual=1.0,
+            stock_nuevo=0.0 if apaga else 9.0, apaga=apaga,
+        )
+
+    def test_apagar_pocos_esta_dentro_del_tope(self):
+        from core.stock import radio_excedido
+
+        cambios = [self._cambio(i, apaga=True) for i in range(3)]
+
+        self.assertEqual(radio_excedido(cambios, tope=5), 0)
+
+    def test_apagar_mas_que_el_tope_lo_excede(self):
+        from core.stock import radio_excedido
+
+        cambios = [self._cambio(i, apaga=True) for i in range(6)]
+
+        self.assertEqual(radio_excedido(cambios, tope=5), 6)
+
+    def test_las_subidas_no_cuentan_para_el_tope(self):
+        """El primer barrido va a ENCENDER decenas de productos: eso es correcto."""
+        from core.stock import radio_excedido
+
+        cambios = [self._cambio(i, apaga=False) for i in range(40)]
+
+        self.assertEqual(radio_excedido(cambios, tope=5), 0)
