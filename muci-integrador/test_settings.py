@@ -84,5 +84,10 @@ QUEUE_SILENCE_MINUTES = 10
 # Vacío a propósito: ningún test debe poder avisar a Slack de verdad. Los que
 # prueban el aviso lo sobreescriben con `self.settings(...)`.
 SLACK_WEBHOOK_URL = ""
+STOCK_WAREHOUSE_IDS = [6, 7]
+STOCK_ZERO_GUARD = 5
+# Los tests que prueban la escritura lo prenden con `self.settings(...)`.
+STOCK_SYNC_ENABLED = False
+STOCK_PAGE_SIZE = 100
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

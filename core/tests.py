@@ -4617,3 +4617,26 @@ class GuardaDeRadioTest(TestCase):
         cambios = [self._cambio(i, apaga=False) for i in range(40)]
 
         self.assertEqual(radio_excedido(cambios, tope=5), 0)
+
+
+class SettingsDeStockTest(TestCase):
+    """Los cuatro settings del barrido existen y tienen el tipo correcto."""
+
+    def test_los_settings_existen_con_su_tipo(self):
+        from django.conf import settings
+
+        self.assertIsInstance(settings.STOCK_WAREHOUSE_IDS, list)
+        self.assertTrue(all(isinstance(d, int) for d in settings.STOCK_WAREHOUSE_IDS))
+        self.assertIsInstance(settings.STOCK_ZERO_GUARD, int)
+        self.assertIsInstance(settings.STOCK_SYNC_ENABLED, bool)
+        self.assertIsInstance(settings.STOCK_PAGE_SIZE, int)
+
+    def test_la_pagina_no_puede_ser_grande(self):
+        """
+        Medido el 2026-09-02: `products/index.json?v_stock=1` con limit=500 NO
+        entra en los 30 s de TIMEOUT_LECTURA y da timeout. Y el reintento hereda
+        las sobras del presupuesto de 40 s, así que tampoco salva.
+        """
+        from django.conf import settings
+
+        self.assertLessEqual(settings.STOCK_PAGE_SIZE, 100)

@@ -245,6 +245,30 @@ QUEUE_SILENCE_MINUTES = int(config.get("QUEUE_SILENCE_MINUTES", 10))
 # el resto sigue funcionando igual.
 SLACK_WEBHOOK_URL = config.get("SLACK_WEBHOOK_URL", "")
 
+# ── Sincronización de stock BIMS → WooCommerce ───────────────────────────────
+# Depósitos de BIMS cuyo stock se considera vendible online. Medido el
+# 2026-09-02: TODO el stock del catálogo está en 6 (San Cosmos) y 7 (GIFTSHOP
+# MOVIL); Casa Matriz tiene 0 en los 427 productos inventariables. Va acá y no
+# en el código porque **WooCommerce no sabe en qué depósito vive nada, sólo BIMS
+# lo sabe**, así que esta política no se puede derivar y tiene que ser auditable.
+STOCK_WAREHOUSE_IDS = [
+    int(d) for d in config.get("STOCK_WAREHOUSE_IDS", "6,7").split(",") if d.strip()
+]
+# Cuántos productos puede apagar un solo barrido antes de abortar y avisar. Con
+# 44 productos con stock hoy, 5 está arriba del ruido (0 o 1 por ventana de 15
+# minutos) y abajo del desastre (41 apagables).
+STOCK_ZERO_GUARD = int(config.get("STOCK_ZERO_GUARD", 5))
+# En `false` el barrido calcula e informa pero NO escribe. Arranca APAGADO: el
+# primer barrido tiene que correr en seco y que alguien mire la lista.
+STOCK_SYNC_ENABLED = config.get("STOCK_SYNC_ENABLED", "false").lower() not in (
+    "false",
+    "0",
+    "",
+)
+# Tamaño de página contra BIMS. Con 500 la respuesta no entra en los 30 s de
+# TIMEOUT_LECTURA. No subirlo.
+STOCK_PAGE_SIZE = int(config.get("STOCK_PAGE_SIZE", 100))
+
 BIMS_URL = config.get("BIMS_URL")
 BIMS_FALLBACK_URL = config.get("BIMS_FALLBACK_URL")
 BIMS_API_KEY = config.get("BIMS_API_KEY")
