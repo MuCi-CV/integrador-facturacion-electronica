@@ -210,3 +210,28 @@ class RucCache(models.Model):
 
     def __str__(self):
         return f"{self.ruc} - {self.razon_social}"
+
+
+class AlertThrottle(models.Model):
+    """
+    Cuándo se avisó por última vez de cada clase de problema.
+
+    Vive en la base y no en `django.core.cache` a propósito: no hay `CACHES`
+    configurado, así que Django usa `LocMemCache`, que es **por proceso**. El
+    worker de la cola es un proceso nuevo cada minuto (cron), así que un throttle
+    en memoria arrancaría vacío en cada corrida y avisaría sesenta veces por hora
+    durante una caída de BIMS — exactamente lo que el throttle viene a evitar.
+    Es la misma razón por la que la cola vive en MariaDB.
+    """
+
+    clave = models.CharField(
+        verbose_name="Clase de alerta", max_length=64, unique=True, db_index=True
+    )
+    sent_at = models.DateTimeField(verbose_name="Último aviso enviado")
+
+    class Meta:
+        verbose_name = "Silencio de alerta"
+        verbose_name_plural = "Silencios de alerta"
+
+    def __str__(self):
+        return f"{self.clave} @ {self.sent_at:%Y-%m-%d %H:%M}"

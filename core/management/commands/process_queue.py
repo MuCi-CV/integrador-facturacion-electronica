@@ -15,6 +15,7 @@ from django.core.management.base import BaseCommand
 from django.db import models, transaction
 from django.utils.timezone import now
 
+from core.alerts import notify
 from core.models import FailedOrder
 from core.services import process_order
 from core.states import buscar_fila, upsert_state
@@ -39,8 +40,14 @@ class Command(BaseCommand):
                 f"Reaper: {recuperadas} fila(s) colgada(s) devuelta(s) a la cola."
             )
 
+        # La medición va ANTES de tomar el lote: después, las filas de esta
+        # pasada están en `PROCESSING` y la cola se ve vacía justo cuando más
+        # cargada está. Medirlo al final daba 0 pendientes con 15 esperando.
+        medicion = self._medir_cola()
+
         referencias = self._tomar()
         fallidas = 0
+        agotadas = []
         for referencia in referencias:
             try:
                 process_order(order_id=referencia)
@@ -50,7 +57,8 @@ class Command(BaseCommand):
                 # reintento la rescataría sólo el reaper, diez minutos después.
                 fallidas += 1
                 self.stderr.write(f"Orden {referencia} quedó sin facturar: {e}")
-                self._schedule_retry(referencia)
+                if self._schedule_retry(referencia):
+                    agotadas.append(str(referencia))
 
         if referencias:
             self.stdout.write(
@@ -66,6 +74,8 @@ class Command(BaseCommand):
                 f"Metas en WooCommerce: {reparadas} anotada(s), "
                 f"{ya_estaban} ya estaba(n)."
             )
+
+        self._avisar(agotadas, medicion)
 
     def _reap_stale(self) -> int:
         """
@@ -110,7 +120,7 @@ class Command(BaseCommand):
         # `restart` del despliegue, que tienen `external_reference` en NULL.
         return [str(f.external_reference or f.order_id) for f in filas]
 
-    def _schedule_retry(self, referencia: str) -> None:
+    def _schedule_retry(self, referencia: str) -> bool:
         """
         Un fallo contra BIMS espera, y a los cinco intentos deja de insistir.
 
@@ -124,7 +134,7 @@ class Command(BaseCommand):
         # no se encontrarían y se quedarían tomadas sin contar el intento.
         fila = buscar_fila(referencia)
         if fila is None:
-            return
+            return False
 
         intentos = (fila.bims_attempts or 0) + 1
         if intentos >= MAX_BIMS_ATTEMPTS:
@@ -142,6 +152,7 @@ class Command(BaseCommand):
             claimed_at=None,
             **campos,
         )
+        return campos["status"] == FailedOrder.FAILED
 
     def _repair_woo_metas(self):
         """
@@ -186,3 +197,71 @@ class Command(BaseCommand):
             upsert_state(referencia, woo_meta_ok=True)
 
         return reparadas, ya_estaban
+
+    def _medir_cola(self):
+        """
+        Profundidad de la cola y filas vencidas que no avanzan, al empezar la
+        pasada.
+
+        `PROCESSING` cuenta como profundidad: son transacciones que todavía no se
+        facturaron. Al medirse antes de `_tomar`, las que están ahí son las que
+        dejó una pasada anterior, no las de esta.
+        """
+        profundidad = FailedOrder.objects.filter(
+            status__in=(FailedOrder.PENDING, FailedOrder.PROCESSING)
+        ).count()
+
+        limite = now() - timedelta(minutes=settings.QUEUE_SILENCE_MINUTES)
+        estancadas = (
+            FailedOrder.objects.filter(
+                status=FailedOrder.PENDING, updated_at__lt=limite
+            )
+            .filter(
+                models.Q(bims_next_attempt__isnull=True)
+                | models.Q(bims_next_attempt__lte=now())
+            )
+            .count()
+        )
+        return profundidad, estancadas
+
+    def _avisar(self, agotadas: List[str], medicion) -> None:
+        """
+        Los tres disparadores, al final de la pasada.
+
+        ⚠️ **Ninguno detecta que el cron esté muerto.** El plan atribuía eso al
+        tercero, pero es imposible desde acá: si el cron no corre, este código no
+        corre y no avisa nada. Un latido de verdad tiene que vivir afuera del
+        cron —un chequeo externo que mire la última corrida— y queda fuera del
+        alcance de esta tarea. Lo que sí detecta el tercero es que la cola no
+        avanza aunque el worker esté corriendo, que es un problema distinto y
+        también real.
+
+        Avisar es lo último de `handle` y va sin `try`: `notify` es fail-safe por
+        dentro, así que un Slack caído no puede tocar la facturación.
+        """
+        if agotadas:
+            notify(
+                "reintentos_agotados",
+                f"⛔ {len(agotadas)} orden(es) agotaron sus {MAX_BIMS_ATTEMPTS} "
+                f"intentos contra BIMS y quedaron sin facturar: "
+                f"{', '.join(agotadas)}. Ya no se reintentan solas.",
+            )
+
+        profundidad, estancadas = medicion
+
+        if profundidad >= settings.QUEUE_ALERT_THRESHOLD:
+            notify(
+                "cola_larga",
+                f"⚠️ La cola de facturación tiene {profundidad} transacción(es) "
+                f"pendiente(s), por encima del umbral de "
+                f"{settings.QUEUE_ALERT_THRESHOLD}. El worker no da abasto o BIMS "
+                f"no está contestando.",
+            )
+
+        if estancadas:
+            notify(
+                "cola_estancada",
+                f"⚠️ {estancadas} transacción(es) llevan más de "
+                f"{settings.QUEUE_SILENCE_MINUTES} minutos vencidas y sin avanzar. "
+                f"La cola no se está vaciando.",
+            )

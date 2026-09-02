@@ -234,6 +234,16 @@ WOOCOMMERCE_VERIFY_SSL = config.get("WOOCOMMERCE_VERIFY_SSL", "true").lower() no
 # fila en PROCESSING. Tiene que ser holgadamente mayor que lo que tarda una orden
 # en facturarse: si se queda corto, el reaper le roba la fila a un worker vivo.
 QUEUE_REAPER_MINUTES = int(config.get("QUEUE_REAPER_MINUTES", 10))
+# Cuántas filas PENDING hacen falta para avisar a Slack. La cola normal se vacía
+# en la pasada siguiente, así que un número sostenido por encima de esto
+# significa que el worker no da abasto o que BIMS no contesta.
+QUEUE_ALERT_THRESHOLD = int(config.get("QUEUE_ALERT_THRESHOLD", 10))
+# Minutos que una fila vencida puede quedarse sin avanzar antes de avisar. NO
+# detecta que el cron esté muerto: si el cron no corre, este código tampoco.
+QUEUE_SILENCE_MINUTES = int(config.get("QUEUE_SILENCE_MINUTES", 10))
+# Webhook de Slack para los avisos de operación. Vacío = no se avisa a nadie, y
+# el resto sigue funcionando igual.
+SLACK_WEBHOOK_URL = config.get("SLACK_WEBHOOK_URL", "")
 
 BIMS_URL = config.get("BIMS_URL")
 BIMS_FALLBACK_URL = config.get("BIMS_FALLBACK_URL")

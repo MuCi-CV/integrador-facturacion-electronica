@@ -443,7 +443,14 @@ class BimsApi:
                 last_error_details = (
                     f"Error in request to {url}. Attempt {attempt} of {max_retries}. Error: {str(e)}"
                 )
-                logging.error(last_error_details)
+                # `warning` y no `error`: `settings.py` monta
+                # `LoggingIntegration(event_level=logging.ERROR)`, así que cada
+                # `error` es un evento de Sentry. Un reintento transitorio no es
+                # un bug de código, y loguearlo como error generaba 3 o 4 eventos
+                # por orden lenta, indistinguibles de un bug real. La falla que
+                # SÍ importa —agotar los reintentos— la reporta quien atrapa el
+                # `BimsTransientError` final, y ahora también la alerta a Slack.
+                logging.warning(last_error_details)
                 if attempt < max_retries:
                     time.sleep(retry_delay)
                 continue

@@ -79,5 +79,10 @@ RUC_API_URL = "http://turuc.test.local"
 BASE_URL = "http://localhost"
 POS_LOOKUP_TOKEN = "test-token"
 QUEUE_REAPER_MINUTES = 10
+QUEUE_ALERT_THRESHOLD = 10
+QUEUE_SILENCE_MINUTES = 10
+# Vacío a propósito: ningún test debe poder avisar a Slack de verdad. Los que
+# prueban el aviso lo sobreescriben con `self.settings(...)`.
+SLACK_WEBHOOK_URL = ""
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"

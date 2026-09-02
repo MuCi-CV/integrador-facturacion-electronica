@@ -1,5 +1,6 @@
 import email
 import json
+import time
 import requests
 from django.db import IntegrityError, transaction
 from types import SimpleNamespace
@@ -4003,3 +4004,240 @@ class ReparacionDeMetaEnWooTest(TestCase):
 
         mock_wc.get_order.assert_not_called()
         mock_wc.update_order_meta.assert_not_called()
+
+
+class AlertasSlackTest(TestCase):
+    """
+    Sin esta pieza, el sub-proyecto A **empeora** el sistema: cambia una falla
+    ruidosa (el webhook de Woo apagándose) por una invisible (la cola creciendo
+    sin que nadie mire). Spec §7.3.
+
+    Sentry queda para bugs de código; Slack para transacciones que no llegaron.
+    """
+
+    def test_sin_webhook_configurado_no_postea_ni_revienta(self):
+        from core.alerts import notify
+
+        with self.settings(SLACK_WEBHOOK_URL=""):
+            with patch("core.alerts.requests.post") as mock_post:
+                notify("cola_larga", "hola")
+
+        mock_post.assert_not_called()
+
+    def test_avisa_a_slack_con_el_texto(self):
+        from core.alerts import notify
+
+        with self.settings(SLACK_WEBHOOK_URL="https://hooks.slack.test/x"):
+            with patch("core.alerts.requests.post") as mock_post:
+                notify("cola_larga", "La cola tiene 15 pendientes")
+
+        mock_post.assert_called_once()
+        self.assertEqual(
+            mock_post.call_args[1]["json"]["text"], "La cola tiene 15 pendientes"
+        )
+        self.assertIn("timeout", mock_post.call_args[1])
+
+    def test_el_throttle_sobrevive_a_un_proceso_nuevo(self):
+        """
+        El throttle NO puede vivir en memoria. El worker es un proceso nuevo cada
+        minuto (cron), así que un `cache.add` con `LocMemCache` —que es lo que
+        hay configurado— arrancaría vacío en cada corrida y avisaría 60 veces por
+        hora durante una caída de BIMS, que es justo lo que viene a evitar.
+        """
+        from django.core.cache import cache
+
+        from core.alerts import notify
+
+        with self.settings(SLACK_WEBHOOK_URL="https://hooks.slack.test/x"):
+            with patch("core.alerts.requests.post") as mock_post:
+                notify("cola_larga", "primera")
+                # Simula el proceso siguiente del cron: memoria en blanco.
+                cache.clear()
+                notify("cola_larga", "segunda")
+
+        self.assertEqual(mock_post.call_count, 1)
+
+    def test_claves_distintas_no_se_pisan(self):
+        from core.alerts import notify
+
+        with self.settings(SLACK_WEBHOOK_URL="https://hooks.slack.test/x"):
+            with patch("core.alerts.requests.post") as mock_post:
+                notify("cola_larga", "una")
+                notify("reintentos_agotados", "otra")
+
+        self.assertEqual(mock_post.call_count, 2)
+
+    def test_pasado_el_silencio_vuelve_a_avisar(self):
+        from datetime import timedelta
+
+        from django.utils.timezone import now
+
+        from core.alerts import THROTTLE_MINUTES, AlertThrottle, notify
+
+        with self.settings(SLACK_WEBHOOK_URL="https://hooks.slack.test/x"):
+            with patch("core.alerts.requests.post") as mock_post:
+                notify("cola_larga", "una")
+                AlertThrottle.objects.filter(clave="cola_larga").update(
+                    sent_at=now() - timedelta(minutes=THROTTLE_MINUTES + 1)
+                )
+                notify("cola_larga", "otra")
+
+        self.assertEqual(mock_post.call_count, 2)
+
+    def test_un_fallo_al_avisar_no_rompe_nada(self):
+        """Avisar es best-effort: si Slack se cae, la facturación sigue."""
+        from core.alerts import notify
+
+        with self.settings(SLACK_WEBHOOK_URL="https://hooks.slack.test/x"):
+            with patch(
+                "core.alerts.requests.post",
+                side_effect=requests.RequestException("Slack caído"),
+            ):
+                notify("cola_larga", "hola")  # no debe propagar
+
+
+class DisparadoresDeAlertaTest(TestCase):
+    """Los tres disparadores que el worker evalúa al final de cada pasada."""
+
+    def _pendientes(self, cuantas, **campos):
+        from core.states import upsert_state
+
+        for i in range(1, cuantas + 1):
+            upsert_state(i, status=FailedOrder.PENDING, **campos)
+
+    def setUp(self):
+        parche = patch("core.management.commands.process_queue.wc_api")
+        self.mock_wc = parche.start()
+        self.addCleanup(parche.stop)
+        self.mock_wc.get_order.return_value = {"meta_data": []}
+
+        aviso = patch("core.management.commands.process_queue.notify")
+        self.mock_notify = aviso.start()
+        self.addCleanup(aviso.stop)
+
+    def _claves_avisadas(self):
+        return [c[0][0] for c in self.mock_notify.call_args_list]
+
+    @patch("core.management.commands.process_queue.process_order")
+    def test_avisa_cuando_la_cola_pasa_el_umbral(self, _mock_process):
+        from django.core.management import call_command
+
+        self._pendientes(15)
+
+        with self.settings(QUEUE_ALERT_THRESHOLD=10):
+            call_command("process_queue")
+
+        self.assertIn("cola_larga", self._claves_avisadas())
+
+    @patch("core.management.commands.process_queue.process_order")
+    def test_una_cola_corta_no_avisa(self, _mock_process):
+        from django.core.management import call_command
+
+        self._pendientes(2)
+
+        with self.settings(QUEUE_ALERT_THRESHOLD=10):
+            call_command("process_queue")
+
+        self.assertNotIn("cola_larga", self._claves_avisadas())
+
+    @patch(
+        "core.management.commands.process_queue.process_order",
+        side_effect=ValueError("BIMS caído"),
+    )
+    def test_avisa_cuando_una_orden_agota_sus_reintentos(self, _mock_process):
+        from django.core.management import call_command
+
+        self._pendientes(1, bims_attempts=4)
+
+        call_command("process_queue")
+
+        self.assertIn("reintentos_agotados", self._claves_avisadas())
+        texto = [
+            c[0][1]
+            for c in self.mock_notify.call_args_list
+            if c[0][0] == "reintentos_agotados"
+        ][0]
+        self.assertIn("1", texto)
+
+    @patch(
+        "core.management.commands.process_queue.process_order",
+        side_effect=ValueError("BIMS caído"),
+    )
+    def test_un_fallo_que_todavia_reintenta_no_avisa_de_agotados(self, _mock_process):
+        from django.core.management import call_command
+
+        self._pendientes(1)
+
+        call_command("process_queue")
+
+        self.assertNotIn("reintentos_agotados", self._claves_avisadas())
+
+    @patch("core.management.commands.process_queue.process_order")
+    def test_avisa_cuando_hay_filas_vencidas_que_no_avanzan(self, _mock_process):
+        """
+        Detecta que la cola NO avanza, que no es lo mismo que "el cron está
+        muerto": si el cron no corre, este código no corre y no avisa nada. Eso
+        necesita un latido externo y queda fuera de alcance.
+        """
+        from datetime import timedelta
+
+        from django.core.management import call_command
+        from django.utils.timezone import now
+
+        from core.states import upsert_state
+
+        fila = upsert_state(1, status=FailedOrder.PENDING)
+        FailedOrder.objects.filter(pk=fila.pk).update(
+            updated_at=now() - timedelta(minutes=30)
+        )
+
+        with self.settings(QUEUE_SILENCE_MINUTES=10):
+            call_command("process_queue")
+
+        self.assertIn("cola_estancada", self._claves_avisadas())
+
+    @patch("core.management.commands.process_queue.process_order")
+    def test_una_fila_recien_encolada_no_dispara_estancamiento(self, _mock_process):
+        from django.core.management import call_command
+
+        self._pendientes(1)
+
+        with self.settings(QUEUE_SILENCE_MINUTES=10):
+            call_command("process_queue")
+
+        self.assertNotIn("cola_estancada", self._claves_avisadas())
+
+
+class ReintentosTransitoriosFueraDeSentryTest(TestCase):
+    """
+    `settings.py` usa `LoggingIntegration(event_level=logging.ERROR)`, así que
+    **cada `logger.error()` es un evento de Sentry**. El reintento transitorio de
+    `bims.py` loguea uno por intento: una orden lenta generaba 3 o 4 eventos
+    indistinguibles de un bug de código, y así se pierde la herramienta.
+    """
+
+    @patch("core.bims.time.sleep")
+    def test_un_reintento_transitorio_loguea_warning_y_no_error(self, _mock_sleep):
+        api = BimsApi.__new__(BimsApi)
+        api.session = MagicMock()
+        api.base_url = "https://bims.test/api"
+        api.fallback_url = None
+        api.sid = "sid"
+        api.api_key = None
+
+        with patch.object(
+            api, "_request_with_relogin", side_effect=BimsTransientError("timeout")
+        ):
+            with self.assertLogs(level="WARNING") as capturado:
+                with self.assertRaises(BimsTransientError):
+                    api._retry_loop(
+                        api.session.get,
+                        "https://bims.test/api/sales/",
+                        max_retries=2,
+                        retry_delay=0,
+                        limite=time.monotonic() + 30,
+                    )
+
+        niveles = {r.levelname for r in capturado.records}
+        self.assertIn("WARNING", niveles)
+        self.assertNotIn("ERROR", niveles)
