@@ -62,7 +62,7 @@ Hoy `core/services.py:424` hace `int(product.get("sku", 0))` y revienta con `Val
   - `core.stock.SkuDadoDeBaja(Exception)` — se levanta cuando el SKU no es numérico.
   - `core.stock.bims_product_id(sku: Optional[str]) -> Optional[int]` — devuelve el id de BIMS, `None` si no hay SKU o es `"0"`, y **levanta `SkuDadoDeBaja`** si el SKU tiene forma de baja.
 
-- [ ] **Step 1: Escribir los tests que fallan**
+- [x] **Step 1: Escribir los tests que fallan**
 
 Agregar al final de `core/tests.py`:
 
@@ -158,13 +158,13 @@ class FacturarConSkuDadoDeBajaTest(TestCase):
         mock_bims.create_sale.assert_not_called()
 ```
 
-- [ ] **Step 2: Correr y verificar que fallan**
+- [x] **Step 2: Correr y verificar que fallan**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core.tests.SkuABimsIdTest core.tests.FacturarConSkuDadoDeBajaTest --settings=muci-integrador.test_settings -v 2 )`
 
 Expected: FAIL con `ModuleNotFoundError: No module named 'core.stock'` en los primeros, y en el último un `ValueError: invalid literal for int()` cuyo mensaje **no** contiene "baja".
 
-- [ ] **Step 3: Crear `core/stock.py` con la función compartida**
+- [x] **Step 3: Crear `core/stock.py` con la función compartida**
 
 ```python
 """
@@ -220,7 +220,7 @@ def bims_product_id(sku: Optional[str]) -> Optional[int]:
     return valor or None
 ```
 
-- [ ] **Step 4: Que `build_sale_products` use la función compartida**
+- [x] **Step 4: Que `build_sale_products` use la función compartida**
 
 En `core/services.py`, reemplazar el bloque que va desde `if product.get("sku") == "":` hasta el `continue` del `bims_id == 0` por:
 
@@ -247,13 +247,13 @@ from core.stock import bims_product_id
 
 ⚠️ `core/stock.py` no debe importar `core.services` ni `core.bims`: `bims.py` instancia `BimsApi()` en el import y hace login. Es la misma razón por la que `core/states.py` vive aparte.
 
-- [ ] **Step 5: Correr los tests**
+- [x] **Step 5: Correr los tests**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings )`
 
 Expected: **247 OK** (241 + 6 nuevos).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add core/stock.py core/services.py core/tests.py
@@ -285,7 +285,7 @@ Carlos- pero el motivo se entiende desde el admin."
   - `core.stock.stock_vendible(availability_full: Optional[list], depositos: Iterable[int]) -> float`
   - `core.stock.desglose_por_deposito(availability_full: Optional[list], depositos: Iterable[int]) -> Dict[int, float]` — el aporte de cada depósito habilitado. La spec **exige** que la auditoría publique este desglose: como WooCommerce no sabe en qué depósito vive nada, sin él el número publicado no se puede explicar después.
 
-- [ ] **Step 1: Escribir los tests que fallan**
+- [x] **Step 1: Escribir los tests que fallan**
 
 ```python
 class StockVendibleTest(TestCase):
@@ -394,13 +394,13 @@ class StockVendibleTest(TestCase):
         self.assertEqual(stock_vendible(av, [6, 7]), 5.0)
 ```
 
-- [ ] **Step 2: Correr y verificar que fallan**
+- [x] **Step 2: Correr y verificar que fallan**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core.tests.StockVendibleTest --settings=muci-integrador.test_settings -v 2 )`
 
 Expected: FAIL con `ImportError: cannot import name 'stock_vendible' from 'core.stock'`.
 
-- [ ] **Step 3: Implementar `stock_vendible`**
+- [x] **Step 3: Implementar `stock_vendible`**
 
 Agregar a `core/stock.py`:
 
@@ -466,13 +466,13 @@ def desglose_por_deposito(
 
 Y agregar al import de `typing`: `from typing import Dict, Iterable, Optional`.
 
-- [ ] **Step 4: Correr los tests**
+- [x] **Step 4: Correr los tests**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings )`
 
 Expected: **255 OK**.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add core/stock.py core/tests.py
@@ -505,7 +505,7 @@ De la spec: el nivel del vínculo no es uniforme. En los juguetes el SKU está e
   - `core.stock.SKU_AMBIGUO`, `core.stock.SKU_SIN_VINCULO`, `core.stock.SKU_DADO_DE_BAJA` — constantes `str` para el motivo del descarte.
   - `core.stock.resolver_bims_id(sku_propio: Optional[str], sku_padre: Optional[str], hermanas_sin_sku: int) -> Tuple[Optional[int], Optional[str]]` — devuelve `(bims_id, motivo_del_descarte)`. Exactamente uno de los dos es `None`.
 
-- [ ] **Step 1: Escribir los tests que fallan**
+- [x] **Step 1: Escribir los tests que fallan**
 
 ```python
 class HerenciaDeSkuTest(TestCase):
@@ -577,13 +577,13 @@ class HerenciaDeSkuTest(TestCase):
         self.assertEqual(motivo, SKU_DADO_DE_BAJA)
 ```
 
-- [ ] **Step 2: Correr y verificar que fallan**
+- [x] **Step 2: Correr y verificar que fallan**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core.tests.HerenciaDeSkuTest --settings=muci-integrador.test_settings -v 2 )`
 
 Expected: FAIL con `ImportError: cannot import name 'resolver_bims_id'`.
 
-- [ ] **Step 3: Implementar `resolver_bims_id`**
+- [x] **Step 3: Implementar `resolver_bims_id`**
 
 Agregar a `core/stock.py`:
 
@@ -631,13 +631,13 @@ def resolver_bims_id(
 
 Y agregar `Tuple` al import: `from typing import Iterable, Optional, Tuple`.
 
-- [ ] **Step 4: Correr los tests**
+- [x] **Step 4: Correr los tests**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings )`
 
 Expected: **261 OK**.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add core/stock.py core/tests.py
@@ -671,7 +671,7 @@ motivo propio, porque en el barrido una baja no es un error."
 
 Un `candidato` es un dict con `woo_id: int`, `ruta_woo: str`, `bims_id: int` y `stock_actual: float`.
 
-- [ ] **Step 1: Escribir los tests que fallan**
+- [x] **Step 1: Escribir los tests que fallan**
 
 ```python
 class CalculoDeCambiosTest(TestCase):
@@ -784,13 +784,13 @@ class GuardaDeRadioTest(TestCase):
         self.assertEqual(radio_excedido(cambios, tope=5), 0)
 ```
 
-- [ ] **Step 2: Correr y verificar que fallan**
+- [x] **Step 2: Correr y verificar que fallan**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core.tests.CalculoDeCambiosTest core.tests.GuardaDeRadioTest --settings=muci-integrador.test_settings -v 2 )`
 
 Expected: FAIL con `ImportError: cannot import name 'calcular_cambios'`.
 
-- [ ] **Step 3: Implementar el cálculo y la guarda**
+- [x] **Step 3: Implementar el cálculo y la guarda**
 
 Agregar a `core/stock.py`:
 
@@ -862,13 +862,13 @@ def radio_excedido(cambios: Iterable[Cambio], tope: int) -> int:
 
 Y completar el import: `from typing import Iterable, List, NamedTuple, Optional, Tuple`.
 
-- [ ] **Step 4: Correr los tests**
+- [x] **Step 4: Correr los tests**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings )`
 
 Expected: **269 OK**.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add core/stock.py core/tests.py
@@ -896,7 +896,7 @@ guarda justo cuando el barrido esta haciendo bien su trabajo."
 **Interfaces:**
 - Produces: `settings.STOCK_WAREHOUSE_IDS: List[int]`, `settings.STOCK_ZERO_GUARD: int`, `settings.STOCK_SYNC_ENABLED: bool`, `settings.STOCK_PAGE_SIZE: int`
 
-- [ ] **Step 1: Escribir el test que falla**
+- [x] **Step 1: Escribir el test que falla**
 
 ```python
 class SettingsDeStockTest(TestCase):
@@ -922,13 +922,13 @@ class SettingsDeStockTest(TestCase):
         self.assertLessEqual(settings.STOCK_PAGE_SIZE, 100)
 ```
 
-- [ ] **Step 2: Correr y verificar que falla**
+- [x] **Step 2: Correr y verificar que falla**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core.tests.SettingsDeStockTest --settings=muci-integrador.test_settings -v 2 )`
 
 Expected: FAIL con `AttributeError: 'Settings' object has no attribute 'STOCK_WAREHOUSE_IDS'`.
 
-- [ ] **Step 3: Agregar los settings**
+- [x] **Step 3: Agregar los settings**
 
 En `muci-integrador/settings.py`, después del bloque de `QUEUE_*`:
 
@@ -989,13 +989,13 @@ En `.env.example`, después del bloque de la cola:
 #STOCK_PAGE_SIZE=100
 ```
 
-- [ ] **Step 4: Correr los tests**
+- [x] **Step 4: Correr los tests**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings )`
 
 Expected: **271 OK**.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add muci-integrador/settings.py muci-integrador/test_settings.py .env.example core/tests.py
@@ -1024,7 +1024,7 @@ respuesta no entra en los 30 s de TIMEOUT_LECTURA."
 **Interfaces:**
 - Produces: `BimsApi.get_products_with_stock(self, limit: int, offset: int) -> dict` — devuelve el cuerpo crudo de la respuesta.
 
-- [ ] **Step 1: Escribir los tests que fallan**
+- [x] **Step 1: Escribir los tests que fallan**
 
 ```python
 class LecturaDeStockDeBimsTest(TestCase):
@@ -1061,13 +1061,13 @@ class LecturaDeStockDeBimsTest(TestCase):
         self.assertTrue(url.endswith("/products/index.json"), url)
 ```
 
-- [ ] **Step 2: Correr y verificar que fallan**
+- [x] **Step 2: Correr y verificar que fallan**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core.tests.LecturaDeStockDeBimsTest --settings=muci-integrador.test_settings -v 2 )`
 
 Expected: FAIL con `AttributeError: 'BimsApi' object has no attribute 'get_products_with_stock'`.
 
-- [ ] **Step 3: Implementar el método**
+- [x] **Step 3: Implementar el método**
 
 Agregar a `core/bims.py`, junto a `get_contacts`:
 
@@ -1096,13 +1096,13 @@ Agregar a `core/bims.py`, junto a `get_contacts`:
         return self._retry_request(self.session.get, url, params=params)
 ```
 
-- [ ] **Step 4: Correr los tests**
+- [x] **Step 4: Correr los tests**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings )`
 
 Expected: **273 OK**.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add core/bims.py core/tests.py
@@ -1131,7 +1131,7 @@ orden estable."
   - `WooCommerceAPI.get_variations(self, parent_id, **kwargs) -> list`
   - `WooCommerceAPI.update_product_stock(self, id, cantidad: float) -> dict`
 
-- [ ] **Step 1: Escribir los tests que fallan**
+- [x] **Step 1: Escribir los tests que fallan**
 
 ```python
 class EscrituraDeStockEnWooTest(TestCase):
@@ -1200,13 +1200,13 @@ class EscrituraDeStockEnWooTest(TestCase):
         self.assertEqual(variaciones[0]["id"], 188079)
 ```
 
-- [ ] **Step 2: Correr y verificar que fallan**
+- [x] **Step 2: Correr y verificar que fallan**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core.tests.EscrituraDeStockEnWooTest --settings=muci-integrador.test_settings -v 2 )`
 
 Expected: FAIL con `AttributeError: 'WooCommerceAPI' object has no attribute 'update_product_stock'`.
 
-- [ ] **Step 3: Implementar los dos métodos**
+- [x] **Step 3: Implementar los dos métodos**
 
 Agregar a `core/woocommerce.py`, después de `get_product`:
 
@@ -1251,13 +1251,13 @@ Agregar a `core/woocommerce.py`, después de `get_product`:
 
 ⚠️ **El parámetro `id` recibe la ruta relativa, no sólo un número.** WooCommerce escribe una variación en `products/{padre}/variations/{id}`, así que el llamador pasa `"100"` para un producto simple y `"187056/variations/188079"` para una variación. La f-string `products/{id}` compone bien las dos, y es el campo `ruta_woo` del `Cambio` de la Task 4.
 
-- [ ] **Step 4: Correr los tests**
+- [x] **Step 4: Correr los tests**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings )`
 
 Expected: **278 OK**.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add core/woocommerce.py core/tests.py
@@ -1287,7 +1287,7 @@ de no vivir dentro de WordPress, y es barato."
 - Consumes: todo lo anterior.
 - Produces: el comando `sync_stock`, con flag `--aplicar` que fuerza la escritura aunque `STOCK_SYNC_ENABLED` esté en `false`, y `--seco` que la impide aunque esté en `true`.
 
-- [ ] **Step 1: Escribir los tests que fallan**
+- [x] **Step 1: Escribir los tests que fallan**
 
 ```python
 class BarridoDeStockTest(TestCase):
@@ -1484,13 +1484,13 @@ class BarridoDeStockTest(TestCase):
         self.assertEqual(self.wc.update_product_stock.call_count, 2)
 ```
 
-- [ ] **Step 2: Correr y verificar que fallan**
+- [x] **Step 2: Correr y verificar que fallan**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core.tests.BarridoDeStockTest --settings=muci-integrador.test_settings -v 2 )`
 
 Expected: FAIL con `CommandError: Unknown command: 'sync_stock'`.
 
-- [ ] **Step 3: Implementar el comando**
+- [x] **Step 3: Implementar el comando**
 
 Crear `core/management/commands/sync_stock.py`:
 
@@ -1791,13 +1791,13 @@ class Command(BaseCommand):
             self.stdout.write(f"  {cuantos:>4}  {etiquetas.get(motivo, motivo)}")
 ```
 
-- [ ] **Step 4: Correr los tests**
+- [x] **Step 4: Correr los tests**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings )`
 
 Expected: **288 OK**.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add core/management/commands/sync_stock.py core/stock.py core/tests.py
@@ -1831,7 +1831,7 @@ nada: sin ese registro, el numero publicado no se puede explicar despues."
 - Delete: `core/stock_sync_rescatado.py`, `core/management/commands/syncstock.py`
 - Modify: `docs/superpowers/specs/2026-09-02-sincronizacion-stock-bims-design.md` (marcar implementado)
 
-- [ ] **Step 1: Crear el envoltorio del cron**
+- [x] **Step 1: Crear el envoltorio del cron**
 
 Crear `sync-stock.sh` con permiso de ejecución:
 
@@ -1864,12 +1864,12 @@ exec /usr/bin/flock -n /var/lock/sync-stock.lock \
 
 Run: `chmod +x sync-stock.sh`
 
-- [ ] **Step 2: Verificar que el script es ejecutable en git**
+- [x] **Step 2: Verificar que el script es ejecutable en git**
 
 Run: `git ls-files -s sync-stock.sh`
 Expected: modo `100755`. Si dice `100644`, el cron no va a poder ejecutarlo: `chmod +x` y volver a agregarlo.
 
-- [ ] **Step 3: Borrar el código rescatado**
+- [x] **Step 3: Borrar el código rescatado**
 
 ```bash
 git rm core/stock_sync_rescatado.py core/management/commands/syncstock.py
@@ -1877,7 +1877,7 @@ git rm core/stock_sync_rescatado.py core/management/commands/syncstock.py
 
 Ya cumplió su función: era referencia para comparar, y la comparación está escrita en la spec.
 
-- [ ] **Step 4: Correr la suite completa**
+- [x] **Step 4: Correr la suite completa**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings )`
 
@@ -1886,12 +1886,12 @@ Expected: **288 OK**. Y verificar que nadie importaba lo borrado:
 Run: `grep -rn "stock_sync_rescatado\|syncstock" --include=*.py core/ muci-integrador/`
 Expected: sin resultados.
 
-- [ ] **Step 5: Verificar que ningún test sale a la red**
+- [x] **Step 5: Verificar que ningún test sale a la red**
 
 Run: `( ulimit -v 6291456; .venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings 2>&1 | grep -ciE "name resolution|HTTPConnectionPool|hooks.slack" )`
 Expected: `0`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add sync-stock.sh
@@ -1910,7 +1910,7 @@ comparacion ya quedo escrita en la spec."
 
 ## Task 10: Verificación sobre los dos stacks
 
-- [ ] **Step 1: Verificar sobre el stack de rollback** (lo corre el asistente)
+- [x] **Step 1: Verificar sobre el stack de rollback** (lo corre el asistente)
 
 Run: `./verificar-en-stack-produccion.sh`
 Expected: **288 OK** sobre Python 3.7 + Django 3.2.
@@ -1924,11 +1924,11 @@ PYTHON=/root/venv-integrador-52/bin/python SERVIDOR=root@muci.org REMOTO=wt-veri
 ```
 Expected: **288 OK** sobre Python 3.10.12 + Django 5.2.17.
 
-- [ ] **Step 3: Marcar la spec como implementada**
+- [x] **Step 3: Marcar la spec como implementada**
 
 En el encabezado de `docs/superpowers/specs/2026-09-02-sincronizacion-stock-bims-design.md`, cambiar `**Estado:** aprobado por Carlos, pendiente de plan de implementación` por `**Estado:** implementado en la rama, pendiente del primer barrido en seco`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/superpowers/specs/2026-09-02-sincronizacion-stock-bims-design.md

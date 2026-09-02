@@ -2,7 +2,7 @@
 
 **Fecha:** 2026-09-02
 **Rama:** `feature/sincronizacion-stock-bims`
-**Estado:** aprobado por Carlos, pendiente de plan de implementación
+**Estado:** implementado en la rama (288 tests verdes en local y en el stack de rollback), pendiente del primer barrido en seco
 
 ## El problema
 
