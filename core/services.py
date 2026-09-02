@@ -656,5 +656,12 @@ def _process_order(order_id: int) -> dict:
             f"Order {order_id}: venta {sale_id} facturada, pero no se pudo anotar "
             f"en WooCommerce: {e}"
         )
+    else:
+        # Sin esta marca la fila nace con la deuda ya pagada pero sin declararlo,
+        # y la pasada de reparación de `process_queue` la levanta para siempre:
+        # medido en producción el 2026-09-02, las 82 filas en `False` ya tenían
+        # la meta correcta en Woo. El flag es lo único que distingue "hay algo
+        # que anotar" de "ya está anotado".
+        upsert_state(order_id, woo_meta_ok=True)
 
     return {"status": "ok", "message": status_message}

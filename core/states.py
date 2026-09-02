@@ -54,6 +54,20 @@ def _buscar_fila(
     return fila
 
 
+def buscar_fila(
+    referencia: Any, origen: str = FailedOrder.ORIGIN_WOO
+) -> Optional[FailedOrder]:
+    """
+    La fila de esta transacción, con el mismo rescate que usa `upsert_state`.
+
+    Pública porque el worker necesita **leer** una fila antes de decidir cómo
+    escribirla (cuántos intentos lleva), y hacerlo con un `filter` propio se
+    saltearía el rescate por `order_id`: las filas de la ventana del despliegue
+    tienen `external_reference` en NULL y no aparecerían.
+    """
+    return _buscar_fila(_como_order_id(referencia), str(referencia), origen)
+
+
 def upsert_state(
     referencia: Any, origen: str = FailedOrder.ORIGIN_WOO, **campos: Any
 ) -> FailedOrder:

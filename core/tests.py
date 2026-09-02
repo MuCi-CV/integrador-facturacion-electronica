@@ -3706,3 +3706,281 @@ class WorkerDeColaTest(TestCase):
 
         self.assertEqual(vistas["status"], FailedOrder.PROCESSING)
         self.assertIsNotNone(vistas["claimed_at"])
+
+
+class ReintentosPorRamaTest(TestCase):
+    """
+    El backoff es sólo para la rama de BIMS. Spec §6.4.
+
+    La rama de Woo no lleva backoff propio: anotar la meta es barato e
+    idempotente y le alcanza con reintentarse en cada pasada. La de BIMS no —
+    emite una factura electrónica ante la SET— así que un fallo espera, y a los
+    cinco intentos deja de insistir y queda `FAILED` para que alguien mire.
+    """
+
+    def _pendiente(self, referencia, **campos):
+        from core.states import upsert_state
+
+        return upsert_state(referencia, status=FailedOrder.PENDING, **campos)
+
+    @patch(
+        "core.management.commands.process_queue.process_order",
+        side_effect=ValueError("BIMS caído"),
+    )
+    def test_un_fallo_agenda_el_proximo_intento_y_devuelve_la_fila_a_la_cola(
+        self, _mock_process
+    ):
+        from django.core.management import call_command
+
+        self._pendiente(1)
+
+        call_command("process_queue")
+
+        fila = FailedOrder.objects.get(external_reference="1")
+        self.assertEqual(fila.bims_attempts, 1)
+        self.assertIsNotNone(fila.bims_next_attempt)
+        # Vuelve a PENDING, no queda tomada: si quedara PROCESSING sólo la
+        # rescataría el reaper, diez minutos después y por el camino de la
+        # excepción, que es justo lo que el backoff viene a ordenar.
+        self.assertEqual(fila.status, FailedOrder.PENDING)
+        self.assertIsNone(fila.claimed_at)
+
+    @patch(
+        "core.management.commands.process_queue.process_order",
+        side_effect=ValueError("BIMS caído"),
+    )
+    def test_la_espera_crece_con_los_intentos(self, _mock_process):
+        """El primer intento es rápido; los siguientes esperan a que alguien arregle BIMS."""
+        from datetime import timedelta
+
+        from django.core.management import call_command
+        from django.utils.timezone import now
+
+        self._pendiente(1)
+        self._pendiente(2, bims_attempts=2)
+
+        antes = now()
+        call_command("process_queue")
+
+        primera = FailedOrder.objects.get(external_reference="1")
+        tercera = FailedOrder.objects.get(external_reference="2")
+        # 1er intento -> 1 minuto; 3er intento -> 15 minutos.
+        self.assertLess(primera.bims_next_attempt - antes, timedelta(minutes=2))
+        self.assertGreater(tercera.bims_next_attempt - antes, timedelta(minutes=14))
+
+    @patch(
+        "core.management.commands.process_queue.process_order",
+        side_effect=ValueError("BIMS caído"),
+    )
+    def test_agotados_los_intentos_queda_FAILED_y_deja_de_reintentar(
+        self, _mock_process
+    ):
+        from django.core.management import call_command
+
+        self._pendiente(1, bims_attempts=4)
+
+        call_command("process_queue")
+
+        fila = FailedOrder.objects.get(external_reference="1")
+        self.assertEqual(fila.status, FailedOrder.FAILED)
+        self.assertEqual(fila.bims_attempts, 5)
+
+    @patch(
+        "core.management.commands.process_queue.process_order",
+        side_effect=ValueError("BIMS caído"),
+    )
+    def test_agenda_el_reintento_tambien_en_una_fila_sin_referencia(
+        self, _mock_process
+    ):
+        """
+        Las filas creadas entre el `migrate` y el `restart` tienen
+        `external_reference` en NULL, y el worker las toma por `order_id`. Si el
+        reintento se buscara sólo por referencia, esas filas quedarían tomadas y
+        las rescataría únicamente el reaper — diez minutos tarde y sin contar el
+        intento, así que nunca llegarían a `FAILED`.
+        """
+        from django.core.management import call_command
+
+        FailedOrder.objects.create(
+            order_id=7, external_reference=None, status=FailedOrder.PENDING
+        )
+
+        call_command("process_queue")
+
+        fila = FailedOrder.objects.get(order_id=7)
+        self.assertEqual(fila.bims_attempts, 1)
+        self.assertEqual(fila.status, FailedOrder.PENDING)
+        self.assertIsNotNone(fila.bims_next_attempt)
+
+    @patch("core.management.commands.process_queue.process_order")
+    def test_un_exito_no_agenda_ningun_reintento(self, _mock_process):
+        from django.core.management import call_command
+
+        self._pendiente(1)
+
+        call_command("process_queue")
+
+        fila = FailedOrder.objects.get(external_reference="1")
+        self.assertEqual(fila.bims_attempts, 0)
+        self.assertIsNone(fila.bims_next_attempt)
+
+
+class ReparacionDeMetaEnWooTest(TestCase):
+    """
+    La rama de Woo se repara sola, y `woo_meta_ok` es lo que dice si hace falta.
+
+    Medido en producción el 2026-09-02: las 82 filas con `woo_meta_ok=False`
+    **ya tenían la meta correcta en WooCommerce**. Nadie ponía el flag en True al
+    anotar, así que la cola de reparación crecía una fila por venta para siempre.
+    De ahí las dos garantías de acá: `process_order` marca el flag cuando anota,
+    y la pasada de reparación **lee antes de escribir** — un PUT de más dispara
+    `order.updated`, que despierta al bot de WhatsApp por una orden vieja.
+    """
+
+    def _order(self, total="10000"):
+        return {
+            "total": total,
+            "discount_total": "0",
+            "meta_data": [],
+            "billing": {},
+            "shipping": {},
+            "line_items": [
+                {
+                    "product_id": 162,
+                    "variation_id": 0,
+                    "quantity": 1,
+                    "total": total,
+                    "total_tax": "0",
+                    "name": "Tazas Pequeñas SC",
+                }
+            ],
+            "fee_lines": [],
+        }
+
+    # --- el flag se marca al facturar (core/services.py) ---
+
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_al_anotar_la_meta_en_woo_marca_woo_meta_ok(
+        self, mock_wc, mock_bims, _mock_contact
+    ):
+        mock_wc.get_order.return_value = self._order()
+        mock_wc.get_product.return_value = {"sku": "500"}
+        mock_bims.create_sale.return_value = (31301, 12000, None)
+
+        process_order(order_id=202707)
+
+        fila = FailedOrder.objects.get(order_id=202707)
+        self.assertTrue(fila.woo_meta_ok)
+
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_si_no_se_pudo_anotar_en_woo_el_flag_queda_en_falso(
+        self, mock_wc, mock_bims, _mock_contact
+    ):
+        """La venta igual quedó facturada: el flag marca la deuda, no un fracaso."""
+        mock_wc.get_order.return_value = self._order()
+        mock_wc.get_product.return_value = {"sku": "500"}
+        mock_bims.create_sale.return_value = (31301, 12000, None)
+        mock_wc.update_order_meta.side_effect = requests.RequestException("Woo caído")
+
+        process_order(order_id=202707)
+
+        fila = FailedOrder.objects.get(order_id=202707)
+        self.assertEqual(fila.status, FailedOrder.COMPLETED)
+        self.assertFalse(fila.woo_meta_ok)
+
+    # --- la pasada de reparación (core/management/commands/process_queue.py) ---
+
+    def _facturada_sin_anotar(self, referencia="204000"):
+        from core.states import upsert_state
+
+        return upsert_state(
+            referencia,
+            status=FailedOrder.COMPLETED,
+            bims_sale_id="31385",
+            bims_invoice_number="12040",
+            woo_meta_ok=False,
+        )
+
+    @patch("core.management.commands.process_queue.wc_api")
+    @patch("core.management.commands.process_queue.process_order")
+    def test_una_venta_facturada_sin_meta_se_repara_en_la_pasada_siguiente(
+        self, _mock_process, mock_wc
+    ):
+        """El caso 204000: facturó, la meta no quedó, y hasta ahora se perdía."""
+        from django.core.management import call_command
+
+        self._facturada_sin_anotar()
+        # WooCommerce no tiene la meta: la reparación corresponde.
+        mock_wc.get_order.return_value = {"meta_data": []}
+
+        call_command("process_queue")
+
+        mock_wc.update_order_meta.assert_called_once_with(
+            "204000",
+            {"_bims_sale_id": "31385", "_bims_invoice_number": "12040"},
+        )
+        self.assertTrue(
+            FailedOrder.objects.get(external_reference="204000").woo_meta_ok
+        )
+
+    @patch("core.management.commands.process_queue.wc_api")
+    @patch("core.management.commands.process_queue.process_order")
+    def test_si_la_meta_ya_esta_en_woo_no_se_reescribe_y_solo_se_marca_el_flag(
+        self, _mock_process, mock_wc
+    ):
+        """
+        Las 82 filas heredadas están en este caso. Reescribirlas serían 82 PUT
+        inútiles, y cada uno dispara `order.updated` y despierta al bot.
+        """
+        from django.core.management import call_command
+
+        self._facturada_sin_anotar()
+        mock_wc.get_order.return_value = {
+            "meta_data": [
+                {"key": "_bims_sale_id", "value": "31385"},
+                {"key": "_bims_invoice_number", "value": "12040"},
+            ]
+        }
+
+        call_command("process_queue")
+
+        mock_wc.update_order_meta.assert_not_called()
+        self.assertTrue(
+            FailedOrder.objects.get(external_reference="204000").woo_meta_ok
+        )
+
+    @patch("core.management.commands.process_queue.wc_api")
+    @patch("core.management.commands.process_queue.process_order")
+    def test_si_la_reparacion_falla_la_fila_sigue_pendiente_de_anotar(
+        self, _mock_process, mock_wc
+    ):
+        from django.core.management import call_command
+
+        self._facturada_sin_anotar()
+        mock_wc.get_order.return_value = {"meta_data": []}
+        mock_wc.update_order_meta.side_effect = requests.RequestException("Woo caído")
+
+        call_command("process_queue")
+
+        self.assertFalse(
+            FailedOrder.objects.get(external_reference="204000").woo_meta_ok
+        )
+
+    @patch("core.management.commands.process_queue.wc_api")
+    @patch("core.management.commands.process_queue.process_order")
+    def test_no_intenta_reparar_una_venta_sin_sale_id(self, _mock_process, mock_wc):
+        """Sin `bims_sale_id` no hay nada que anotar: no tenemos el número."""
+        from django.core.management import call_command
+
+        from core.states import upsert_state
+
+        upsert_state("204001", status=FailedOrder.COMPLETED, woo_meta_ok=False)
+
+        call_command("process_queue")
+
+        mock_wc.get_order.assert_not_called()
+        mock_wc.update_order_meta.assert_not_called()

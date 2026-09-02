@@ -22,9 +22,14 @@ TIMEOUT_WOOCOMMERCE = 30
 TIMEOUT_CONEXION_WOOCOMMERCE = 5
 
 
-def _meta_confirmada(cuerpo: dict, clave: str, esperado) -> bool:
+def meta_confirmada(cuerpo: dict, clave: str, esperado) -> bool:
     """
-    ¿La respuesta del PUT trae `clave` con el valor que mandamos?
+    ¿El cuerpo de una orden trae `clave` con el valor que esperamos?
+
+    Sirve para la respuesta de un PUT y para la de un GET: las dos traen la orden
+    con su `meta_data`. Es pública porque la pasada de reparación de la cola la
+    usa para **leer antes de escribir**, y la regla de comparación tiene que ser
+    una sola.
 
     Compara como texto a propósito: mandamos strings y WooCommerce puede
     devolver enteros para el mismo dato. Eso es persistencia correcta, no una
@@ -215,7 +220,7 @@ class WooCommerceAPI:
         no_confirmadas = [
             clave
             for clave, valor in meta.items()
-            if not _meta_confirmada(cuerpo, clave, valor)
+            if not meta_confirmada(cuerpo, clave, valor)
         ]
         if no_confirmadas:
             raise self.ServerException(

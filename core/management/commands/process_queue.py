@@ -17,8 +17,16 @@ from django.utils.timezone import now
 
 from core.models import FailedOrder
 from core.services import process_order
+from core.states import buscar_fila, upsert_state
+from core.woocommerce import meta_confirmada, wc_api
 
 LOTE = 20
+
+# Minutos de espera entre intentos contra BIMS. El primero es rápido para
+# atrapar el error transitorio; los siguientes esperan a que alguien arregle
+# BIMS. Spec §6.4.
+BACKOFF_MINUTES = (1, 5, 15, 60)
+MAX_BIMS_ATTEMPTS = 5
 
 
 class Command(BaseCommand):
@@ -37,10 +45,12 @@ class Command(BaseCommand):
             try:
                 process_order(order_id=referencia)
             except Exception as e:
-                # `process_order` ya dejó el FailedOrder en su estado correcto.
                 # Tragar acá es deliberado: una orden rota no debe frenar el lote.
+                # Pero la fila quedó en `PROCESSING`, así que sin agendarle el
+                # reintento la rescataría sólo el reaper, diez minutos después.
                 fallidas += 1
                 self.stderr.write(f"Orden {referencia} quedó sin facturar: {e}")
+                self._schedule_retry(referencia)
 
         if referencias:
             self.stdout.write(
@@ -48,6 +58,13 @@ class Command(BaseCommand):
                     f"Procesadas {len(referencias) - fallidas} de "
                     f"{len(referencias)} tomada(s)."
                 )
+            )
+
+        reparadas, ya_estaban = self._repair_woo_metas()
+        if reparadas or ya_estaban:
+            self.stdout.write(
+                f"Metas en WooCommerce: {reparadas} anotada(s), "
+                f"{ya_estaban} ya estaba(n)."
             )
 
     def _reap_stale(self) -> int:
@@ -92,3 +109,80 @@ class Command(BaseCommand):
         # `order_id` es el rescate para las filas creadas entre el `migrate` y el
         # `restart` del despliegue, que tienen `external_reference` en NULL.
         return [str(f.external_reference or f.order_id) for f in filas]
+
+    def _schedule_retry(self, referencia: str) -> None:
+        """
+        Un fallo contra BIMS espera, y a los cinco intentos deja de insistir.
+
+        El backoff es sólo de esta rama a propósito: emitir una factura ante la
+        SET no es idempotente desde el lado de BIMS —depende de que deduplique
+        por `_id`— así que martillarlo cada minuto no es gratis. La rama de Woo,
+        en cambio, se reintenta en cada pasada sin contador.
+        """
+        # `buscar_fila` y no un `filter` propio: hace el rescate por `order_id`,
+        # sin el cual las filas de la ventana del despliegue (referencia en NULL)
+        # no se encontrarían y se quedarían tomadas sin contar el intento.
+        fila = buscar_fila(referencia)
+        if fila is None:
+            return
+
+        intentos = (fila.bims_attempts or 0) + 1
+        if intentos >= MAX_BIMS_ATTEMPTS:
+            campos = {"status": FailedOrder.FAILED}
+        else:
+            espera = BACKOFF_MINUTES[min(intentos - 1, len(BACKOFF_MINUTES) - 1)]
+            campos = {
+                "status": FailedOrder.PENDING,
+                "bims_next_attempt": now() + timedelta(minutes=espera),
+            }
+
+        upsert_state(
+            fila.external_reference or fila.order_id,
+            bims_attempts=intentos,
+            claimed_at=None,
+            **campos,
+        )
+
+    def _repair_woo_metas(self):
+        """
+        Anota en WooCommerce las ventas facturadas a las que les falte la meta.
+
+        **Lee antes de escribir.** El plan original hacía el PUT directo, pero la
+        medición del 2026-09-02 mostró que las 82 filas con `woo_meta_ok=False`
+        ya tenían la meta correcta en Woo: el PUT directo habrían sido 82
+        escrituras inútiles, y cada una dispara `order.updated`, que despierta al
+        bot de WhatsApp por una orden vieja. El GET no tiene ese efecto.
+
+        Sin backoff ni contador: el GET es barato y la escritura es idempotente.
+        No hay columna donde llevar la cuenta de intentos de esta rama, y
+        agregarla costaría una migración para acotar algo que no duele.
+        """
+        pendientes = FailedOrder.objects.filter(
+            status=FailedOrder.COMPLETED,
+            woo_meta_ok=False,
+            bims_sale_id__isnull=False,
+        )[:LOTE]
+
+        reparadas = ya_estaban = 0
+        for fila in pendientes:
+            referencia = fila.external_reference or fila.order_id
+            meta = {"_bims_sale_id": fila.bims_sale_id}
+            if fila.bims_invoice_number:
+                meta["_bims_invoice_number"] = fila.bims_invoice_number
+
+            try:
+                orden = wc_api.get_order(referencia) or {}
+                if all(meta_confirmada(orden, k, v) for k, v in meta.items()):
+                    ya_estaban += 1
+                else:
+                    wc_api.update_order_meta(referencia, meta)
+                    reparadas += 1
+            except Exception as e:
+                # Igual que arriba: una orden que no se puede anotar no debe
+                # frenar al resto del lote, y la fila queda para la próxima.
+                self.stderr.write(f"Orden {referencia} sigue sin anotar: {e}")
+                continue
+
+            upsert_state(referencia, woo_meta_ok=True)
+
+        return reparadas, ya_estaban
