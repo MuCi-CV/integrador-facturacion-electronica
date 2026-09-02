@@ -3,7 +3,8 @@
 **Spec:** `docs/superpowers/specs/2026-08-31-hub-ingreso-cola-estado-design.md`
 **Plan:** `docs/superpowers/plans/2026-08-31-hub-ingreso-cola-estado.md`
 **Rama:** `feature/hub-ingreso-cola`
-**Actualizado:** 2026-09-02 (Tareas 7 y 8 hechas, rama @ `a756906` sin pushear; sigue el Despliegue 2)
+**Actualizado:** 2026-09-02 — ✅ **SUB-PROYECTO A CERRADO.** Las 9 tareas hechas, los dos
+despliegues en producción y verificado con una venta real. `main` @ `8ad502f` sirviendo tráfico.
 
 ## Medición sobre producción del 2026-09-01 — resuelve las dos incógnitas abiertas
 
@@ -118,6 +119,33 @@ correcta del endpoint (`/api/sales/index.json`, que acepta `limit`, `offset` y `
 
 ---
 
+## Lo que sigue: sincronización de stock BIMS → WooCommerce
+
+Sub-proyecto nuevo, con sus propios documentos. **Implementado y en `main` @ `8996a71`, SIN
+desplegar y en modo seco.**
+
+- **Spec:** `docs/superpowers/specs/2026-09-02-sincronizacion-stock-bims-design.md`
+- **Plan:** `docs/superpowers/plans/2026-09-02-sincronizacion-stock-bims.md` — 10 tareas, 51 pasos, todos cerrados
+
+**288 tests** en local, en el stack de rollback y en el stack real. **Sin migraciones.** Arranca con
+`STOCK_SYNC_ENABLED=false`, así que desplegar el código **no cambia nada en la web**.
+
+⚠️ **La secuencia de despliegue tiene un paso que no se saltea:**
+
+1. Subir el código con el flag apagado y **sin** la línea de cron.
+2. **Correr `manage.py sync_stock` a mano, en seco, y leer la lista completa.** Es la única
+   oportunidad de confirmar que los depósitos `6,7` son los correctos antes de que lo vea un
+   cliente, y de ver cuántas variaciones se descartan por SKU ambiguo (medido entre 16 y 32; el
+   barrido lo va a contar de verdad).
+3. Con esa lista aprobada, instalar el cron
+   (`*/15 * * * * root /var/www/integrador/sync-stock.sh`) y **recién después**
+   `STOCK_SYNC_ENABLED=true`.
+
+Se espera que el primer barrido **encienda** decenas de productos, no que apague:
+`JUGUETE CARTAS INFANTILES SC` dice 16 en la web y tiene **71** en BIMS.
+
+---
+
 ## Dónde encaja esto
 
 El objetivo de negocio es que **el CRM sepa si una donación se facturó de verdad**, porque
@@ -127,10 +155,11 @@ fundraising va a cargar donaciones desde Krayin y esas nunca pasan por WooCommer
 | | sub-proyecto | estado |
 |---|---|---|
 | A′ | Guardar el `sale_id` y la factura | ✅ desplegado 2026-08-28 |
-| **A** | **Ingreso + cola + estado por rama + 202 + alerta** | **en curso** |
+| **A** | Ingreso + cola + estado por rama + 202 + alerta | ✅ **desplegado 2026-09-02** |
 | B | Modelo interno de pedido + cliente de origen | sin empezar |
 | C | Rama CRM: escribir el lead y devolver el nº de factura | depende de A |
 | D | Reintentos con backoff por rama | absorbido en A |
+| — | **Stock BIMS → Woo** (no estaba en la lista original) | implementado, sin desplegar |
 | E | Adaptador PrestaShop / Ticketera 2.0 | depende de B |
 | F | Entrada de donaciones manuales desde Krayin | depende de A |
 
@@ -152,6 +181,42 @@ fundraising va a cargar donaciones desde Krayin y esas nunca pasan por WooCommer
 | 9 | 🚀 Despliegue 2 — el cambio de contrato | ✅ **desplegado 2026-09-02 18:40 UTC** | `8ad502f` |
 
 **Tests:** 183 (base) → 186 (T1) → 193 (T2) → 201 (T4) → 209 (T5) → 217 (T6) → 228 (T7) → **241** (T8).
+
+### ✅ Despliegue 2 — HECHO el 2026-09-02 18:40:31 UTC, `main` @ `8ad502f`
+
+Fast-forward desde `7704044`. Migraciones **`0012`** (no-op, 0 filas) y **`0013`**
+(`AlertThrottle`) aplicadas. Cron del worker instalado en `/etc/crontab`, corriendo cada minuto.
+`POST /sales/` ya devuelve **202**.
+
+⚠️ **El plan decía "sin `migrate`" y era FALSO.** Producción estaba en la `0011` y faltaban dos. Sin
+`migrate` el worker revienta al primer aviso, porque `core_alertthrottle` no existe. Runbook
+corregido en `docs/2026-09-02-despliegue-2-runbook.md`.
+
+**Verificado antes:** 241 OK sobre el stack real (3.10.12 + Django 5.2.17, corrida de Carlos) y sobre
+el de rollback. **Después:** las dos migraciones registradas, los 3 workers con el código nuevo
+(mtime 18:40:30.49 anterior al arranque 18:40:31), y la cola en 0/0/0.
+
+**✅ Verificado con venta real a las 19:33.** Orden **205290** (Gs 180.000, Pago QR): entró como
+`PENDING` 19:33:07 y quedó `COMPLETED` 19:34:23 — **76 segundos**, que son el minuto del cron más
+~16 s de trabajo. `bims_sale_id 31422`, factura **14610** (serie 14xxx = web, coincide con el patrón
+medido a la mañana), **`woo_meta_ok=1`**, las dos metas en Woo y el `_krayin_lead_id` intacto.
+
+**Las dos pruebas deliberadas, las dos como estaban previstas:**
+
+1. **La reparación de metas drenó el backlog de 76 filas en cuatro pasadas** (`20, 20, 20, 16`) con
+   **CERO escrituras a WooCommerce**: las metas ya estaban. Se predijo
+   `0 anotada(s), 20 ya estaba(n)` antes de correrlo y salió textual. Con el PUT directo del plan
+   habrían sido 76 escrituras inútiles y 76 `order.updated` despertando al bot.
+2. **Alerta probada a propósito** con la orden inexistente `999999999` y 4 intentos gastados: quedó
+   `FAILED` con 5 intentos y el mensaje llegó al canal. **La fila en `core_alertthrottle` es la
+   prueba de que el POST salió**, porque la marca se escribe DESPUÉS de que Slack contesta.
+
+**Rollback:** sacar el cron, `git reset --hard 7704044`, `systemctl restart`. Las migraciones se
+quedan. ⚠️ Las filas en `PENDING`/`PROCESSING` quedarían **huérfanas** — ver el runbook.
+
+**Dos cabos menores, abiertos:** `/var/log/process-queue.log` **no tiene logrotate** (crece ~80 KB
+por día), y `settings.py:145-147` **duplica cada línea en stdout** (`handlers: [console, file]` con
+`propagate: True`, y el root también tiene console). Lo segundo es preexistente.
 
 ⚠️ **Las Tareas 5 y 6 no se pueden desplegar por separado.** La 5 deja de facturar en línea y la 6
 es lo único que vacía la cola: subir solo la 5 sería dejar de facturar del todo.

@@ -1,134 +1,187 @@
 # Handoff — sesión del 2026-09-02
 
-**Rama:** `feature/hub-ingreso-cola` @ `a756906` — **6 commits sin pushear, nada desplegado.**
-Tres son de hoy (`9e264b3`, `91f3dea`, `a756906`). El upstream de la rama es
-`github/feature/hub-ingreso-cola`; hay un segundo remoto `origin` al **mismo repo** cuya ref local
-está más atrasada, así que un `git log origin/…` da una cuenta distinta y engañosa.
-**Tests:** 241 OK en local (3.12 + Django 5.2.17) y **VERDE también sobre el stack de rollback**
-(3.7 + Django 3.2), verificado en cada commit con `./verificar-en-stack-produccion.sh`.
+**Producción:** `main` @ **`8ad502f`**, desplegado 18:40:31 UTC. Sirviendo tráfico y verificado con
+una venta real.
+**`main` local y remoto:** **`8996a71`** — un commit más que producción, que es la sincronización de
+stock: **sin desplegar y en modo seco**.
+**Tests:** **288 OK** en local (3.12 + Django 5.2.17), en el stack de rollback (3.7 + Django 3.2) y
+en el **stack real** (3.10.12 + Django 5.2.17).
 
-**Lo siguiente es el Despliegue 2 (Tarea 9)**, que es el que cambia el contrato del ingreso. Las
-Tareas 4 a 8 están listas en rama. Seguimiento vivo en `progreso.md`.
-
----
-
-## 1. El Despliegue 1 quedó validado, con n=18 en vez de n=1
-
-Lo que faltaba era "confirmar con una venta real". Se confirmó con **18**: las 18 ventas del 01/09
-quedaron con `external_reference = order_id`, `origin='woo'`, `status=COMPLETED` y los dos
-identificadores de BIMS llenos. Sobre las 8716 filas: **0 sin referencia, 0 discrepancias contra
-`order_id`, 0 duplicados, 0 `order_id` nulos**.
-
-El cruce contra WooCommerce cerró también la otra mitad: las **82** filas con `woo_meta_ok=False`
-**ya tenían `_bims_sale_id` y `_bims_invoice_number` correctos en Woo** — 0 faltantes, 0 valores
-distintos. Y la 204000, la que había perdido la meta el 31/08, ya la tiene.
-
-**Acceso nuevo:** hay un usuario MySQL `anthropic_readonly` que da lectura sobre `muci-integrador`,
-`muci`, `krayin` y `moodle`. La clave la tiene Carlos. Dos trampas al usarlo: las dos bases tienen
-**collations distintas** (comparar columnas entre ellas tira `ERROR 1267`, hay que forzar
-`COLLATE utf8mb4_general_ci` en las dos puntas) y el nombre de la base lleva guion, así que va entre
-backticks. **No se lee el `.env` ni `wp-config.php`** — con este usuario no hace falta.
+Tres cosas pasaron hoy: se cerró y desplegó el sub-proyecto A, apareció un hallazgo de negocio que
+no buscábamos, y la sincronización de stock quedó diseñada, implementada y mergeada.
 
 ---
 
-## 2. Tarea 7 — backoff para BIMS y auto-reparación de la meta (`9e264b3`, `91f3dea`)
+## 1. ✅ Sub-proyecto A cerrado y en producción
 
-La rama de BIMS espera `1, 5, 15, 60` minutos y a los 5 intentos deja de insistir con la fila en
-`FAILED`. La de Woo se reintenta en cada pasada, sin contador.
+Las 9 tareas hechas, los dos despliegues aplicados. `POST /sales/` ya no factura en línea: persiste y
+devuelve **202**, así que **una caída de BIMS no puede volver a apagar el webhook `Venta Entrada`**.
+Es el riesgo que le pasó a `Refund order` y lo dejó con `failure_count 6`.
 
-**Los tres desvíos del plan salieron de la medición, no de una opinión** (detalle en `progreso.md`):
+**Verificado con la venta 205290** (Gs 180.000, Pago QR): entró como `PENDING` 19:33:07 y quedó
+`COMPLETED` 19:34:23 — **76 segundos**, el minuto del cron más ~16 s de trabajo. `bims_sale_id 31422`,
+factura `14610`, `woo_meta_ok=1`, las dos metas en Woo y el `_krayin_lead_id` intacto.
 
-1. `process_order` ahora **marca `woo_meta_ok=True` al anotar**. Nadie lo hacía, así que la cola de
-   reparación crecía una fila por venta para siempre y nunca convergía.
-2. `_repair_woo_metas` **lee antes de escribir**. El PUT directo del plan habrían sido 82 escrituras
-   inútiles, y cada una dispara `order.updated`, que despierta al bot de WhatsApp por una orden
-   vieja.
-3. `MAX_META_ATTEMPTS` **queda afuera**: el plan lo definía sin usarlo y no hay columna donde contar.
+**Las dos pruebas deliberadas salieron como estaban previstas**, y eso es lo que más vale del día:
 
-**Un agujero propio, cerrado con test:** `_schedule_retry` buscaba por `external_reference`, así que
-una fila de la ventana del despliegue —referencia en NULL— no recibía reintento y quedaba
-`PROCESSING` hasta el reaper, sin contar el intento. Ahora usa `buscar_fila`, nueva y pública en
-`states.py`.
+1. **La reparación de metas drenó el backlog de 76 filas en cuatro pasadas** (`20, 20, 20, 16`) con
+   **cero escrituras a WooCommerce**. Se predijo `0 anotada(s), 20 ya estaba(n)` antes de correrlo y
+   salió textual. Con el PUT directo del plan habrían sido 76 escrituras inútiles y 76
+   `order.updated` despertando al bot de WhatsApp por órdenes viejas.
+2. **La alerta se probó a propósito** con la orden inexistente `999999999`: quedó `FAILED` con 5
+   intentos y el mensaje llegó al canal. **La fila en `core_alertthrottle` es la prueba de que el
+   POST salió**, porque la marca se escribe DESPUÉS de que Slack contesta.
 
----
+**Lo que hay que recordar de las Tareas 7 y 8** (el detalle está en `progreso.md`):
 
-## 3. Tarea 8 — alertas a Slack y los reintentos fuera de Sentry (`a756906`)
+- El **throttle de alertas vive en la base**, no en `django.core.cache`: no hay `CACHES`
+  configurado, `LocMemCache` es por proceso, y el worker es un proceso nuevo cada minuto. El
+  `cache.add` del plan habría mandado 60 mensajes por hora durante una caída de BIMS.
+- ⚠️ **Ningún disparador detecta que el cron esté muerto.** El plan se lo atribuía a uno, pero es
+  imposible desde adentro del cron. Hace falta un **latido externo** y quedó fuera de alcance.
+- ⚠️ El plan de la Tarea 9 decía **"sin `migrate`" y era FALSO**: faltaban la `0012` y la `0013`, y
+  sin ellas el worker revienta al primer aviso. Runbook corregido en
+  `docs/2026-09-02-despliegue-2-runbook.md`, que también documenta la trampa del rollback (las filas
+  en `PENDING`/`PROCESSING` quedan huérfanas con el código viejo).
 
-`core/alerts.py` con `notify(clave, texto)`, fail-safe entero. Tres disparadores al final de cada
-pasada: cola sobre el umbral, reintentos agotados (con los números de orden) y filas vencidas que no
-avanzan. Migración `0013`: un `CREATE TABLE` limpio.
-
-**El desvío que importa: el throttle vive en la base, no en `django.core.cache`.** No hay `CACHES`
-configurado, así que Django usa `LocMemCache`, que es **por proceso** — y el worker es un proceso
-nuevo cada minuto. El `cache.add` del plan habría arrancado vacío en cada corrida: **60 mensajes por
-hora** durante una caída de BIMS.
-
-⚠️ **Y una corrección al plan que conviene no perder: ningún disparador detecta que el cron esté
-muerto.** El plan se lo atribuía al tercero, pero es imposible desde adentro del cron — si el cron
-no corre, el aviso tampoco. Necesita un latido externo y quedó fuera de alcance. El tercero detecta
-que la cola no avanza **aunque el worker corra**, que es otra cosa.
-
-`core/bims.py:446` pasó de `logging.error` a `logging.warning`: con
-`LoggingIntegration(event_level=ERROR)`, cada reintento transitorio era un evento de Sentry.
+**Cabos abiertos, menores:** `/var/log/process-queue.log` sin `logrotate`; `AlertThrottle` no está en
+el admin (serviría para silenciar un aviso a mano); y `settings.py:145-147` duplica cada línea en
+stdout, que es preexistente.
 
 ---
 
-## 4. Hallazgo de negocio: 58 pedidos nunca llegaron al integrador
+## 2. Hallazgo de negocio: 58 pedidos que nunca llegaron al integrador
 
-`wc-completed`, monto > 0, sin fila, desde el 2025-10-13: **58 pedidos, Gs 7.268.027**. Son dos
-cosas distintas y conviene no mezclarlas:
+`wc-completed`, monto > 0, sin fila, desde el 2025-10-13: **58 pedidos, Gs 7.268.027**. Son dos cosas
+distintas y **no conviene mezclarlas**:
 
 | | pedidos | monto | qué es |
 |---|---|---|---|
 | Cortesía | 20 | 2.878.027 | **no es falla**: hasta el 27/08 el código las descartaba a propósito |
 | Pago cobrado | **38** | **4.390.000** | la pérdida silenciosa real |
 
-Los 58 están en `wc-completed`, **0 cancelados, 0 con devolución**. El más reciente es del 26/08:
-desde el 27/08 no se perdió ninguno.
+Los 58 están en `wc-completed`, **0 cancelados y 0 con devolución**. El más reciente es del
+**2026-08-26**: desde el 27/08 no se perdió ninguno.
 
 **El dato que más pesa:** el 192578 y el 192584 tuvieron 10 y 2 cambios de estado por edición masiva
 entre el 14 y el 16/07 — alguien forzando el reenvío a mano. El reenvío **llegó** las dos veces,
 resolvió el contacto y **se cortó sin error y sin dejar fila**, mientras órdenes del mismo minuto
 completaban normal. Es el 503-sin-persistir de `SalesView`, con nombre y número de orden.
 
-**Planilla entregada a Finanzas** (xlsx + csv, ya enviada). La columna "Facturado en BIMS" dice
-**"Pendiente de verificar"**, y eso es a propósito: el chequeo automático contra BIMS **quedó
-inválido** porque el listado devolvió **18 ventas de más de 31.000**. No tomar esa corrida como
-evidencia de nada.
+**Planilla ya enviada a Finanzas.** La columna "Facturado en BIMS" dice **"Pendiente de verificar"**,
+y eso es a propósito: el chequeo automático **quedó inválido** porque el listado devolvió **18 ventas
+de más de 31.000**. ⚠️ **No tomar esa corrida como evidencia de nada.**
 
-**Para rehacerlo:** el endpoint documentado es `GET /api/sales/index.json` y acepta `limit`
-(máx. 500), `offset`, `plain` y `method` (`all|first|count`). El script está en el servidor en
-`/home/anthropic_readonly/verificar_58_en_bims.py` y **pagina mal**: pega a `/sales/` pelado. Antes
-de corregirlo conviene correr `sondear_sales_index.py`, que está al lado y compara las formas
-—incluido `method=count`, que dice el total de una—. Si `count` viniera 18, el problema no es la
-paginación sino el alcance de la credencial, y el crawl completo no sirve.
+**Para rehacerlo:** el endpoint es `GET /api/sales/index.json` con `limit` (máx. 500), `offset`,
+`plain` y `method`. Los scripts están en `/home/anthropic_readonly/` del servidor;
+`verificar_58_en_bims.py` **pagina mal** (pega a `/sales/` pelado). Antes de corregirlo, correr
+`sondear_sales_index.py`, que está al lado: si `method=count` diera 18, el problema no es la
+paginación sino el **alcance de la credencial**, y el crawl completo no sirve.
 
-Los dos scripts traen dos protecciones que **no son opcionales**: desconectan los `FileHandler`
-antes de paginar (recorrer ~31.000 ventas quemaría las 4 ventanas de rotación de `bims_api.log`,
-como pasó el 23/08 con los contactos) y desconectan Sentry.
+Los scripts traen dos protecciones que **no son opcionales**: desconectan los `FileHandler` antes de
+paginar (recorrer ~31.000 ventas quemaría las 4 ventanas de `bims_api.log`, como pasó el 23/08 con
+los contactos) y desconectan Sentry.
 
 ---
 
-## 5. Para el Despliegue 2
+## 3. Sincronización de stock BIMS → WooCommerce: implementada, sin desplegar
 
-**Antes de nada:** es el despliegue que cambia el contrato del ingreso. No es uno para dejar a
-medias ni para subir un viernes.
+Se empezó **verificando si la tarea ya estaba hecha. No lo estaba:** tres implementaciones y ninguna
+corriendo. La prueba dura es que la tabla `wpzv_bimsc_stocks` tiene **0 filas** desde que se creó el
+2025-10-13, y ningún producto de Woo tiene el meta `_bims_sync`.
 
-1. ⚠️ **Las Tareas 5 y 6 van juntas o no van.** La 5 deja de facturar en línea y la 6 es lo único
-   que vacía la cola: subir solo la 5 es dejar de facturar del todo.
-2. **Migraciones a aplicar: `0012` y `0013`.** La `0012` es un no-op confirmado (0 filas medidas) y
-   la `0013` es un `CREATE TABLE` limpio.
-3. ⚠️ **La línea de cron la instala Carlos** (necesita root), y **con el `cd`**:
-   `* * * * * /var/www/integrador/process-queue.sh >> /var/log/process-queue.log 2>&1`
-4. **Variables nuevas del `.env`, las tres opcionales con default:** `QUEUE_ALERT_THRESHOLD` (10),
-   `QUEUE_SILENCE_MINUTES` (10) y `SLACK_WEBHOOK_URL`. Sin webhook no se avisa a nadie y todo lo
-   demás funciona igual — pero entonces el Despliegue 2 entra **sin la red de seguridad que lo hace
-   seguro**, así que conviene tener el webhook antes.
-5. ⚠️ **`SKIP LOCKED` sigue sin cobertura de tests.** Django lo ignora sin error en SQLite, así que
-   la exclusión entre workers concurrentes **solo se ejerce en MariaDB**, o sea recién en producción.
-6. **Hay dump previo:** `/root/bk/db-pre-expansion.sql.gz` (226 MB, 01/09). Conviene uno nuevo
-   antes, porque ese ya tiene dos días de ventas de diferencia.
+- **Spec:** `docs/superpowers/specs/2026-09-02-sincronizacion-stock-bims-design.md`
+- **Plan:** `docs/superpowers/plans/2026-09-02-sincronizacion-stock-bims.md` — 10 tareas, 51 pasos, cerrados
+- **Los datos duros de la API:** memoria `reference_topologia_stock_bims`
 
-**Pendiente de revisar, del lado del servidor:** `runretryfaileds.sh` apunta a
-`/var/www/integrador.muci.org/backend`, que **no existe**. No se pudo confirmar si el cron lo usa
-porque el crontab de root no es legible como `anthropic_readonly`.
+**Todo se midió contra la API viva.** Los hallazgos que definieron el diseño:
+
+| hallazgo | consecuencia |
+|---|---|
+| BIMS **no tiene webhook de salida** ni filtro "modificado desde" | es **sondeo**, no evento. El pedido hablaba de un evento; esto es lo más cercano que la API permite |
+| el número vendible es **`total`**, no `total2` | `Product.availability` que calcula BIMS es la suma de `total`; `total2` trae negativos proporcionales a la venta |
+| todo el stock vive en **San Cosmos (6) y GIFTSHOP MÓVIL (7)** | **Casa Matriz tiene 0** en los 427 inventariables: la hipótesis inicial quedó descartada con datos |
+| el **SKU de Woo ES el id de producto de BIMS** | ningún producto de BIMS tiene `code` (0 de 427), así que el puntero vive del lado de Woo |
+| `availabilities/index.json` **pagina sin orden estable** | descartado: un barrido por ahí puede perderse un producto entero |
+| `products?v_stock=1` con `limit=500` **da timeout** | se pagina de a 100, con un test que impide subirlo |
+
+**Tres guardas, todas con test:** una lectura fallida de BIMS **no escribe nada**; un barrido que
+apagaría más de 5 productos aborta y avisa a Slack; y el **modo seco es el default**.
+
+⚠️ **La secuencia de despliegue tiene un paso que no se saltea:**
+
+1. Subir el código con el flag apagado y **sin** cron. No cambia nada en la web: no hay migraciones
+   y `STOCK_SYNC_ENABLED=false`.
+2. **Correr `manage.py sync_stock` a mano, EN SECO, y leer la lista completa.** Es la única
+   oportunidad de confirmar que los depósitos `6,7` son los correctos antes de que lo vea un
+   cliente, y de ver cuántas variaciones se descartan por SKU ambiguo (medido entre 16 y 32; el
+   barrido lo va a contar de verdad).
+3. Con esa lista aprobada, instalar el cron
+   (`*/15 * * * * root /var/www/integrador/sync-stock.sh`) y **recién después**
+   `STOCK_SYNC_ENABLED=true`.
+
+**Se espera que el primer barrido ENCIENDA productos, no que apague.** Hoy la web muestra agotado lo
+que sí hay: `JUGUETE CARTAS INFANTILES SC` dice 16 y tiene **71**.
+
+**El veredicto de la comparación** (código rescatado vs `bimsc`): repartido, y en la llave de vínculo
+**no gana ninguno** — `_bims_id` cubre 186 productos con 7 ambiguos, y el filtro por meta del
+rescatado **no existe en la REST de Woo**. Gana el **SKU**, que es lo que el integrador ya usa para
+facturar. Sobreviven ~40 líneas del código rescatado.
+
+**De paso se arregló un bug real:** `build_sale_products` hacía `int(sku)` y reventaba con
+`invalid literal for int()` ante un SKU de baja — hay una fila así en producción. Ahora levanta
+`SkuDadoDeBaja` con mensaje legible. **El comportamiento no cambió** (la orden sigue fallando, como
+pidió Carlos) porque un SKU no numérico **es** la marca de producto dado de baja: al darlo de baja,
+el `7` pasa a `7-1`, `7-5`, `7-19` según cuántas veces.
+
+⚠️ **No mergear `feature-sync`** para traer el original: ese commit (`c6a87dd`) mete además
+`SimpleForgotPasswordView` / `ForgotPasswordView`, que **generan una password temporal y la devuelven
+en el cuerpo de la respuesta HTTP**. `main` hoy no lo tiene.
+
+---
+
+## 4. Para mañana
+
+**Lo primero, si se decide avanzar:** la secuencia de arriba, empezando por el barrido en seco. No
+hay apuro — el código está en `main`, verificado en los tres stacks, y apagado.
+
+### 🔴 Seguridad, y no es menor
+
+- Las opciones del plugin `bimsc` guardan **usuario y contraseña de BIMS en texto plano** en
+  `wpzv_options`, y el plugin está inactivo desde 2025. **Borrar esas opciones y rotar la
+  credencial.**
+- La **contraseña del usuario MySQL `anthropic_readonly`** se pegó en el chat de esta sesión.
+  Conviene rotarla, o dejarla en un `~/.my.cnf` con `chmod 600` para no tener que pegarla nunca más.
+- El reporte a BIMS por la fuga de credencial **sigue sin enviarse**
+  (`docs/reportes/2026-08-27-reporte-a-bims.md`).
+
+### Decisiones de negocio pendientes
+
+- Qué se hace con los **38 pedidos con pago cobrado** (Gs 4.390.000) que nunca llegaron. Finanzas
+  tiene la planilla.
+- Si las **149 cortesías históricas con precio** se facturan retroactivamente. 20 están en el hueco
+  de los 58.
+- Los **12 padres con variaciones de SKU ambiguo** quedaron fuera de alcance por decisión de Carlos.
+  El barrido los reporta en cada pasada, así que la lista está disponible el día que se quiera
+  actuar.
+
+### Cosas del servidor que siguen sin resolver
+
+- ⚠️ **`runretryfaileds.sh` apunta a `/var/www/integrador.muci.org/backend`, que no existe.** No se
+  pudo confirmar si el cron lo usa: el crontab de root no es legible como `anthropic_readonly`.
+- ⚠️ **El webhook `Refund order` sigue deshabilitado** (`failure_count 6`) y apunta a
+  `muci-integrador.staging.girolabs.cloud/refunds/`, una URL de **staging** — nunca estuvo apuntando
+  a producción. Mientras siga así, **toda cancelación se resuelve a mano en los dos sistemas**. BIMS
+  tiene `POST /api/sales/cancel/{id}.json` para cuando se decida cerrarlo.
+- `logrotate` para `/var/log/process-queue.log`, y el mismo cuidado con `/var/log/sync-stock.log`
+  cuando se instale.
+
+### Estado de las ramas
+
+`feature/hub-ingreso-cola` y `feature/sincronizacion-stock-bims` quedan vivas, las dos
+**completamente mergeadas** a `main`. Se pueden borrar con `git branch -d` sin perder nada; se
+dejaron porque es la práctica del proyecto.
+
+⚠️ Y un detalle que engaña: hay **dos remotos al mismo repo**, `github` y `origin`, y la ref local de
+`origin` está más atrasada. El upstream real es `github`, así que un `git log origin/…` da una cuenta
+distinta y equivocada.
