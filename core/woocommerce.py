@@ -151,6 +151,49 @@ class WooCommerceAPI:
             return res.json()
         raise self.ServerException(res.text)
 
+    def get_variations(self, parent_id, **kwargs) -> list:
+        """
+        Variaciones de un producto variable.
+
+        Hace falta un request por padre: la REST de WooCommerce no tiene un
+        listado global de variaciones. Son 36 padres, o sea 36 requests por
+        barrido — el precio de no vivir dentro de WordPress, y es barato.
+        """
+        with self._timeout_recortado(f"products/{parent_id}/variations"):
+            res = self.wcapi.get(f"products/{parent_id}/variations", params=kwargs)
+        if res.status_code == 200:
+            return res.json()
+        raise self.ServerException(res.text)
+
+    def update_product_stock(self, id, cantidad: float) -> dict:
+        """
+        Escribe el stock de un producto o variación. **Sólo tres campos.**
+
+        ⚠️ `id` recibe la **ruta relativa**, no sólo un número: WooCommerce
+        escribe una variación en `products/{padre}/variations/{id}`, así que el
+        llamador pasa `"100"` para un producto simple y
+        `"187056/variations/188079"` para una variación. Es el campo `ruta_woo`
+        de `core.stock.Cambio`.
+
+        Los precios quedan afuera a propósito: `bimsc` los escribía
+        (`sell_price × buy_price` de la moneda, con un campo `PP` que manda si
+        existe) y traer eso junto con el stock cambiaría los precios del sitio.
+
+        `stock_status` va explícito y no se deja al cálculo de WooCommerce
+        porque es el campo que efectivamente corta la venta.
+        """
+        unidades = int(cantidad)
+        data = {
+            "stock_quantity": unidades,
+            "manage_stock": True,
+            "stock_status": "instock" if unidades > 0 else "outofstock",
+        }
+        with self._timeout_recortado(f"products/{id}"):
+            res = self.wcapi.put(f"products/{id}", data=data)
+        if res.status_code == 200:
+            return res.json()
+        raise self.ServerException(res.text)
+
     def get_order(self, id, **kwargs):
         with self._timeout_recortado(f"orders/{id}"):
             res = self.wcapi.get(f"orders/{id}", params=kwargs)

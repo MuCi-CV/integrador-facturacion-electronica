@@ -4674,3 +4674,69 @@ class LecturaDeStockDeBimsTest(TestCase):
 
         url = mock_req.call_args[0][1]
         self.assertTrue(url.endswith("/products/index.json"), url)
+
+
+class EscrituraDeStockEnWooTest(TestCase):
+    """
+    El barrido escribe **tres campos y nada más**. Los precios quedan
+    explícitamente afuera: `bimsc` los escribía y traer eso cambiaría los precios
+    del sitio.
+    """
+
+    def _api(self):
+        api = WooCommerceAPI()
+        api.wcapi = MagicMock()
+        return api
+
+    def test_escribe_cantidad_y_deja_en_stock(self):
+        api = self._api()
+        api.wcapi.put.return_value = MagicMock(
+            status_code=200, json=lambda: {"id": 100, "stock_quantity": 7}
+        )
+
+        api.update_product_stock(100, 7.0)
+
+        ruta, kwargs = api.wcapi.put.call_args[0][0], api.wcapi.put.call_args[1]
+        self.assertEqual(ruta, "products/100")
+        self.assertEqual(kwargs["data"]["stock_quantity"], 7)
+        self.assertTrue(kwargs["data"]["manage_stock"])
+        self.assertEqual(kwargs["data"]["stock_status"], "instock")
+
+    def test_con_cero_marca_agotado(self):
+        api = self._api()
+        api.wcapi.put.return_value = MagicMock(status_code=200, json=lambda: {"id": 100})
+
+        api.update_product_stock(100, 0.0)
+
+        data = api.wcapi.put.call_args[1]["data"]
+        self.assertEqual(data["stock_quantity"], 0)
+        self.assertEqual(data["stock_status"], "outofstock")
+
+    def test_no_manda_precios(self):
+        """Blindaje explícito: `bimsc` escribía precios y eso queda afuera."""
+        api = self._api()
+        api.wcapi.put.return_value = MagicMock(status_code=200, json=lambda: {"id": 100})
+
+        api.update_product_stock(100, 3.0)
+
+        data = api.wcapi.put.call_args[1]["data"]
+        for prohibido in ("price", "regular_price", "sale_price"):
+            self.assertNotIn(prohibido, data)
+
+    def test_un_no_200_levanta_la_excepcion_del_cliente(self):
+        api = self._api()
+        api.wcapi.put.return_value = MagicMock(status_code=400, text="no")
+
+        with self.assertRaises(WooCommerceAPI.ServerException):
+            api.update_product_stock(100, 3.0)
+
+    def test_las_variaciones_se_piden_al_endpoint_del_padre(self):
+        api = self._api()
+        api.wcapi.get.return_value = MagicMock(
+            status_code=200, json=lambda: [{"id": 188079, "sku": ""}]
+        )
+
+        variaciones = api.get_variations(187056)
+
+        self.assertEqual(api.wcapi.get.call_args[0][0], "products/187056/variations")
+        self.assertEqual(variaciones[0]["id"], 188079)
