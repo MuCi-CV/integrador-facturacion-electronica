@@ -4332,3 +4332,109 @@ class FacturarConSkuDadoDeBajaTest(TestCase):
         self.assertIn("149-5-0", str(ctx.exception))
         self.assertIn("baja", str(ctx.exception).lower())
         mock_bims.create_sale.assert_not_called()
+
+
+class StockVendibleTest(TestCase):
+    """
+    El número vendible es la suma de `total` sobre los depósitos habilitados.
+
+    Medido el 2026-09-02: `Product.availability`, que calcula BIMS, **es la suma
+    de `total`** — verificado en 4 productos. `total2` trae negativos grandes y
+    proporcionales al volumen de venta (−285 en cartas infantiles), o sea es una
+    salida acumulada y NO stock disponible.
+    """
+
+    def _disponibilidad(self, warehouse_id, total, total2="0"):
+        return {
+            "Availability": {
+                "warehouse_id": str(warehouse_id),
+                "total": total,
+                "total2": total2,
+            },
+            "Warehouse": {"id": str(warehouse_id), "name": f"Deposito {warehouse_id}"},
+        }
+
+    def test_suma_solo_los_depositos_habilitados(self):
+        from core.stock import stock_vendible
+
+        av = [
+            self._disponibilidad(6, "57.0000000000000000"),
+            self._disponibilidad(7, "14"),
+            self._disponibilidad(1, "999"),  # Casa Matriz, NO habilitado
+        ]
+
+        self.assertEqual(stock_vendible(av, [6, 7]), 71.0)
+
+    def test_ignora_total2_aunque_traiga_numeros(self):
+        """El caso real de `JUGUETE CARTAS INFANTILES SC`: total 57, total2 -285."""
+        from core.stock import stock_vendible
+
+        av = [self._disponibilidad(6, "57", total2="-285")]
+
+        self.assertEqual(stock_vendible(av, [6, 7]), 57.0)
+
+    def test_parsea_los_tres_formatos_que_manda_bims(self):
+        """BIMS devuelve '0', '0.000000' y '128.0000000000000000' en la misma respuesta."""
+        from core.stock import stock_vendible
+
+        av = [
+            self._disponibilidad(6, "0"),
+            self._disponibilidad(7, "0.000000"),
+        ]
+        self.assertEqual(stock_vendible(av, [6, 7]), 0.0)
+
+        av = [self._disponibilidad(6, "128.0000000000000000")]
+        self.assertEqual(stock_vendible(av, [6, 7]), 128.0)
+
+    def test_un_negativo_no_resta_del_total(self):
+        """
+        Un depósito en negativo es un desajuste de inventario, no una deuda que
+        haya que descontarle a otro depósito. Se trata como 0.
+        """
+        from core.stock import stock_vendible
+
+        av = [
+            self._disponibilidad(6, "10"),
+            self._disponibilidad(7, "-4"),
+        ]
+
+        self.assertEqual(stock_vendible(av, [6, 7]), 10.0)
+
+    def test_sin_disponibilidades_es_cero(self):
+        from core.stock import stock_vendible
+
+        self.assertEqual(stock_vendible(None, [6, 7]), 0.0)
+        self.assertEqual(stock_vendible([], [6, 7]), 0.0)
+
+    def test_el_desglose_dice_de_donde_salio_cada_unidad(self):
+        """
+        Sin esto, un número publicado en la web no se puede explicar: Woo no sabe
+        en qué depósito vive nada, sólo BIMS lo sabe.
+        """
+        from core.stock import desglose_por_deposito
+
+        av = [
+            self._disponibilidad(6, "57"),
+            self._disponibilidad(7, "14"),
+            self._disponibilidad(1, "999"),
+        ]
+
+        self.assertEqual(desglose_por_deposito(av, [6, 7]), {6: 57.0, 7: 14.0})
+
+    def test_el_desglose_omite_los_depositos_en_cero(self):
+        from core.stock import desglose_por_deposito
+
+        av = [self._disponibilidad(6, "57"), self._disponibilidad(7, "0")]
+
+        self.assertEqual(desglose_por_deposito(av, [6, 7]), {6: 57.0})
+
+    def test_un_total_ilegible_no_rompe_el_barrido(self):
+        """Un valor que no parsea cuenta como 0, no tira el barrido entero."""
+        from core.stock import stock_vendible
+
+        av = [
+            {"Availability": {"warehouse_id": "6", "total": "en revision"}},
+            self._disponibilidad(7, "5"),
+        ]
+
+        self.assertEqual(stock_vendible(av, [6, 7]), 5.0)
