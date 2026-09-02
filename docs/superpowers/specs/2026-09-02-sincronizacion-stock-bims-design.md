@@ -168,7 +168,8 @@ Tres, y ninguna es opcional:
    entre una web correcta y una tienda cerrada.
 2. **Guarda de radio de impacto.** Si un barrido pondría en cero a más de `N` productos de golpe, se
    **detiene, no escribe nada y avisa a Slack**. Un cero masivo casi siempre es un problema de la
-   consulta o del depósito configurado, no que se haya vendido todo. `N` va como setting.
+   consulta o del depósito configurado, no que se haya vendido todo. `N` va como setting, con
+   valor inicial **5** (el razonamiento y la medición que lo sostienen, más abajo).
 3. **El primer barrido corre en seco.** Calcula todo, informa qué cambiaría y **no escribe**. Con
    esa lista a la vista se confirma que los depósitos elegidos son los correctos, antes de que la
    web se entere. El modo seco queda disponible como flag para siempre.
@@ -218,14 +219,41 @@ rotación el 2026-09-02 y ya es deuda.
 - Nada de tests que salgan a la red. La verificación del Despliegue 2 delató un `GET` real a
   WooCommerce que el `except` del lote se tragaba; el parche fue en `setUp`.
 
+## Decisiones cerradas el 2026-09-02
+
+**`N = 5` para la guarda de radio de impacto.** Elegido con datos, no por analogía con otro setting:
+
+- **La población en riesgo son 44 productos** publicados con stock > 0 en Woo (10 simples + 34
+  variaciones), de los cuales **41 tienen SKU propio** y por lo tanto son los que el barrido puede
+  tocar. Ese es el techo de un desastre.
+- **El ritmo real de venta** en los últimos 14 días fue de 3 a 20 productos distintos por día. Pero
+  eso es *vendidos*, no *llegados a cero*: hay 2657 unidades en 44 productos, ~60 promedio cada uno.
+  En una ventana de 15 minutos lo esperable es que **0 o 1** producto agote su última unidad.
+- **5 está arriba del ruido y abajo del desastre:** es el 12% de los 41, así que un error sistémico
+  lo dispara en el primer barrido, y a la vez cinco productos agotándose en la misma ventana de 15
+  minutos sería extraordinario.
+- **La asimetría del costo favorece el número bajo:** si salta de más, cuesta un mensaje y 15
+  minutos, y el barrido siguiente reintenta. Si no salta cuando debía, cuesta la tienda cerrada sin
+  que nadie se entere.
+
+⚠️ **Revisar si la población con stock pasa de ~100 productos**; con el catálogo de hoy, 5 es
+holgado, con el triple sería apretado.
+
+**Cuando la guarda salta se aborta el barrido COMPLETO**, no sólo las bajadas a cero: si el dato
+está sistémicamente mal —depósito equivocado, respuesta rara de BIMS— entonces las **subidas también
+están mal**, y aplicar la mitad de un dato contaminado es peor que no aplicar nada.
+
+**Salón de Ventas (depósito 3): fuera de alcance.** Decidido por Carlos. Hoy tiene 0 unidades y no
+entra en el setting. Si alguna vez importa, se agrega el id y se reinicia.
+
+**Los 12 padres con variaciones ambiguas: no se tocan.** Decidido por Carlos. Esas 59 variaciones
+siguen con el stock que Woo tenga, igual que hoy, y la contabilidad no se rompe porque la venta se
+resta del padre en BIMS. El barrido igual las reporta en cada pasada, así que la lista está
+disponible el día que se quiera actuar — pero **no es un pendiente de esta spec**.
+
 ## Preguntas abiertas
 
-1. **`N` para la guarda de radio de impacto.** Propuesta: 10, el mismo orden que
-   `QUEUE_ALERT_THRESHOLD`. Se ajusta con lo que muestre el barrido en seco.
-2. **Qué es "Salón de Ventas" (depósito 3).** Aparece en las disponibilidades, el endpoint de
-   depósitos no lo lista, y hoy tiene 0. No bloquea: si resulta relevante, se agrega al setting.
-3. **Los 12 padres con variaciones ambiguas.** Corregir el SKU en Woo, o aceptar que BIMS no los
-   modela por separado. Es decisión de quien maneja el catálogo, no del código.
+Ninguna. Las tres que había quedaron cerradas arriba.
 
 ## El veredicto de la comparación
 
