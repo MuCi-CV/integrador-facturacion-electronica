@@ -1917,7 +1917,7 @@ Expected: **288 OK** sobre Python 3.7 + Django 3.2.
 
 ⚠️ Si falla por sintaxis, mirar los f-strings anidados y las anotaciones: 3.7 no soporta `list[int]` ni `dict[str, float]` sin `from __future__ import annotations`. Usar `List[int]` y `Dict[str, float]` de `typing`, que es lo que este plan usa.
 
-- [ ] **Step 2: Verificar sobre el stack REAL** (lo corre Carlos, necesita root)
+- [x] **Step 2: Verificar sobre el stack REAL** (lo corre Carlos, necesita root)
 
 ```
 PYTHON=/root/venv-integrador-52/bin/python SERVIDOR=root@muci.org REMOTO=wt-verificacion-52 ./verificar-en-stack-produccion.sh
