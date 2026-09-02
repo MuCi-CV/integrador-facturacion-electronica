@@ -4640,3 +4640,37 @@ class SettingsDeStockTest(TestCase):
         from django.conf import settings
 
         self.assertLessEqual(settings.STOCK_PAGE_SIZE, 100)
+
+
+class LecturaDeStockDeBimsTest(TestCase):
+    """
+    `bims.py` no tenía NINGUNA lectura de productos: sólo `create_sale`,
+    `get_posales`, `get_contacts` y `list_contacts`.
+    """
+
+    @patch.object(BimsApi, "login", return_value="fake_sid")
+    def test_pide_v_stock_para_que_venga_la_disponibilidad(self, _mock_login):
+        """
+        Sin `v_stock=1` la respuesta NO trae `AvailabilityFull`, que es de donde
+        sale el stock por depósito. Verificado contra la API viva.
+        """
+        api = BimsApi()
+        respuesta = {"status": "ok", "data": []}
+
+        with patch.object(api, "_retry_request", return_value=respuesta) as mock_req:
+            api.get_products_with_stock(limit=100, offset=0)
+
+        params = mock_req.call_args[1]["params"]
+        self.assertEqual(params["v_stock"], 1)
+        self.assertEqual(params["limit"], 100)
+        self.assertEqual(params["offset"], 0)
+
+    @patch.object(BimsApi, "login", return_value="fake_sid")
+    def test_usa_el_endpoint_de_index_con_json(self, _mock_login):
+        api = BimsApi()
+
+        with patch.object(api, "_retry_request", return_value={"status": "ok"}) as mock_req:
+            api.get_products_with_stock(limit=100, offset=200)
+
+        url = mock_req.call_args[0][1]
+        self.assertTrue(url.endswith("/products/index.json"), url)

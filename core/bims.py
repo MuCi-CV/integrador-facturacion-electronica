@@ -716,6 +716,29 @@ class BimsApi:
             posales.append((int(posale["id"]), posale.get("name") or "(sin nombre)"))
         return sorted(posales)
 
+    def get_products_with_stock(self, limit: int, offset: int) -> dict:
+        """
+        Una página de productos con su disponibilidad por depósito.
+
+        `v_stock=1` es lo que hace aparecer `AvailabilityFull`; sin ese parámetro
+        la respuesta no trae stock. Verificado contra la API viva el 2026-09-02.
+
+        ⚠️ **El `limit` no puede ser grande.** Con 500 la respuesta no entra en
+        los 30 s de `TIMEOUT_LECTURA` y da timeout, y el reintento tampoco salva
+        porque `PRESUPUESTO_REINTENTOS` (40 s) se reparte entre los intentos: si
+        el primero consume 30, al segundo le quedan 8. Con 100 anda.
+
+        No se usa `availabilities/index.json`, que sería más directo, porque
+        **pagina sin orden estable**: devolvió 21 filas donde debían ser 12, con
+        repetidas y distinto orden entre páginas, así que un barrido por ahí
+        puede perderse un producto entero.
+        """
+        url = f"{self.base_url}/products/index.json"
+        params = {"limit": limit, "offset": offset, "v_stock": 1}
+        if self.sid:
+            params["sid"] = self.sid
+        return self._retry_request(self.session.get, url, params=params)
+
     def get_contacts(self, limit=500, offset=0):
         url = f"{self.base_url}/contacts/"
         params = {
