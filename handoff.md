@@ -1,118 +1,134 @@
-# Handoff — sesión del 2026-09-01
+# Handoff — sesión del 2026-09-02
 
-**Rama:** `feature/hub-ingreso-cola` @ `55146bc` — **3 commits sin pushear, nada desplegado.**
-**Tests:** 217 OK en local (3.12 + Django 5.2.17) y **VERDE también sobre el stack de rollback**
-(3.7 + Django 3.2), verificado con `./verificar-en-stack-produccion.sh`.
+**Rama:** `feature/hub-ingreso-cola` @ `a756906` — **6 commits sin pushear, nada desplegado.**
+Tres son de hoy (`9e264b3`, `91f3dea`, `a756906`). El upstream de la rama es
+`github/feature/hub-ingreso-cola`; hay un segundo remoto `origin` al **mismo repo** cuya ref local
+está más atrasada, así que un `git log origin/…` da una cuenta distinta y engañosa.
+**Tests:** 241 OK en local (3.12 + Django 5.2.17) y **VERDE también sobre el stack de rollback**
+(3.7 + Django 3.2), verificado en cada commit con `./verificar-en-stack-produccion.sh`.
 
----
-
-## 1. La notebook se colgó tres veces, y la causa era nuestra
-
-Antes de programar nada hubo que resolver esto, porque impedía trabajar.
-
-**Causa raíz:** `IngresoAsincronoTest` mockeaba `process_order` **sin `return_value`**. La vista
-síncrona entregaba ese `MagicMock` a `Response(data=...)` y el encoder de DRF entraba en recursión
-infinita: pregunta `hasattr(obj, "tolist")`, que un `MagicMock` siempre inventa, y cada vuelta
-retiene un mock nuevo. **~22 GiB de RSS en unos 4 minutos.**
-
-Repro mínima, sin base de datos ni red: `JSONRenderer().render(MagicMock())`.
-
-Lo engañoso es que **el síntoma no se parece a la causa**: el traceback muere en
-`unittest/result.py:205` (`''.join(msgLines)`), o sea al *formatear* el error, no en el render.
-
-**No era headroom ni Chrome.** El proxy de headroom siguió logueando normal después de los dos OOM
-kills; su RSS está estable en 1,67 GiB.
-
-Los tres cuelgues: 11:30 (el kernel **no llegó a loguear nada** — congelamiento total), 11:36:27 y
-11:37:50 (esos dos sí dejaron `Out of memory: Killed process (python)` con ~22 GiB de anon-rss).
-
-**Arreglado** en `76b8c82`. Después, al implementar la Tarea 5, la vista dejó de importar
-`process_order` y la clase pasó a no mockear nada: la garantía es estructural y el riesgo
-desapareció del todo.
-
-**Mitigación de máquina:** se instaló `systemd-oomd` (255.4-1ubuntu8.17) y se agregó un drop-in
-propio para el corte por swap. Quedaron activas las dos redes:
-
-| cgroup | política | dispara cuando |
-|---|---|---|
-| `-.slice` | `ManagedOOMSwap=kill` (drop-in propio en `/etc/systemd/system/-.slice.d/`) | swap > 90% |
-| `user@1000.service` | `ManagedOOMMemoryPressure=kill` (50%) | presión PSI ≥50% por 20 s |
-
-⚠️ **Dos advertencias.** oomd **mata el cgroup entero**, o sea la pestaña de terminal completa con
-el `claude` que corra adentro. Y está verificada la **configuración**, no el comportamiento: no se
-probó en vivo, porque la única prueba honesta es desbocar un proceso de verdad.
-
-Para trabajo pesado sigue siendo más preciso el techo explícito, que mata solo el comando y deja el
-traceback:
-
-```bash
-( ulimit -v 6291456; .venv/bin/python manage.py test core/ --settings=muci-integrador.test_settings )
-```
+**Lo siguiente es el Despliegue 2 (Tarea 9)**, que es el que cambia el contrato del ingreso. Las
+Tareas 4 a 8 están listas en rama. Seguimiento vivo en `progreso.md`.
 
 ---
 
-## 2. Tarea 5 — el ingreso devuelve 202 y persiste (`e2066a1`)
+## 1. El Despliegue 1 quedó validado, con n=18 en vez de n=1
 
-`SalesView` deja de facturar en línea: persiste con `enqueue()` y devuelve **202**. El único no-2xx
-que queda es el 400 por request malformado, que depende de quien llama y no de BIMS. Con eso, una
-caída de BIMS ya no puede apagar el webhook de Woo.
+Lo que faltaba era "confirmar con una venta real". Se confirmó con **18**: las 18 ventas del 01/09
+quedaron con `external_reference = order_id`, `origin='woo'`, `status=COMPLETED` y los dos
+identificadores de BIMS llenos. Sobre las 8716 filas: **0 sin referencia, 0 discrepancias contra
+`order_id`, 0 duplicados, 0 `order_id` nulos**.
 
-Los **cuatro consumidores** pasaron a escribir en la BD: `retryfaileds`, el bloque de pausadas de
-`sync_bims_contacts` y los dos botones del admin — estos con el mensaje corregido a "encolada(s)".
+El cruce contra WooCommerce cerró también la otra mitad: las **82** filas con `woo_meta_ok=False`
+**ya tenían `_bims_sale_id` y `_bims_invoice_number` correctos en Woo** — 0 faltantes, 0 valores
+distintos. Y la 204000, la que había perdido la meta el 31/08, ya la tiene.
 
-**Tres desvíos del plan, deliberados:**
-
-1. **`PAUSED` entra en `REQUEUEABLE`.** El plan listaba `(FAILED, NOT_APPLICABLE)`, pero entonces el
-   reintento de `sync_bims_contacts` no podía reencolar nada: el plan se contradecía a sí mismo.
-2. **Los cuatro llaman `enqueue(external_reference or order_id, origin)`.** Las filas creadas entre
-   el `migrate` y el `restart` tienen la referencia en NULL; sin el rescate, `enqueue` reventaría
-   con "referencia no numérica" y esa orden no se reintentaría nunca más.
-3. **`enqueue` se apoya en `upsert_state`**, no en el `get_or_create` del plan: `order_id` sigue
-   siendo `NOT NULL` en la expansión.
-
-**Tests borrados a propósito:** `RetryFailedsCommandTest` (4) y el test de pausadas por HTTP.
-Probaban que los comandos interpretaran un `200`, un camino que ya no existe. Antes de borrarlos se
-verificó que la garantía de fondo —que las órdenes terminales queden en `NOT_APPLICABLE`— sigue
-cubierta por los tests de la Tarea 4.
+**Acceso nuevo:** hay un usuario MySQL `anthropic_readonly` que da lectura sobre `muci-integrador`,
+`muci`, `krayin` y `moodle`. La clave la tiene Carlos. Dos trampas al usarlo: las dos bases tienen
+**collations distintas** (comparar columnas entre ellas tira `ERROR 1267`, hay que forzar
+`COLLATE utf8mb4_general_ci` en las dos puntas) y el nombre de la base lleva guion, así que va entre
+backticks. **No se lee el `.env` ni `wp-config.php`** — con este usuario no hace falta.
 
 ---
 
-## 3. Tarea 6 — worker y reaper (`55146bc`)
+## 2. Tarea 7 — backoff para BIMS y auto-reparación de la meta (`9e264b3`, `91f3dea`)
 
-`process_queue` toma lotes de 20 con `SKIP LOCKED`, respeta `bims_next_attempt`, y marca
-`PROCESSING` **antes** de llamar a BIMS y en la misma transacción que la selección. Si se marcara
-después, una muerte durante la llamada dejaría la fila `PENDING` y otro worker la tomaría en
-paralelo. Hay test que lo fija espiando el estado desde adentro de `process_order`.
+La rama de BIMS espera `1, 5, 15, 60` minutos y a los 5 intentos deja de insistir con la fila en
+`FAILED`. La de Woo se reintenta en cada pasada, sin contador.
 
-El reaper corre primero, con umbral `QUEUE_REAPER_MINUTES` (default 10, nuevo en `.env.example`)
-para no robarle la fila a un worker vivo.
+**Los tres desvíos del plan salieron de la medición, no de una opinión** (detalle en `progreso.md`):
 
-**Bug del plan corregido:** `process-queue.sh` necesita **`cd /var/www/integrador`**. `settings.py`
-carga la config con `dotenv_values(".env")`, ruta **relativa**; desde el home del cron no hay `.env`
-y settings revienta con `AttributeError: 'NoneType' object has no attribute 'lower'` antes de llegar
-a Django. Comprobado corriendo el comando desde otro directorio. Sin ese `cd`, el cron habría
-fallado en el primer minuto.
+1. `process_order` ahora **marca `woo_meta_ok=True` al anotar**. Nadie lo hacía, así que la cola de
+   reparación crecía una fila por venta para siempre y nunca convergía.
+2. `_repair_woo_metas` **lee antes de escribir**. El PUT directo del plan habrían sido 82 escrituras
+   inútiles, y cada una dispara `order.updated`, que despierta al bot de WhatsApp por una orden
+   vieja.
+3. `MAX_META_ATTEMPTS` **queda afuera**: el plan lo definía sin usarlo y no hay columna donde contar.
 
-**Rutas verificadas por SSH** (como `anthropic_readonly`): el checkout real es `/var/www/integrador`
-y el intérprete `/root/venv-integrador-52/bin/python` (sacado del `ps` de gunicorn).
+**Un agujero propio, cerrado con test:** `_schedule_retry` buscaba por `external_reference`, así que
+una fila de la ventana del despliegue —referencia en NULL— no recibía reintento y quedaba
+`PROCESSING` hasta el reaper, sin contar el intento. Ahora usa `buscar_fila`, nueva y pública en
+`states.py`.
 
 ---
 
-## 4. Para mañana
+## 3. Tarea 8 — alertas a Slack y los reintentos fuera de Sentry (`a756906`)
 
-**Siguiente: Tarea 7** (reintentos por rama / backoff), después la 8 (alerta a Slack) y la 9
-(Despliegue 2).
+`core/alerts.py` con `notify(clave, texto)`, fail-safe entero. Tres disparadores al final de cada
+pasada: cola sobre el umbral, reintentos agotados (con los números de orden) y filas vencidas que no
+avanzan. Migración `0013`: un `CREATE TABLE` limpio.
 
-**Antes de desplegar, tres cosas:**
+**El desvío que importa: el throttle vive en la base, no en `django.core.cache`.** No hay `CACHES`
+configurado, así que Django usa `LocMemCache`, que es **por proceso** — y el worker es un proceso
+nuevo cada minuto. El `cache.add` del plan habría arrancado vacío en cada corrida: **60 mensajes por
+hora** durante una caída de BIMS.
+
+⚠️ **Y una corrección al plan que conviene no perder: ningún disparador detecta que el cron esté
+muerto.** El plan se lo atribuía al tercero, pero es imposible desde adentro del cron — si el cron
+no corre, el aviso tampoco. Necesita un latido externo y quedó fuera de alcance. El tercero detecta
+que la cola no avanza **aunque el worker corra**, que es otra cosa.
+
+`core/bims.py:446` pasó de `logging.error` a `logging.warning`: con
+`LoggingIntegration(event_level=ERROR)`, cada reintento transitorio era un evento de Sentry.
+
+---
+
+## 4. Hallazgo de negocio: 58 pedidos nunca llegaron al integrador
+
+`wc-completed`, monto > 0, sin fila, desde el 2025-10-13: **58 pedidos, Gs 7.268.027**. Son dos
+cosas distintas y conviene no mezclarlas:
+
+| | pedidos | monto | qué es |
+|---|---|---|---|
+| Cortesía | 20 | 2.878.027 | **no es falla**: hasta el 27/08 el código las descartaba a propósito |
+| Pago cobrado | **38** | **4.390.000** | la pérdida silenciosa real |
+
+Los 58 están en `wc-completed`, **0 cancelados, 0 con devolución**. El más reciente es del 26/08:
+desde el 27/08 no se perdió ninguno.
+
+**El dato que más pesa:** el 192578 y el 192584 tuvieron 10 y 2 cambios de estado por edición masiva
+entre el 14 y el 16/07 — alguien forzando el reenvío a mano. El reenvío **llegó** las dos veces,
+resolvió el contacto y **se cortó sin error y sin dejar fila**, mientras órdenes del mismo minuto
+completaban normal. Es el 503-sin-persistir de `SalesView`, con nombre y número de orden.
+
+**Planilla entregada a Finanzas** (xlsx + csv, ya enviada). La columna "Facturado en BIMS" dice
+**"Pendiente de verificar"**, y eso es a propósito: el chequeo automático contra BIMS **quedó
+inválido** porque el listado devolvió **18 ventas de más de 31.000**. No tomar esa corrida como
+evidencia de nada.
+
+**Para rehacerlo:** el endpoint documentado es `GET /api/sales/index.json` y acepta `limit`
+(máx. 500), `offset`, `plain` y `method` (`all|first|count`). El script está en el servidor en
+`/home/anthropic_readonly/verificar_58_en_bims.py` y **pagina mal**: pega a `/sales/` pelado. Antes
+de corregirlo conviene correr `sondear_sales_index.py`, que está al lado y compara las formas
+—incluido `method=count`, que dice el total de una—. Si `count` viniera 18, el problema no es la
+paginación sino el alcance de la credencial, y el crawl completo no sirve.
+
+Los dos scripts traen dos protecciones que **no son opcionales**: desconectan los `FileHandler`
+antes de paginar (recorrer ~31.000 ventas quemaría las 4 ventanas de rotación de `bims_api.log`,
+como pasó el 23/08 con los contactos) y desconectan Sentry.
+
+---
+
+## 5. Para el Despliegue 2
+
+**Antes de nada:** es el despliegue que cambia el contrato del ingreso. No es uno para dejar a
+medias ni para subir un viernes.
 
 1. ⚠️ **Las Tareas 5 y 6 van juntas o no van.** La 5 deja de facturar en línea y la 6 es lo único
    que vacía la cola: subir solo la 5 es dejar de facturar del todo.
-2. ⚠️ **La línea de cron la instala Carlos** (necesita root):
+2. **Migraciones a aplicar: `0012` y `0013`.** La `0012` es un no-op confirmado (0 filas medidas) y
+   la `0013` es un `CREATE TABLE` limpio.
+3. ⚠️ **La línea de cron la instala Carlos** (necesita root), y **con el `cd`**:
    `* * * * * /var/www/integrador/process-queue.sh >> /var/log/process-queue.log 2>&1`
-3. ⚠️ **`SKIP LOCKED` no está cubierto por los tests.** Django lo ignora sin error en SQLite, así
-   que la exclusión entre workers concurrentes solo se ejerce en MariaDB.
+4. **Variables nuevas del `.env`, las tres opcionales con default:** `QUEUE_ALERT_THRESHOLD` (10),
+   `QUEUE_SILENCE_MINUTES` (10) y `SLACK_WEBHOOK_URL`. Sin webhook no se avisa a nadie y todo lo
+   demás funciona igual — pero entonces el Despliegue 2 entra **sin la red de seguridad que lo hace
+   seguro**, así que conviene tener el webhook antes.
+5. ⚠️ **`SKIP LOCKED` sigue sin cobertura de tests.** Django lo ignora sin error en SQLite, así que
+   la exclusión entre workers concurrentes **solo se ejerce en MariaDB**, o sea recién en producción.
+6. **Hay dump previo:** `/root/bk/db-pre-expansion.sql.gz` (226 MB, 01/09). Conviene uno nuevo
+   antes, porque ese ya tiene dos días de ventas de diferencia.
 
-**Pendiente de revisar, posible problema vivo:** `runretryfaileds.sh` apunta a
-`/var/www/integrador.muci.org/backend`, que **no existe** en el servidor. Si esa es la ruta que usa
-el cron, el reintento de fallidas lleva tiempo sin correr. No se pudo confirmar: el crontab de root
-no es legible como `anthropic_readonly`.
+**Pendiente de revisar, del lado del servidor:** `runretryfaileds.sh` apunta a
+`/var/www/integrador.muci.org/backend`, que **no existe**. No se pudo confirmar si el cron lo usa
+porque el crontab de root no es legible como `anthropic_readonly`.

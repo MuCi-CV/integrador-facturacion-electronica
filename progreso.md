@@ -3,7 +3,7 @@
 **Spec:** `docs/superpowers/specs/2026-08-31-hub-ingreso-cola-estado-design.md`
 **Plan:** `docs/superpowers/plans/2026-08-31-hub-ingreso-cola-estado.md`
 **Rama:** `feature/hub-ingreso-cola`
-**Actualizado:** 2026-09-01 (cierre de sesión: Tareas 5 y 6 hechas, rama @ `55146bc` sin pushear)
+**Actualizado:** 2026-09-02 (Tareas 7 y 8 hechas, rama @ `a756906` sin pushear; sigue el Despliegue 2)
 
 ## Medición sobre producción del 2026-09-01 — resuelve las dos incógnitas abiertas
 
@@ -33,7 +33,9 @@ Django 5.2.17): 193 OK. Verificación posterior sobre los datos:
 | `woo_meta_ok=True` | 8433 = exactamente las `COMPLETED` sin `bims_sale_id` |
 
 **68 órdenes** (8501 − 8433) facturadas desde el 28/08 quedaron en `woo_meta_ok=False` a propósito:
-son el conjunto que el reaper de la Tarea 7 va a verificar contra WooCommerce.
+eran el conjunto que la Tarea 7 tenía que verificar contra WooCommerce. **Verificado el 2026-09-02,
+y el resultado cambió el diseño de la Tarea 7:** ya eran 82 (crecen una por venta) y **las 82 tenían
+la meta correcta en Woo — 0 realmente faltantes, 0 valores distintos**. Ver abajo.
 
 **Rollback:** código a **`43fd813`** y `systemctl restart`. Las migraciones se pueden dejar
 aplicadas — una columna nueva que el código viejo ignora es inofensiva.
@@ -45,8 +47,74 @@ contra MariaDB **en producción**. Se aceptó porque era un `ADD UNIQUE` estánd
 antes de tocar el esquema, y había dump. Salió bien; el hueco queda anotado por si el próximo
 cambio de esquema es más grande.
 
-**Falta:** confirmar con una venta real que `POST /sales/` sigue dando **200** con las dos columnas
-de identidad llenas.
+✅ **Confirmado el 2026-09-02 con 18 ventas reales**, no con una: las 18 del 01/09 quedaron con
+`external_reference = order_id`, `origin='woo'`, `status=COMPLETED` y **los dos identificadores de
+BIMS llenos**. Sobre las 8716 filas de hoy: 0 sin referencia, 0 discrepancias, 0 duplicados, 0
+`order_id` nulos. El Despliegue 1 queda cerrado y validado.
+
+---
+
+## Medición sobre producción del 2026-09-02 — cierra el Despliegue 1 y corrige la Tarea 7
+
+Cruce read-only de las dos bases (`muci-integrador` y `muci`) con el usuario MySQL
+`anthropic_readonly`.
+
+| chequeo | resultado |
+|---|---|
+| las 18 ventas del 01/09 con identidad completa | **18 de 18** |
+| filas totales / sin referencia / discrepancias / duplicados | 8716 / **0** / **0** / **0** |
+| por estado | 201 `FAILED`, 8515 `COMPLETED` |
+| filas `woo_meta_ok=False` con `bims_sale_id` | 82 |
+| de esas 82, **cuántas ya tenían la meta en Woo** | **82** (0 faltantes, 0 valores distintos) |
+
+**Las dos consecuencias de diseño**, las dos aplicadas en la Tarea 7:
+
+1. **Nadie ponía `woo_meta_ok=True` al anotar.** Ni el código desplegado, ni la rama, ni el plan: el
+   único escritor era la migración de backfill. Cada venta nueva nacía con el flag en `False`, así
+   que la cola de reparación **crecía una fila por venta para siempre** (68 el 01/09, 82 el 02/09).
+   Sin arreglarlo, `_repair_woo_metas` no converge nunca.
+2. **La reparación tiene que leer antes de escribir.** Con el PUT directo del plan, esas 82 filas
+   habrían sido **82 escrituras inútiles**, y cada `PUT` dispara `order.updated`, que despierta al
+   bot de WhatsApp por una orden vieja. El `GET` no tiene ese efecto.
+
+### `bims_invoice_number` viene en dos series, y no es clave única global
+
+| serie | punto de venta | `payment_method` | ventas desde el 28/08 |
+|---|---|---|---|
+| 12xxx | boletería física | `fooeventspos-*` | 47 |
+| 14xxx | web | `pagopar_*` | 35 |
+
+Hoy los rangos no chocan por dónde están parados, no por garantía. **Importa para el sub-proyecto
+C**, que es el que le manda ese número al CRM.
+
+### Hueco de facturación: 58 pedidos que nunca llegaron al integrador
+
+`wc-completed`, monto > 0, sin fila, desde el 2025-10-13: **58 pedidos, Gs 7.268.027**. Se desglosa
+en dos cosas distintas:
+
+| | pedidos | monto | qué es |
+|---|---|---|---|
+| Cortesía | 20 | 2.878.027 | **no es una falla**: hasta el 27/08 el código las descartaba a propósito |
+| Pago cobrado | **38** | **4.390.000** | **la pérdida silenciosa real** |
+
+Los 58 están hoy en `wc-completed`, **0 cancelados y 0 con devolución**. El 09/07 se perdieron **13
+de 17** pedidos con RUC/CI y **0 de 19** sin documento; el 10/07, ya normalizado, 0 de ambos grupos.
+**La causa técnica no está determinada:** quedaron descartadas la migración faltante
+(`core_ruccache` ya existía desde el 08/07 14:43:55) y `ruc.py` (sin cambios desde el 29/06, y ya
+era fail-safe).
+
+**Y hay algo que vale más que el monto:** el 192578 y el 192584 tuvieron **10 y 2 cambios de estado
+por edición masiva** entre el 14 y el 16/07 — alguien toggleando el estado para forzar el reenvío.
+El reenvío **sí llegó** las dos veces, resolvió el contacto del comprador (creó los contactos BIMS
+17573 y 17575) y **se cortó sin una línea de error y sin dejar fila**, mientras órdenes del mismo
+minuto completaban normal. Es el camino de `SalesView` que devuelve 503 y no persiste nada: **el
+riesgo vivo de A, documentado con nombre y número de orden.**
+
+Planilla entregada a Finanzas el 2026-09-02 (xlsx + csv, 16 columnas, tres hojas). La columna
+"Facturado en BIMS" dice **"Pendiente de verificar"**: el chequeo automático contra BIMS quedó
+inválido —el listado de la API devolvió **18 ventas de más de 31.000**— y poner "no facturado" ahí
+sería pasarle a Finanzas una conclusión falsa. Queda pendiente rehacer ese chequeo con la forma
+correcta del endpoint (`/api/sales/index.json`, que acepta `limit`, `offset` y `method=count`).
 
 ---
 
@@ -79,11 +147,11 @@ fundraising va a cargar donaciones desde Krayin y esas nunca pasan por WooCommer
 | 4 | `NOT_APPLICABLE` y `PAUSED` en uso | ✅ **hecha** | |
 | 5 | Ingreso 202 + persistencia | ✅ **hecha** | `e2066a1` |
 | 6 | Worker + reaper | ✅ **hecha** | `55146bc` |
-| 7 | Reintentos por rama | ⬜ | |
-| 8 | Alerta a Slack + corrección del logging | ⬜ | |
+| 7 | Reintentos por rama | ✅ **hecha** | `9e264b3` |
+| 8 | Alerta a Slack + corrección del logging | ✅ **hecha** | `a756906` |
 | 9 | 🚀 Despliegue 2 — el cambio de contrato | ⬜ | |
 
-**Tests:** 183 (base) → 186 (T1) → 193 (T2) → 201 (T4) → 209 (T5) → **217** (T6).
+**Tests:** 183 (base) → 186 (T1) → 193 (T2) → 201 (T4) → 209 (T5) → 217 (T6) → 228 (T7) → **241** (T8).
 
 ⚠️ **Las Tareas 5 y 6 no se pueden desplegar por separado.** La 5 deja de facturar en línea y la 6
 es lo único que vacía la cola: subir solo la 5 sería dejar de facturar del todo.
@@ -129,6 +197,47 @@ contacto, que es justo lo que hay que reencolar.
 
 ---
 
+### Desvíos del plan en la Tarea 7 — decididos el 2026-09-02
+
+Los tres salen de la medición de arriba, no de una opinión:
+
+1. **`process_order` marca `woo_meta_ok=True` al anotar.** Nadie lo hacía; sin esto la pasada de
+   reparación no converge nunca.
+2. **`_repair_woo_metas` lee antes de escribir.** Evita 82 `PUT` inútiles y sus 82 `order.updated`.
+   De paso queda auto-corrector: sirve para cualquier desincronización del flag, no solo para las 82
+   de hoy.
+3. **`MAX_META_ATTEMPTS = 20` queda afuera.** El plan lo definía y **no lo usaba**, y no hay columna
+   donde llevar la cuenta de esa rama: acotarlo costaría una migración para limitar algo que no
+   duele.
+
+**Un agujero propio, encontrado y cerrado con test:** `_schedule_retry` buscaba por
+`external_reference`, así que una fila de la ventana del despliegue —referencia en NULL, tomada por
+`order_id`— **no recibía su reintento** y quedaba `PROCESSING` hasta que pasara el reaper, sin contar
+el intento, o sea sin llegar nunca a `FAILED`. Ahora usa **`buscar_fila`, nueva y pública en
+`states.py`**, que hace el mismo rescate que `upsert_state`. Y `meta_confirmada` pasó a pública en
+`woocommerce.py`: la regla de comparar como texto tiene que ser una sola para el `PUT` y para el
+`GET`.
+
+### Desvíos del plan en la Tarea 8 — decididos el 2026-09-02
+
+1. ⚠️ **El throttle vive en la BASE (`AlertThrottle`, migración `0013`), no en
+   `django.core.cache`.** **No hay `CACHES` configurado**, así que Django usa `LocMemCache`, que es
+   **por proceso** — y el worker es un proceso nuevo cada minuto por cron. El `cache.add` del plan
+   habría arrancado vacío en cada corrida: **60 mensajes por hora** durante una caída de BIMS, que
+   es exactamente lo que el throttle viene a evitar. Hay test que lo fija limpiando el cache entre
+   dos avisos. Es la misma razón por la que la cola vive en MariaDB.
+2. **La marca de "ya avisé" se escribe DESPUÉS de que Slack contesta.** Si Slack está caído, el
+   aviso no se da por hecho; el costo está acotado por la cadencia del cron.
+3. **La medición de la cola va ANTES de tomar el lote.** Al final —como salía del plan— daba **0
+   pendientes con 15 esperando**, porque las filas de la pasada ya están en `PROCESSING`: la cola se
+   ve vacía justo cuando más cargada está. Lo encontró un test que falló.
+
+⚠️ **Corrección al plan que no hay que perder: NINGÚN disparador detecta que el cron esté muerto.**
+El plan se lo atribuía al tercero, pero es imposible desde adentro del cron — si el cron no corre,
+este código no corre y no avisa nada. Hace falta un **latido externo** y quedó **fuera de alcance**.
+Lo que el tercero sí detecta es que la cola no avanza **aunque el worker esté corriendo**.
+
+
 ## Decisiones que ya no se re-litigan
 
 | decisión | cuándo | por qué |
@@ -167,8 +276,18 @@ contacto, que es justo lo que hay que reencolar.
   intenta conectarse a un host inventado y **crashea sin generar nada**.
 - ⚠️ **`FAILED=1` y `COMPLETED=2` no se renumeran nunca.** Hay **8.702** filas en producción que
   dependen de esos valores (medido el 2026-09-01: 201 en `FAILED`, 8.501 en `COMPLETED`).
-- ⚠️ **La rama de Woo se repara sola a partir de la Tarea 7.** Hasta entonces, un fallo al anotar la
-  meta solo deja un `WARNING`.
+- ✅ **La rama de Woo se repara sola desde la Tarea 7** (`9e264b3`), y la reparación **lee antes de
+  escribir**. En producción todavía no: hasta el Despliegue 2, un fallo al anotar la meta solo deja
+  un `WARNING`.
+- ⚠️ **No hay `CACHES` configurado: `LocMemCache` es por proceso.** Cualquier cosa que se apoye en
+  `django.core.cache` para coordinar entre corridas del cron **no funciona** — el worker es un
+  proceso nuevo cada minuto. Por eso el throttle de alertas vive en la base.
+- ⚠️ **Un test puede salir a la red y seguir verde.** La verificación en el stack de rollback delató
+  que `WorkerDeColaTest` hacía un **GET HTTP real a WooCommerce**: la pasada de reparación de la
+  Tarea 7 levantaba las filas `COMPLETED` que esas pruebas dejan de adorno, y **el fallo de DNS lo
+  tragaba el `except` del lote**. Parcheado en `setUp` (`91f3dea`); de paso la suite bajó de 8,4 s a
+  3,4 s. Al agregar una pasada nueva al worker, revisar qué filas de los tests viejos caen en su
+  filtro.
 - **`black` no está instalado y el código no está formateado con él.** Correrlo ahora enterraría
   cualquier diff bajo cientos de líneas de estilo. Va como commit aislado, después del Despliegue 2.
 
@@ -178,7 +297,24 @@ contacto, que es justo lo que hay que reencolar.
 
 1. **Qué campos exactos de la factura de BIMS le interesan al CRM.** Bloquea **C**, no A.
 2. **Si las donaciones ya cargadas a mano se recuperan.** Bloquea el alcance de **F**.
-3. **Si las 149 cortesías históricas con precio se facturan retroactivamente.**
+3. **Si las 149 cortesías históricas con precio se facturan retroactivamente.** 20 de ellas están
+   en el hueco de los 58 pedidos.
+4. **Qué se hace con los 38 pedidos con pago cobrado (Gs 4.390.000) que nunca llegaron.** La
+   planilla ya está en manos de Finanzas; falta verificar en BIMS cuáles se facturaron a mano.
+5. **Si `AlertThrottle` se registra en el admin.** Sirve para ver por qué un aviso no salió y para
+   silenciarlo a mano; hoy no está.
+6. **Si se pone un latido externo** que detecte de verdad que el cron murió. La Tarea 8 no lo cubre
+   y no puede cubrirlo.
+
+## Deuda técnica anotada, no urgente
+
+- **`bims.py` no tiene ningún método de lectura de ventas** — solo `create_sale`, `get_posales`,
+  `get_contacts` y `list_contacts`. El sub-proyecto C va a necesitar un `get_sales()` para
+  reconciliar, y hoy eso vive en un script del scratchpad que además paginaba mal.
+- **El webhook `Refund order` sigue deshabilitado** (`failure_count 6`) y apunta a
+  `muci-integrador.staging.girolabs.cloud/refunds/`, una URL de **staging**: nunca estuvo apuntando
+  a producción. Mientras siga así, toda cancelación se resuelve a mano en los dos sistemas. BIMS
+  tiene `POST /api/sales/cancel/{id}.json` para cuando se decida cerrarlo.
 
 ---
 
