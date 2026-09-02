@@ -12,6 +12,7 @@ from core.bims import bims, BimsBusinessError
 from core.ruc import get_razon_social
 from core.models import ContactCache, FailedOrder
 from core.states import mark_not_applicable, upsert_state
+from core.stock import bims_product_id
 from core.woocommerce import wc_api, WooCommerceAPI
 from core.constants import (
     DISCOUNT_PRICE_PRODUCT_IDS,
@@ -413,15 +414,17 @@ def build_sale_products(
 
         product = wc_api.get_product(search_id)
 
-        if product.get("sku") == "":
+        # La traducción SKU → id de BIMS vive en `core.stock` y la comparte el
+        # barrido de stock. Si cada camino la implementara, los dos discreparían
+        # sobre qué producto de BIMS es cada producto de Woo, y eso se descubre
+        # facturando mal.
+        #
+        # `SkuDadoDeBaja` NO se captura acá a propósito: propaga y hace fallar la
+        # orden, que es lo que corresponde con un producto dado de baja. Lo que
+        # cambia respecto de antes es el mensaje, que ahora se entiende.
+        bims_id = bims_product_id(product.get("sku"))
+        if bims_id is None:
             msg = f"Producto {search_id} ({item.get('name')}) omitido: sin SKU."
-            logger.warning(f"Order {order_id}: {msg}")
-            skipped_messages.append(msg)
-            continue
-
-        bims_id = int(product.get("sku", 0))
-        if bims_id == 0:
-            msg = f"Producto {search_id} ({item.get('name')}) omitido: SKU es 0."
             logger.warning(f"Order {order_id}: {msg}")
             skipped_messages.append(msg)
             continue

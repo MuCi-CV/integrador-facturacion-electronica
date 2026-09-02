@@ -4241,3 +4241,94 @@ class ReintentosTransitoriosFueraDeSentryTest(TestCase):
         niveles = {r.levelname for r in capturado.records}
         self.assertIn("WARNING", niveles)
         self.assertNotIn("ERROR", niveles)
+
+
+class SkuABimsIdTest(TestCase):
+    """
+    El SKU de WooCommerce ES el id de producto de BIMS.
+
+    Comprobado sobre merch real el 2026-09-02: SKU 13 en Woo es
+    `JUGUETE MEDIDOR DE ALTURA (SPACE) - SC` id 13 en BIMS, SKU 16 es id 16 y
+    SKU 128 es `BOLSAS SC`. Ningún producto de BIMS tiene `code` cargado (0 de
+    427), así que el puntero vive del lado de Woo y esta traducción es el único
+    vínculo que existe.
+    """
+
+    def test_un_sku_numerico_es_el_id_de_bims(self):
+        from core.stock import bims_product_id
+
+        self.assertEqual(bims_product_id("128"), 128)
+
+    def test_un_sku_vacio_no_tiene_vinculo(self):
+        from core.stock import bims_product_id
+
+        self.assertIsNone(bims_product_id(""))
+        self.assertIsNone(bims_product_id(None))
+
+    def test_el_sku_cero_no_tiene_vinculo(self):
+        """`0` no es un id de BIMS: es el default de un campo sin llenar."""
+        from core.stock import bims_product_id
+
+        self.assertIsNone(bims_product_id("0"))
+
+    def test_un_sku_no_numerico_es_un_producto_dado_de_baja(self):
+        """
+        Convención de Carlos: al dar de baja un producto se le cambia el SKU
+        numérico por `<id>-<n>`, donde n es cuántas veces se dio de baja. No es
+        un dato inválido, es un estado, y el que llama decide qué hacer.
+        """
+        from core.stock import SkuDadoDeBaja, bims_product_id
+
+        for sku in ("7-1", "7-19", "149-5-0", "442-1"):
+            with self.assertRaises(SkuDadoDeBaja):
+                bims_product_id(sku)
+
+    def test_el_espacio_alrededor_no_molesta(self):
+        from core.stock import bims_product_id
+
+        self.assertEqual(bims_product_id(" 128 "), 128)
+
+
+class FacturarConSkuDadoDeBajaTest(TestCase):
+    """
+    Al facturar, un producto dado de baja DEBE hacer fallar la orden — decisión
+    de Carlos. Lo que cambia es el mensaje: antes quedaba
+    `invalid literal for int() with base 10: '149-5-0'`, que no le dice nada a
+    quien lo lee desde el admin.
+    """
+
+    def _order(self):
+        return {
+            "total": "10000",
+            "discount_total": "0",
+            "meta_data": [],
+            "billing": {},
+            "shipping": {},
+            "line_items": [
+                {
+                    "product_id": 162,
+                    "variation_id": 0,
+                    "quantity": 1,
+                    "total": "10000",
+                    "total_tax": "0",
+                    "name": "Taza dada de baja",
+                }
+            ],
+            "fee_lines": [],
+        }
+
+    @patch("core.services.resolve_contact_id", return_value=(999, None))
+    @patch("core.services.bims")
+    @patch("core.services.wc_api")
+    def test_un_producto_dado_de_baja_hace_fallar_la_orden_con_mensaje_claro(
+        self, mock_wc, mock_bims, _mock_contact
+    ):
+        mock_wc.get_order.return_value = self._order()
+        mock_wc.get_product.return_value = {"sku": "149-5-0"}
+
+        with self.assertRaises(Exception) as ctx:
+            process_order(order_id=204100)
+
+        self.assertIn("149-5-0", str(ctx.exception))
+        self.assertIn("baja", str(ctx.exception).lower())
+        mock_bims.create_sale.assert_not_called()
