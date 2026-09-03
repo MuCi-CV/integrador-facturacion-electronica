@@ -119,30 +119,74 @@ correcta del endpoint (`/api/sales/index.json`, que acepta `limit`, `offset` y `
 
 ---
 
-## Lo que sigue: sincronización de stock BIMS → WooCommerce
+## Sincronización de stock BIMS → WooCommerce
 
-Sub-proyecto nuevo, con sus propios documentos. **Implementado y en `main` @ `8996a71`, SIN
-desplegar y en modo seco.**
+Sub-proyecto con documentos propios. **Código desplegado en producción y en modo seco.** El
+2026-09-03 el barrido en seco destapó un bug de modelo, se arregló, y con eso quedó validado.
 
 - **Spec:** `docs/superpowers/specs/2026-09-02-sincronizacion-stock-bims-design.md`
-- **Plan:** `docs/superpowers/plans/2026-09-02-sincronizacion-stock-bims.md` — 10 tareas, 51 pasos, todos cerrados
+- **Plan:** `docs/superpowers/plans/2026-09-02-sincronizacion-stock-bims.md` — ejecutado; su Tarea 2
+  quedó **obsoleta** y está marcada como tal en la cabecera
 
-**288 tests** en local, en el stack de rollback y en el stack real. **Sin migraciones.** Arranca con
-`STOCK_SYNC_ENABLED=false`, así que desplegar el código **no cambia nada en la web**.
+### Estado al cierre del 2026-09-03
 
-⚠️ **La secuencia de despliegue tiene un paso que no se saltea:**
+| | |
+|---|---|
+| Producción | `main` @ **`5786b3e`** (19:49:35 UTC), sin migraciones, `STOCK_SYNC_ENABLED=false`, **sin cron** |
+| `main` local y remoto | **`19288fd`** — tres commits más que producción, **sin desplegar** |
+| Tests | **307** verdes en local (3.12) y en el stack de rollback (3.7 + Django 3.2) |
+| Depósitos `6,7` | ✅ **confirmados** |
 
-1. Subir el código con el flag apagado y **sin** la línea de cron.
-2. **Correr `manage.py sync_stock` a mano, en seco, y leer la lista completa.** Es la única
-   oportunidad de confirmar que los depósitos `6,7` son los correctos antes de que lo vea un
-   cliente, y de ver cuántas variaciones se descartan por SKU ambiguo (medido entre 16 y 32; el
-   barrido lo va a contar de verdad).
-3. Con esa lista aprobada, instalar el cron
-   (`*/15 * * * * root /var/www/integrador/sync-stock.sh`) y **recién después**
-   `STOCK_SYNC_ENABLED=true`.
+### Los dos barridos en seco, y para qué sirvió cada uno
 
-Se espera que el primer barrido **encienda** decenas de productos, no que apague:
-`JUGUETE CARTAS INFANTILES SC` dice 16 en la web y tiene **71** en BIMS.
+**El primero (15:30 UTC)** examinó 55 productos, encontró 48 vínculos y **destapó el bug**: dos
+variaciones sin SKU propio (`188079` y `188080`, `Ciencias de la tierra`) recibían **cada una** las
+16 unidades del `bims 575` — 32 publicadas donde hay 16. La regla de herencia por variación
+**fabricaba vínculos**, y su guarda de ambigüedad era **código muerto**: contaba "hermanas sin SKU"
+leyendo el SKU de la REST, que ya viene heredado, así que nunca podía dispararse.
+
+**El segundo (20:05 UTC, con el modelo nuevo)**: **401 vinculados**, 98 sin contraparte, **30
+cambios**, `depósitos [6, 7]`, y **la guarda de colisión no se disparó** — el invariante de SKU se
+sostiene en el catálogo completo.
+
+### El modelo: un producto de BIMS, un destino
+
+Fijado por Carlos el 2026-09-03: hay un producto de BIMS por producto simple o por variación.
+Variación con SKU propio → la variación. Variación sin SKU propio → **el padre, una sola vez**.
+
+**Y los contadores de los hijos no se tocan: los mantiene la cajería.** BIMS tiene un producto por
+*tipo* de taza y no por diseño (`bims 27` es "TAZA PEQUEÑA - TTKLAB", no conoce "Newton" ni "Pato"),
+así que el detalle por diseño sólo existe del lado de Woo y nadie más lo puede llevar. Consecuencia
+asumida: para esos productos, publicar el stock del padre **no cambia lo que la web vende**.
+
+### Dos trampas de la REST de WooCommerce, las dos costaron un bug
+
+1. **`get_sku()` devuelve el SKU efectivo**, o sea el del padre cuando la variación no tiene propio.
+   "Tiene el 575" y "hereda el 575" llegan **idénticos**. Se resuelve comparando con el del padre,
+   y eso vale por un invariante medido: **0 SKU propios numéricos repetidos** en el catálogo.
+2. **`manage_stock` de una variación tiene TRES valores**: `true`, `false` y el string **`"parent"`**,
+   que aparece sólo cuando el padre sí gestiona. `bool("parent")` es `True`, así que leerlo crudo
+   **invierte el sentido**: el seco reportó **57** variaciones autogestionadas contra **22** reales.
+
+### Lo que falta, en orden
+
+1. **Verificar `19288fd` sobre el stack real** (necesita root, lo corre Carlos):
+   `PYTHON=/root/venv-integrador-52/bin/python SERVIDOR=root@muci.org REMOTO=wt-verificacion-52 ./verificar-en-stack-produccion.sh`
+2. **Desplegar** (`git pull origin main` + `systemctl restart`). Sin migraciones, flag apagado, sin
+   cron: no cambia nada en la web.
+3. **Tercer barrido en seco.** Los 30 cambios no se van a mover; lo que cambia es que la lista de
+   autogestionadas baja de 57 a ~22 reales y **pueden aparecer flips que el bug ocultaba** (un
+   destino con `"parent"` se leía como que ya gestionaba stock, así que no avisaba).
+   ⚠️ Respaldar `bims_api.log*` antes: cada seco rota el log 3 veces.
+4. **Aprobar la lista de "pasarían de ILIMITADO a limitado"** — es lo único que queda entre esto y
+   prender el flag.
+5. Cron (`*/15 * * * * root /var/www/integrador/sync-stock.sh`) **con logrotate desde el día uno**, y
+   **recién después** `STOCK_SYNC_ENABLED=true`.
+
+⚠️ **La guarda de radio va a pasar raspando:** hay **5 apagados** y `STOCK_ZERO_GUARD` es **5**, que
+aborta con *más* de 5. Decidido: **dejarlo en 5**. Un aborto avisa y es reversible; subir el tope
+justo para la primera corrida es apagar la guarda en el único momento en que hay 5 apagados de
+verdad esperando.
 
 ---
 
