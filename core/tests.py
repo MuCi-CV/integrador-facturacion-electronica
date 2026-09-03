@@ -4441,87 +4441,269 @@ class StockVendibleTest(TestCase):
         self.assertEqual(stock_vendible(av, [6, 7]), 5.0)
 
 
-class HerenciaDeSkuTest(TestCase):
+class SkuPropioTest(TestCase):
     """
-    Heredar el SKU del padre es la semántica de WooCommerce
-    (`WC_Product_Variation::get_sku()` lo hace), así que no es un parche. Pero se
-    rompe con varias hermanas sin SKU: `Taza pequeña` tiene SKU 27 en el padre y
-    **9 variaciones sin SKU** —nueve diseños de la misma taza— y en BIMS el
-    producto 27 tiene UN stock. Heredar ahí escribiría el mismo número nueve
-    veces: inventario multiplicado por 9.
+    Distinguir el SKU **propio** del **heredado**, que es lo que la REST de
+    WooCommerce no dice: `WC_Product_Variation::get_sku()` devuelve el del padre
+    cuando la variación no tiene, así que las dos situaciones llegan idénticas.
 
-    Medido el 2026-09-02: 323 variaciones tienen SKU propio, 32 padres tienen
-    exactamente una variación sin SKU, y 12 padres tienen varias (59
-    variaciones, con `Libros Ttklab` en 23).
+    Se resuelve comparando con el del padre, y eso sólo es válido por un
+    invariante del catálogo **medido el 2026-09-03**: no existe ningún SKU propio
+    numérico repetido entre productos y variaciones (0 filas). Entonces
+    `sku == sku_del_padre` implica que es heredado y no propio.
     """
 
-    def test_el_sku_propio_de_la_variacion_manda(self):
-        from core.stock import resolver_bims_id
+    def test_un_sku_igual_al_del_padre_es_heredado(self):
+        from core.stock import sku_propio
 
-        bims_id, motivo = resolver_bims_id("13", "999", hermanas_sin_sku=1)
+        self.assertIsNone(sku_propio("575", "575"))
 
-        self.assertEqual(bims_id, 13)
-        self.assertIsNone(motivo)
+    def test_un_sku_distinto_al_del_padre_es_propio(self):
+        from core.stock import sku_propio
 
-    def test_sin_sku_propio_y_unica_hermana_hereda_del_padre(self):
-        from core.stock import resolver_bims_id
+        self.assertEqual(sku_propio("639", "575"), "639")
 
-        bims_id, motivo = resolver_bims_id(None, "575", hermanas_sin_sku=1)
+    def test_sin_padre_con_sku_el_de_la_variacion_es_propio(self):
+        """`Plantines`: el padre no tiene SKU y las variaciones sí (639, 638)."""
+        from core.stock import sku_propio
 
-        self.assertEqual(bims_id, 575)
-        self.assertIsNone(motivo)
+        self.assertEqual(sku_propio("639", None), "639")
 
-    def test_con_varias_hermanas_sin_sku_no_se_hereda(self):
-        """El caso `Taza pequeña`: heredar multiplicaría el stock por 9."""
-        from core.stock import SKU_AMBIGUO, resolver_bims_id
+    def test_un_sku_vacio_no_es_propio(self):
+        from core.stock import sku_propio
 
-        bims_id, motivo = resolver_bims_id(None, "27", hermanas_sin_sku=9)
+        self.assertIsNone(sku_propio("", "575"))
 
-        self.assertIsNone(bims_id)
-        self.assertEqual(motivo, SKU_AMBIGUO)
+    def test_la_comparacion_ignora_espacios(self):
+        from core.stock import sku_propio
 
-    def test_ni_la_variacion_ni_el_padre_tienen_sku(self):
-        from core.stock import SKU_SIN_VINCULO, resolver_bims_id
+        self.assertIsNone(sku_propio(" 575 ", "575"))
 
-        bims_id, motivo = resolver_bims_id(None, None, hermanas_sin_sku=1)
 
-        self.assertIsNone(bims_id)
-        self.assertEqual(motivo, SKU_SIN_VINCULO)
+class ResolucionDeDestinosTest(TestCase):
+    """
+    **Un producto de BIMS, un destino de escritura.** Es la regla que fija Carlos
+    (2026-09-03) y reemplaza la herencia por variación, que fabricaba vínculos:
+    `188079` y `188080` no tienen SKU propio y el barrido les atribuía el `575`
+    del padre, así que iba a publicarles el stock de un producto ajeno **dos
+    veces**.
 
-    def test_un_producto_dado_de_baja_se_saltea_sin_frenar_el_barrido(self):
+    Si la variación tiene SKU propio, el destino es la variación. Si no lo tiene,
+    hereda, y entonces el dueño del stock es **el padre, una sola vez**.
+    """
+
+    def _padre(self, **kwargs):
+        base = {
+            "id": 187056,
+            "type": "variable",
+            "status": "publish",
+            "sku": "575",
+            "name": "Ciencias de la tierra",
+            "stock_quantity": 99,
+            "manage_stock": True,
+        }
+        base.update(kwargs)
+        return base
+
+    def _variacion(self, **kwargs):
+        base = {
+            "id": 188079,
+            "status": "publish",
+            "sku": "575",
+            "name": "Ciencias de la tierra - Online",
+            "stock_quantity": 49,
+            "manage_stock": False,
+        }
+        base.update(kwargs)
+        return base
+
+    def test_un_producto_simple_es_su_propio_destino(self):
+        from core.stock import destinos_de_producto
+
+        producto = {
+            "id": 100,
+            "type": "simple",
+            "status": "publish",
+            "sku": "13",
+            "name": "Bolsas",
+            "stock_quantity": 5,
+            "manage_stock": True,
+        }
+
+        destinos, _descartes, _ignoradas = destinos_de_producto(producto, [])
+
+        self.assertEqual(len(destinos), 1)
+        self.assertEqual(destinos[0].bims_id, 13)
+        self.assertEqual(destinos[0].ruta_woo, "100")
+        self.assertEqual(destinos[0].stock_actual, 5.0)
+
+    def test_dos_variaciones_sin_sku_propio_dan_UN_destino_y_es_el_padre(self):
+        """El bug de `bims 575`: dos escrituras de 16 publicaban 32 unidades."""
+        from core.stock import destinos_de_producto
+
+        destinos, _descartes, _ignoradas = destinos_de_producto(
+            self._padre(),
+            [
+                self._variacion(id=188079, status="publish"),
+                self._variacion(id=188080, status="private", stock_quantity=17),
+            ],
+        )
+
+        self.assertEqual(len(destinos), 1)
+        self.assertEqual(destinos[0].woo_id, 187056)
+        self.assertEqual(destinos[0].ruta_woo, "187056")
+        self.assertEqual(destinos[0].bims_id, 575)
+        self.assertEqual(destinos[0].stock_actual, 99.0)
+
+    def test_cada_variacion_con_sku_propio_es_un_destino(self):
+        """`Plantines`: 639 y 638 son dos productos distintos en BIMS."""
+        from core.stock import destinos_de_producto
+
+        destinos, _descartes, _ignoradas = destinos_de_producto(
+            self._padre(id=199449, sku=None, name="Plantines"),
+            [
+                self._variacion(id=199450, sku="639", status="private",
+                                stock_quantity=None),
+                self._variacion(id=199451, sku="638", status="private",
+                                stock_quantity=None),
+            ],
+        )
+
+        self.assertEqual(
+            sorted((d.bims_id, d.ruta_woo) for d in destinos),
+            [
+                (638, "199449/variations/199451"),
+                (639, "199449/variations/199450"),
+            ],
+        )
+
+    def test_un_padre_cuyas_variaciones_tienen_todas_sku_propio_no_es_destino(self):
+        """Nadie hereda su SKU, así que no le corresponde stock a él."""
+        from core.stock import destinos_de_producto
+
+        destinos, _descartes, _ignoradas = destinos_de_producto(
+            self._padre(),
+            [self._variacion(id=188079, sku="639")],
+        )
+
+        self.assertEqual([d.woo_id for d in destinos], [188079])
+
+    def test_una_variacion_que_hereda_pero_gestiona_su_stock_se_reporta(self):
         """
-        En el barrido, a diferencia de la facturación, una baja NO es un error:
-        se saltea y se cuenta. Frenar un barrido entero porque un producto está
-        de baja sería absurdo.
+        Las 22 medidas el 2026-09-03 (8 padres, todos merch: tazas, remeras,
+        posters). WooCommerce usa el contador de la variación, así que escribir en
+        el padre publica un número que **no limita la venta**. Decisión de Carlos:
+        reportarlas y no tocarlas.
         """
-        from core.stock import SKU_DADO_DE_BAJA, resolver_bims_id
+        from core.stock import destinos_de_producto
 
-        bims_id, motivo = resolver_bims_id("7-19", None, hermanas_sin_sku=1)
+        destinos, _descartes, ignoradas = destinos_de_producto(
+            self._padre(id=1708, sku="27", name="Taza pequeña"),
+            [
+                self._variacion(id=1739, sku="27", name="Taza pequeña - Newton",
+                                manage_stock=True, stock_quantity=0),
+                self._variacion(id=14124, sku="27", name="Tazas Pequeñas SC",
+                                manage_stock=True, stock_quantity=88),
+            ],
+        )
 
-        self.assertIsNone(bims_id)
-        self.assertEqual(motivo, SKU_DADO_DE_BAJA)
+        self.assertEqual([d.woo_id for d in destinos], [1708])
+        self.assertEqual(sorted(i.woo_id for i in ignoradas), [1739, 14124])
+        self.assertEqual([i.bims_id for i in ignoradas], [27, 27])
 
-    def test_un_padre_dado_de_baja_no_se_hereda(self):
-        from core.stock import SKU_DADO_DE_BAJA, resolver_bims_id
+    def test_las_variaciones_en_estado_no_vendible_quedan_afuera(self):
+        """`private` sí entra: es el catálogo del POS de FooEvents."""
+        from core.stock import destinos_de_producto
 
-        bims_id, motivo = resolver_bims_id(None, "442-1", hermanas_sin_sku=1)
+        destinos, _descartes, _ignoradas = destinos_de_producto(
+            self._padre(id=199449, sku=None),
+            [
+                self._variacion(id=1, sku="639", status="private"),
+                self._variacion(id=2, sku="640", status="draft"),
+                self._variacion(id=3, sku="641", status="trash"),
+            ],
+        )
 
-        self.assertIsNone(bims_id)
-        self.assertEqual(motivo, SKU_DADO_DE_BAJA)
+        self.assertEqual([d.bims_id for d in destinos], [639])
+
+    def test_un_producto_en_estado_no_vendible_no_da_destinos(self):
+        from core.stock import destinos_de_producto
+
+        destinos, _descartes, _ignoradas = destinos_de_producto(
+            self._padre(type="simple", status="draft"), []
+        )
+
+        self.assertEqual(destinos, [])
+
+    def test_un_sku_dado_de_baja_se_cuenta_como_descarte(self):
+        from core.stock import SKU_DADO_DE_BAJA, destinos_de_producto
+
+        destinos, descartes, _ignoradas = destinos_de_producto(
+            self._padre(id=199449, sku=None),
+            [self._variacion(id=1, sku="442-1")],
+        )
+
+        self.assertEqual(destinos, [])
+        self.assertEqual(descartes[SKU_DADO_DE_BAJA], 1)
+
+    def test_un_producto_simple_dado_de_baja_se_cuenta_una_sola_vez(self):
+        """
+        Un SKU de baja no es además "sin vínculo": es un solo motivo. Contarlo dos
+        veces infla el reporte y hace parecer que hay más productos sueltos de los
+        que hay.
+        """
+        from core.stock import SKU_DADO_DE_BAJA, SKU_SIN_VINCULO, destinos_de_producto
+
+        _destinos, descartes, _ignoradas = destinos_de_producto(
+            self._padre(type="simple", sku="7-19"), []
+        )
+
+        self.assertEqual(descartes[SKU_DADO_DE_BAJA], 1)
+        self.assertEqual(descartes[SKU_SIN_VINCULO], 0)
+
+    def test_el_stock_nulo_de_un_producto_sin_gestion_cuenta_como_cero(self):
+        """
+        `manage_stock=no` deja `stock_quantity` en `None`. Cuenta como 0 para que
+        la diferencia se detecte, y `gestiona_stock` queda en False para poder
+        avisar que ese destino pasaría de ilimitado a limitado.
+        """
+        from core.stock import destinos_de_producto
+
+        destinos, _descartes, _ignoradas = destinos_de_producto(
+            self._padre(id=199449, sku=None),
+            [self._variacion(id=199450, sku="639", stock_quantity=None,
+                             manage_stock=False)],
+        )
+
+        self.assertEqual(destinos[0].stock_actual, 0.0)
+        self.assertFalse(destinos[0].gestiona_stock)
 
 
 class CalculoDeCambiosTest(TestCase):
     """Sólo se escribe donde el número difiere, y no se apaga en masa."""
 
+    def _destino(self, woo_id, bims_id, stock_actual, ruta=None, gestiona=True,
+                 etiqueta=""):
+        from core.stock import Destino
+
+        return Destino(
+            woo_id=woo_id,
+            ruta_woo=ruta or str(woo_id),
+            bims_id=bims_id,
+            stock_actual=stock_actual,
+            gestiona_stock=gestiona,
+            etiqueta=etiqueta,
+        )
+
     def test_solo_devuelve_los_que_cambian(self):
         from core.stock import calcular_cambios
 
-        candidatos = [
-            {"woo_id": 100, "ruta_woo": "100", "bims_id": 13, "stock_actual": 5.0},
-            {"woo_id": 200, "ruta_woo": "200", "bims_id": 128, "stock_actual": 128.0},
+        destinos = [
+            self._destino(100, 13, 5.0),
+            self._destino(200, 128, 128.0),
         ]
 
-        cambios = calcular_cambios(candidatos, {13: 7.0, 128: 128.0})
+        cambios = calcular_cambios(destinos, {13: 7.0, 128: 128.0})
 
         self.assertEqual(len(cambios), 1)
         self.assertEqual(cambios[0].woo_id, 100)
@@ -4531,16 +4713,11 @@ class CalculoDeCambiosTest(TestCase):
         """WooCommerce escribe una variación en `products/{padre}/variations/{id}`."""
         from core.stock import calcular_cambios
 
-        candidatos = [
-            {
-                "woo_id": 188079,
-                "ruta_woo": "187056/variations/188079",
-                "bims_id": 575,
-                "stock_actual": 49.0,
-            }
+        destinos = [
+            self._destino(188079, 575, 49.0, ruta="187056/variations/188079")
         ]
 
-        cambios = calcular_cambios(candidatos, {575: 16.0})
+        cambios = calcular_cambios(destinos, {575: 16.0})
 
         self.assertEqual(cambios[0].ruta_woo, "187056/variations/188079")
 
@@ -4551,19 +4728,17 @@ class CalculoDeCambiosTest(TestCase):
         """
         from core.stock import calcular_cambios
 
-        candidatos = [{"woo_id": 100, "ruta_woo": "100", "bims_id": 13, "stock_actual": 5.0}]
-
-        self.assertEqual(calcular_cambios(candidatos, {}), [])
+        self.assertEqual(calcular_cambios([self._destino(100, 13, 5.0)], {}), [])
 
     def test_marca_los_que_apagan_la_venta(self):
         from core.stock import calcular_cambios
 
-        candidatos = [
-            {"woo_id": 100, "ruta_woo": "100", "bims_id": 13, "stock_actual": 5.0},
-            {"woo_id": 200, "ruta_woo": "200", "bims_id": 14, "stock_actual": 0.0},
+        destinos = [
+            self._destino(100, 13, 5.0),
+            self._destino(200, 14, 0.0),
         ]
 
-        cambios = calcular_cambios(candidatos, {13: 0.0, 14: 3.0})
+        cambios = calcular_cambios(destinos, {13: 0.0, 14: 3.0})
 
         apagados = [c for c in cambios if c.apaga]
         self.assertEqual([c.woo_id for c in apagados], [100])
@@ -4572,9 +4747,65 @@ class CalculoDeCambiosTest(TestCase):
         """Woo guarda '5' y BIMS '5.0000000000000000': es el mismo número."""
         from core.stock import calcular_cambios
 
-        candidatos = [{"woo_id": 100, "ruta_woo": "100", "bims_id": 13, "stock_actual": 5.0}]
+        self.assertEqual(calcular_cambios([self._destino(100, 13, 5.0)], {13: 5.0}), [])
 
-        self.assertEqual(calcular_cambios(candidatos, {13: 5.0}), [])
+    def test_el_cambio_arrastra_si_el_destino_ya_gestionaba_stock(self):
+        """
+        Lo necesita el reporte: un destino con `manage_stock=False` pasa de venta
+        ilimitada a limitada, y eso hay que poder decirlo antes de aplicarlo.
+        """
+        from core.stock import calcular_cambios
+
+        destinos = [self._destino(100, 13, 0.0, gestiona=False, etiqueta="Bolsas")]
+
+        cambios = calcular_cambios(destinos, {13: 7.0})
+
+        self.assertFalse(cambios[0].gestiona_stock)
+        self.assertEqual(cambios[0].etiqueta, "Bolsas")
+
+
+class GuardaDeColisionTest(TestCase):
+    """
+    La red de seguridad del bug del 2026-09-03. Con "un producto de BIMS, un
+    destino" no debería dispararse nunca: si lo hace, hay un SKU propio repetido
+    en Woo —el invariante roto— y escribir el mismo stock N veces multiplica el
+    inventario. Detecta, no arregla.
+    """
+
+    def _destino(self, woo_id, bims_id):
+        from core.stock import Destino
+
+        return Destino(
+            woo_id=woo_id,
+            ruta_woo=str(woo_id),
+            bims_id=bims_id,
+            stock_actual=0.0,
+            gestiona_stock=True,
+            etiqueta="",
+        )
+
+    def test_sin_repetidos_no_hay_colision(self):
+        from core.stock import colisiones
+
+        destinos = [self._destino(100, 13), self._destino(200, 14)]
+
+        self.assertEqual(colisiones(destinos), {})
+
+    def test_dos_destinos_al_mismo_producto_de_bims_se_agrupan(self):
+        from core.stock import colisiones
+
+        destinos = [
+            self._destino(188079, 575),
+            self._destino(188080, 575),
+            self._destino(100, 13),
+        ]
+
+        encontradas = colisiones(destinos)
+
+        self.assertEqual(list(encontradas), [575])
+        self.assertEqual(
+            sorted(d.woo_id for d in encontradas[575]), [188079, 188080]
+        )
 
 
 class GuardaDeRadioTest(TestCase):
@@ -4595,6 +4826,7 @@ class GuardaDeRadioTest(TestCase):
         return Cambio(
             woo_id=woo_id, ruta_woo=str(woo_id), bims_id=woo_id, stock_actual=1.0,
             stock_nuevo=0.0 if apaga else 9.0, apaga=apaga,
+            gestiona_stock=True, etiqueta="",
         )
 
     def test_apagar_pocos_esta_dentro_del_tope(self):
@@ -4758,7 +4990,8 @@ class BarridoDeStockTest(TestCase):
 
         # Un producto simple con SKU 13 y stock 5 en Woo.
         self.wc.get_products.side_effect = [
-            [{"id": 100, "type": "simple", "sku": "13", "stock_quantity": 5}],
+            [{"id": 100, "type": "simple", "status": "publish", "sku": "13",
+              "name": "Bolsas", "stock_quantity": 5, "manage_stock": True}],
             [],
         ]
         self.wc.get_variations.return_value = []
@@ -4832,7 +5065,8 @@ class BarridoDeStockTest(TestCase):
 
         self.wc.get_products.side_effect = [
             [
-                {"id": 100 + i, "type": "simple", "sku": str(20 + i), "stock_quantity": 9}
+                {"id": 100 + i, "type": "simple", "status": "publish",
+                 "sku": str(20 + i), "stock_quantity": 9, "manage_stock": True}
                 for i in range(6)
             ],
             [],
@@ -4845,13 +5079,133 @@ class BarridoDeStockTest(TestCase):
         self.wc.update_product_stock.assert_not_called()
         self.assertIn("stock_apagon_masivo", self._claves_avisadas())
 
+    def _padre_con_variaciones(self, variaciones, **kwargs):
+        """Deja a `get_products` devolviendo un solo padre variable."""
+        padre = {
+            "id": 187056,
+            "type": "variable",
+            "status": "publish",
+            "sku": "575",
+            "name": "Ciencias de la tierra",
+            "stock_quantity": 99,
+            "manage_stock": True,
+        }
+        padre.update(kwargs)
+        self.wc.get_products.side_effect = [[padre], []]
+        self.wc.get_variations.return_value = variaciones
+
+    def test_dos_variaciones_que_heredan_escriben_UNA_vez_en_el_padre(self):
+        """
+        La regresión del bug encontrado en el barrido en seco del 2026-09-03:
+        `188079` y `188080` no tienen SKU propio, así que las dos llegaban con el
+        `575` heredado y **cada una recibía las 16 unidades**: 32 publicadas donde
+        hay 16. Ahora se escribe una sola vez, en el padre.
+        """
+        from django.core.management import call_command
+
+        self._padre_con_variaciones(
+            [
+                {"id": 188079, "status": "publish", "sku": "575",
+                 "name": "Online", "stock_quantity": 49, "manage_stock": False},
+                {"id": 188080, "status": "private", "sku": "575",
+                 "name": "En puerta", "stock_quantity": 17, "manage_stock": False},
+            ]
+        )
+        self._bims_devuelve({"575": "16"})
+
+        with self.settings(STOCK_SYNC_ENABLED=True):
+            call_command("sync_stock", stdout=StringIO())
+
+        self.wc.update_product_stock.assert_called_once_with("187056", 16.0)
+
+    def test_una_variacion_con_sku_propio_recibe_su_propio_stock(self):
+        """`Plantines`: 639 y 638 son productos distintos en BIMS."""
+        from django.core.management import call_command
+
+        self._padre_con_variaciones(
+            [
+                {"id": 199450, "status": "private", "sku": "639",
+                 "name": "15000gs", "stock_quantity": None, "manage_stock": False},
+            ],
+            id=199449,
+            sku=None,
+        )
+        self._bims_devuelve({"639": "16"})
+
+        with self.settings(STOCK_SYNC_ENABLED=True):
+            call_command("sync_stock", stdout=StringIO())
+
+        self.wc.update_product_stock.assert_called_once_with(
+            "199449/variations/199450", 16.0
+        )
+
+    def test_reporta_las_variaciones_que_gestionan_su_propio_stock(self):
+        """
+        Las 22 medidas el 2026-09-03. Escribir en el padre no limita su venta, así
+        que van al reporte y **no se tocan**.
+        """
+        from django.core.management import call_command
+
+        self._padre_con_variaciones(
+            [
+                {"id": 14124, "status": "publish", "sku": "575",
+                 "name": "Tazas Pequeñas SC", "stock_quantity": 88,
+                 "manage_stock": True},
+            ]
+        )
+        self._bims_devuelve({"575": "16"})
+        salida = StringIO()
+
+        with self.settings(STOCK_SYNC_ENABLED=True):
+            call_command("sync_stock", stdout=salida)
+
+        self.wc.update_product_stock.assert_called_once_with("187056", 16.0)
+        self.assertIn("14124", salida.getvalue())
+
+    def test_avisa_que_un_destino_pasaria_de_ilimitado_a_limitado(self):
+        """
+        `manage_stock=False` significa venta ilimitada. Publicar el stock lo
+        convierte en limitado, y eso tiene que verse en el seco **antes** de
+        aplicarlo: son 14 de los 26 padres.
+        """
+        from django.core.management import call_command
+
+        self.wc.get_products.side_effect = [
+            [{"id": 100, "type": "simple", "status": "publish", "sku": "13",
+              "name": "Bolsas", "stock_quantity": None, "manage_stock": False}],
+            [],
+        ]
+        salida = StringIO()
+
+        with self.settings(STOCK_SYNC_ENABLED=False):
+            call_command("sync_stock", stdout=salida)
+
+        self.assertIn("ilimitado", salida.getvalue().lower())
+
+    def test_no_restringe_a_publish_para_no_perder_el_catalogo_del_pos(self):
+        """
+        295 de las 318 variaciones con SKU propio cuelgan de padres `private`
+        (medido 2026-09-03). Pedir sólo `publish` las dejaba todas afuera, que era
+        la causa real de los "422 inventariables sin contraparte".
+        """
+        from django.core.management import call_command
+
+        with self.settings(STOCK_SYNC_ENABLED=False):
+            call_command("sync_stock", stdout=StringIO())
+
+        self.assertTrue(self.wc.get_products.call_args_list)
+        for llamada in self.wc.get_products.call_args_list:
+            # `llamada[1]` y no `.kwargs`: 3.7 no tiene esa propiedad.
+            self.assertNotEqual(llamada[1].get("status"), "publish")
+
     def test_muchas_subidas_no_disparan_la_guarda(self):
         """El primer barrido enciende decenas de productos: es lo esperado."""
         from django.core.management import call_command
 
         self.wc.get_products.side_effect = [
             [
-                {"id": 100 + i, "type": "simple", "sku": str(20 + i), "stock_quantity": 0}
+                {"id": 100 + i, "type": "simple", "status": "publish",
+                 "sku": str(20 + i), "stock_quantity": 0, "manage_stock": True}
                 for i in range(20)
             ],
             [],
@@ -4924,8 +5278,10 @@ class BarridoDeStockTest(TestCase):
 
         self.wc.get_products.side_effect = [
             [
-                {"id": 100, "type": "simple", "sku": "13", "stock_quantity": 5},
-                {"id": 101, "type": "simple", "sku": "14", "stock_quantity": 5},
+                {"id": 100, "type": "simple", "status": "publish", "sku": "13",
+                 "stock_quantity": 5, "manage_stock": True},
+                {"id": 101, "type": "simple", "status": "publish", "sku": "14",
+                 "stock_quantity": 5, "manage_stock": True},
             ],
             [],
         ]

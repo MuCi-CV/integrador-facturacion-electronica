@@ -10,6 +10,7 @@ import y hace login. Es la misma razón por la que `core/states.py` vive aparte.
 """
 
 import re
+from collections import Counter
 from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 _SKU_NUMERICO = re.compile(r"^\d+$")
@@ -114,44 +115,175 @@ def stock_vendible(
 
 
 SKU_SIN_VINCULO = "sin_vinculo"
-SKU_AMBIGUO = "ambiguo"
 SKU_DADO_DE_BAJA = "dado_de_baja"
 
+#: Un producto `private` **sí** se vende: es el catálogo del POS de FooEvents
+#: (`fooeventspos_variation_show_in_pos = yes`). `draft` y `trash`, no.
+ESTADOS_VENDIBLES = ("publish", "private")
 
-def resolver_bims_id(
-    sku_propio: Optional[str],
-    sku_padre: Optional[str],
-    hermanas_sin_sku: int,
-) -> Tuple[Optional[int], Optional[str]]:
+
+def sku_propio(sku_variacion: Optional[str], sku_padre: Optional[str]) -> Optional[str]:
     """
-    El id de BIMS de un producto de Woo, o el motivo por el que no se puede.
+    El SKU **propio** de una variación, o `None` si no tiene y está heredando.
 
-    Devuelve `(bims_id, None)` cuando hay vínculo y `(None, motivo)` cuando no.
-    `hermanas_sin_sku` es cuántas variaciones publicadas del mismo padre están
-    sin SKU propio, **contándose a sí misma**.
+    ⚠️ La REST de WooCommerce **no distingue las dos situaciones**:
+    `WC_Product_Variation::get_sku()` devuelve el del padre cuando la variación no
+    tiene propio, así que "tiene el 575" y "hereda el 575" llegan idénticos.
 
-    La herencia del padre es la semántica de WooCommerce, pero sólo vale cuando
-    la variación es la única sin SKU. Con varias, todas heredarían el mismo id de
-    BIMS y se escribiría el mismo stock N veces: inventario multiplicado.
+    Se resuelve comparando contra el del padre, y eso es válido por un invariante
+    del catálogo **medido el 2026-09-03**: no hay ningún SKU propio numérico
+    repetido entre productos y variaciones. Si son iguales, es heredado.
     """
+    propio = str(sku_variacion or "").strip()
+    if not propio:
+        return None
+    if propio == str(sku_padre or "").strip():
+        return None
+    return propio
+
+
+class Destino(NamedTuple):
+    """
+    Un producto de BIMS y el **único** lugar de Woo donde se escribe su stock.
+
+    `gestiona_stock` es el estado actual de `manage_stock` en Woo: cuando es
+    `False`, publicar el stock convierte ese producto de ilimitado a limitado, y
+    eso hay que informarlo antes de aplicarlo.
+    """
+
+    woo_id: int
+    ruta_woo: str
+    bims_id: int
+    stock_actual: float
+    gestiona_stock: bool
+    etiqueta: str
+
+
+class VariacionIgnorada(NamedTuple):
+    """
+    Una variación que hereda el SKU del padre **pero gestiona su propio stock**.
+
+    WooCommerce usa el contador de la variación, así que el número que se escriba
+    en el padre no limita su venta. Son 22 (8 padres, todo merch) medidas el
+    2026-09-03. Decisión de Carlos: reportarlas y **no tocarlas** — arreglarlas
+    implica apagarles `manage_stock` en Woo, que es un cambio de datos.
+    """
+
+    woo_id: int
+    padre_id: int
+    bims_id: int
+    stock_actual: float
+    etiqueta: str
+
+
+def _stock_actual(entrada: dict) -> float:
+    return _a_float(entrada.get("stock_quantity"))
+
+
+def destinos_de_producto(
+    producto: dict, variaciones: Optional[list]
+) -> Tuple[List[Destino], "Counter", List[VariacionIgnorada]]:
+    """
+    Los destinos de escritura de un producto de Woo: **uno por producto de BIMS**.
+
+    La regla es la de Carlos (2026-09-03), y refleja cómo se crea el catálogo: hay
+    un producto de BIMS por producto simple o por variación. Entonces una
+    variación con SKU propio **es** un producto de BIMS y recibe su stock; una que
+    hereda pertenece al producto del padre, y en ese caso el destino es **el
+    padre, una sola vez**.
+
+    Reemplaza la herencia por variación, que fabricaba vínculos: `188079` y
+    `188080` no tienen SKU propio y recibían cada una el stock del `575`, o sea
+    32 unidades publicadas donde hay 16.
+    """
+    descartes: Counter = Counter()
+    destinos: List[Destino] = []
+    ignoradas: List[VariacionIgnorada] = []
+
+    if producto.get("status") not in ESTADOS_VENDIBLES:
+        return destinos, descartes, ignoradas
+
+    sku_del_padre = producto.get("sku")
+    padre_dado_de_baja = False
     try:
-        propio = bims_product_id(sku_propio)
+        bims_id_padre = bims_product_id(sku_del_padre)
     except SkuDadoDeBaja:
-        return None, SKU_DADO_DE_BAJA
-    if propio is not None:
-        return propio, None
+        bims_id_padre = None
+        padre_dado_de_baja = True
+        descartes[SKU_DADO_DE_BAJA] += 1
 
-    if hermanas_sin_sku > 1:
-        return None, SKU_AMBIGUO
+    if not variaciones:
+        if bims_id_padre is not None:
+            destinos.append(
+                Destino(
+                    woo_id=producto["id"],
+                    ruta_woo=str(producto["id"]),
+                    bims_id=bims_id_padre,
+                    stock_actual=_stock_actual(producto),
+                    gestiona_stock=bool(producto.get("manage_stock")),
+                    etiqueta=producto.get("name") or "",
+                )
+            )
+        elif not padre_dado_de_baja:
+            # Un SKU de baja ya se contó arriba: es un motivo, no dos.
+            descartes[SKU_SIN_VINCULO] += 1
+        return destinos, descartes, ignoradas
 
-    try:
-        heredado = bims_product_id(sku_padre)
-    except SkuDadoDeBaja:
-        return None, SKU_DADO_DE_BAJA
-    if heredado is not None:
-        return heredado, None
+    hereda_alguien = False
 
-    return None, SKU_SIN_VINCULO
+    for variacion in variaciones:
+        if variacion.get("status") not in ESTADOS_VENDIBLES:
+            continue
+
+        try:
+            propio = bims_product_id(sku_propio(variacion.get("sku"), sku_del_padre))
+        except SkuDadoDeBaja:
+            descartes[SKU_DADO_DE_BAJA] += 1
+            continue
+
+        if propio is not None:
+            destinos.append(
+                Destino(
+                    woo_id=variacion["id"],
+                    ruta_woo=f"{producto['id']}/variations/{variacion['id']}",
+                    bims_id=propio,
+                    stock_actual=_stock_actual(variacion),
+                    gestiona_stock=bool(variacion.get("manage_stock")),
+                    etiqueta=variacion.get("name") or "",
+                )
+            )
+            continue
+
+        # Hereda del padre: el dueño del stock es el padre, no ella.
+        if bims_id_padre is None:
+            descartes[SKU_SIN_VINCULO] += 1
+            continue
+
+        hereda_alguien = True
+        if variacion.get("manage_stock"):
+            ignoradas.append(
+                VariacionIgnorada(
+                    woo_id=variacion["id"],
+                    padre_id=producto["id"],
+                    bims_id=bims_id_padre,
+                    stock_actual=_stock_actual(variacion),
+                    etiqueta=variacion.get("name") or "",
+                )
+            )
+
+    if hereda_alguien and bims_id_padre is not None:
+        destinos.append(
+            Destino(
+                woo_id=producto["id"],
+                ruta_woo=str(producto["id"]),
+                bims_id=bims_id_padre,
+                stock_actual=_stock_actual(producto),
+                gestiona_stock=bool(producto.get("manage_stock")),
+                etiqueta=producto.get("name") or "",
+            )
+        )
+
+    return destinos, descartes, ignoradas
 
 
 class Cambio(NamedTuple):
@@ -169,9 +301,13 @@ class Cambio(NamedTuple):
     stock_actual: float
     stock_nuevo: float
     apaga: bool
+    gestiona_stock: bool
+    etiqueta: str
 
 
-def calcular_cambios(candidatos: list, stock_por_bims_id: dict) -> List[Cambio]:
+def calcular_cambios(
+    destinos: Iterable[Destino], stock_por_bims_id: dict
+) -> List[Cambio]:
     """
     Las escrituras necesarias, y sólo ésas.
 
@@ -181,28 +317,45 @@ def calcular_cambios(candidatos: list, stock_por_bims_id: dict) -> List[Cambio]:
     """
     cambios = []
 
-    for candidato in candidatos:
-        bims_id = candidato["bims_id"]
-        if bims_id not in stock_por_bims_id:
+    for destino in destinos:
+        if destino.bims_id not in stock_por_bims_id:
             continue
 
-        nuevo = float(stock_por_bims_id[bims_id])
-        actual = float(candidato["stock_actual"])
+        nuevo = float(stock_por_bims_id[destino.bims_id])
+        actual = float(destino.stock_actual)
         if nuevo == actual:
             continue
 
         cambios.append(
             Cambio(
-                woo_id=candidato["woo_id"],
-                ruta_woo=candidato["ruta_woo"],
-                bims_id=bims_id,
+                woo_id=destino.woo_id,
+                ruta_woo=destino.ruta_woo,
+                bims_id=destino.bims_id,
                 stock_actual=actual,
                 stock_nuevo=nuevo,
                 apaga=nuevo <= 0 < actual,
+                gestiona_stock=destino.gestiona_stock,
+                etiqueta=destino.etiqueta,
             )
         )
 
     return cambios
+
+
+def colisiones(destinos: Iterable[Destino]) -> Dict[int, List[Destino]]:
+    """
+    Productos de BIMS reclamados por más de un destino, agrupados por id.
+
+    Con el modelo de "un producto de BIMS, un destino" esto **no debería pasar
+    nunca**, y por eso existe: si pasa, hay un SKU propio repetido en Woo —el
+    invariante medido roto— y publicar el mismo stock N veces multiplica el
+    inventario. Es la red de seguridad del bug del 2026-09-03, no su arreglo: el
+    arreglo es que el padre sea un único destino.
+    """
+    por_bims_id: Dict[int, List[Destino]] = {}
+    for destino in destinos:
+        por_bims_id.setdefault(destino.bims_id, []).append(destino)
+    return {bims_id: ds for bims_id, ds in por_bims_id.items() if len(ds) > 1}
 
 
 def radio_excedido(cambios: Iterable[Cambio], tope: int) -> int:

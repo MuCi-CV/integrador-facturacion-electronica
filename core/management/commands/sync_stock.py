@@ -18,13 +18,13 @@ from django.core.management.base import BaseCommand
 from core.alerts import notify
 from core.bims import bims
 from core.stock import (
-    SKU_AMBIGUO,
     SKU_DADO_DE_BAJA,
     SKU_SIN_VINCULO,
     calcular_cambios,
+    colisiones,
     desglose_por_deposito,
+    destinos_de_producto,
     radio_excedido,
-    resolver_bims_id,
     stock_vendible,
 )
 from core.woocommerce import wc_api
@@ -52,10 +52,29 @@ class Command(BaseCommand):
         if options["seco"]:
             escribe = False
 
-        candidatos, descartes = self._candidatos_de_woo()
-        if not candidatos:
+        destinos, descartes, ignoradas = self._destinos_de_woo()
+        if not destinos:
             self.stdout.write("Ningún producto de WooCommerce quedó vinculado.")
             self._informar_descartes(descartes)
+            return
+
+        choques = colisiones(destinos)
+        if choques:
+            # No debería pasar con "un producto de BIMS, un destino". Si pasa, hay
+            # un SKU propio repetido en Woo y escribir multiplicaría el inventario.
+            detalle = "; ".join(
+                f"bims {bims_id} ← "
+                + ", ".join(f"woo {d.woo_id}" for d in ds)
+                for bims_id, ds in sorted(choques.items())
+            )
+            notify(
+                "stock_colision_de_sku",
+                f"⛔ El barrido de stock abortó: {len(choques)} producto(s) de BIMS "
+                f"están reclamados por más de un destino de WooCommerce, así que "
+                f"publicar duplicaría su inventario. Revisar los SKU repetidos: "
+                f"{detalle}",
+            )
+            self.stderr.write(f"Colisión de SKU en {len(choques)}: no se escribe nada.")
             return
 
         datos_bims, paginas_fallidas = self._stock_de_bims()
@@ -76,7 +95,7 @@ class Command(BaseCommand):
             return
 
         stock_bims = {bims_id: d["total"] for bims_id, d in datos_bims.items()}
-        cambios = calcular_cambios(candidatos, stock_bims)
+        cambios = calcular_cambios(destinos, stock_bims)
 
         excedido = radio_excedido(cambios, settings.STOCK_ZERO_GUARD)
         if excedido:
@@ -93,7 +112,7 @@ class Command(BaseCommand):
             )
             return
 
-        self._informar(cambios, candidatos, descartes, datos_bims, escribe)
+        self._informar(cambios, destinos, descartes, ignoradas, datos_bims, escribe)
 
         if not escribe:
             self.stdout.write(
@@ -122,45 +141,45 @@ class Command(BaseCommand):
 
     # ---------- lectura ----------
 
-    def _candidatos_de_woo(self) -> Tuple[List[dict], Counter]:
+    def _destinos_de_woo(self):
         """
-        Los productos publicados de Woo que tienen vínculo con BIMS.
+        Los destinos de escritura de Woo: **uno por producto de BIMS**.
 
         Arranca por Woo y no por BIMS a propósito: la respuesta ya trae el stock
         actual, así que la comparación sale gratis y no hace falta ni tabla nueva
         ni migración para saber qué cambió.
+
+        ⚠️ **No se filtra por `status="publish"`**, y no es un olvido: **295 de las
+        318 variaciones con SKU propio cuelgan de padres `private`** (medido el
+        2026-09-03), porque así vive el catálogo del POS de FooEvents. Pedir sólo
+        `publish` las dejaba afuera a todas, y ésa era la causa real de los "422
+        productos inventariables de BIMS sin contraparte". El filtro por estado
+        vendible lo hace `core.stock.ESTADOS_VENDIBLES`, que sí deja afuera
+        `draft` y `trash`.
         """
-        candidatos: List[dict] = []
+        destinos = []
         descartes: Counter = Counter()
+        ignoradas = []
 
         for producto in self._paginar_productos_woo():
-            if producto.get("type") == "variable":
-                candidatos.extend(self._candidatos_de_variaciones(producto, descartes))
-                continue
-
-            bims_id, motivo = resolver_bims_id(
-                producto.get("sku"), None, hermanas_sin_sku=1
+            variaciones = (
+                wc_api.get_variations(producto["id"], per_page=PAGINA_WOO)
+                if producto.get("type") == "variable"
+                else []
             )
-            if bims_id is None:
-                descartes[motivo] += 1
-                continue
-            candidatos.append(
-                {
-                    "woo_id": producto["id"],
-                    "ruta_woo": str(producto["id"]),
-                    "bims_id": bims_id,
-                    "stock_actual": float(producto.get("stock_quantity") or 0),
-                }
+            unos, esos_descartes, esas_ignoradas = destinos_de_producto(
+                producto, variaciones
             )
+            destinos.extend(unos)
+            descartes.update(esos_descartes)
+            ignoradas.extend(esas_ignoradas)
 
-        return candidatos, descartes
+        return destinos, descartes, ignoradas
 
     def _paginar_productos_woo(self):
         pagina = 1
         while True:
-            productos = wc_api.get_products(
-                per_page=PAGINA_WOO, page=pagina, status="publish"
-            )
+            productos = wc_api.get_products(per_page=PAGINA_WOO, page=pagina)
             if not productos:
                 return
             for producto in productos:
@@ -168,30 +187,6 @@ class Command(BaseCommand):
             if len(productos) < PAGINA_WOO:
                 return
             pagina += 1
-
-    def _candidatos_de_variaciones(
-        self, padre: dict, descartes: Counter
-    ) -> List[dict]:
-        variaciones = wc_api.get_variations(padre["id"], per_page=PAGINA_WOO)
-        sin_sku = sum(1 for v in variaciones if not str(v.get("sku") or "").strip())
-
-        salida = []
-        for variacion in variaciones:
-            bims_id, motivo = resolver_bims_id(
-                variacion.get("sku"), padre.get("sku"), hermanas_sin_sku=sin_sku or 1
-            )
-            if bims_id is None:
-                descartes[motivo] += 1
-                continue
-            salida.append(
-                {
-                    "woo_id": variacion["id"],
-                    "ruta_woo": f"{padre['id']}/variations/{variacion['id']}",
-                    "bims_id": bims_id,
-                    "stock_actual": float(variacion.get("stock_quantity") or 0),
-                }
-            )
-        return salida
 
     def _stock_de_bims(self) -> Tuple[Dict[int, dict], int]:
         """
@@ -250,7 +245,7 @@ class Command(BaseCommand):
     # ---------- reporte ----------
 
     def _informar(
-        self, cambios, candidatos, descartes, datos_bims, escribe: bool
+        self, cambios, destinos, descartes, ignoradas, datos_bims, escribe: bool
     ) -> None:
         """
         El desglose no es prolijidad: como WooCommerce **no sabe** en qué depósito
@@ -259,7 +254,7 @@ class Command(BaseCommand):
         explicar después.
         """
         self.stdout.write(
-            f"Vinculados {len(candidatos)} | cambios {len(cambios)} | "
+            f"Vinculados {len(destinos)} | cambios {len(cambios)} | "
             f"depósitos {settings.STOCK_WAREHOUSE_IDS} | "
             f"{'ESCRIBE' if escribe else 'SECO'}"
         )
@@ -271,9 +266,13 @@ class Command(BaseCommand):
                 f"  {flecha} woo {cambio.woo_id} (bims {cambio.bims_id}): "
                 f"{cambio.stock_actual:g} -> {cambio.stock_nuevo:g}"
                 f"  [{detalle or 'sin stock en ningún depósito habilitado'}]"
+                f"  {cambio.etiqueta[:40]}"
             )
 
-        vinculados = {c["bims_id"] for c in candidatos}
+        self._informar_flips(cambios)
+        self._informar_ignoradas(ignoradas)
+
+        vinculados = {d.bims_id for d in destinos}
         sin_contraparte = sorted(set(datos_bims) - vinculados)
         if sin_contraparte:
             self.stdout.write(
@@ -288,14 +287,58 @@ class Command(BaseCommand):
 
         self._informar_descartes(descartes)
 
+    def _informar_flips(self, cambios) -> None:
+        """
+        Los destinos que pasarían de **venta ilimitada a limitada**.
+
+        `update_product_stock` escribe `manage_stock: True`, así que un producto
+        que hoy no gestiona stock queda gobernado por el número de BIMS. Son 14 de
+        los 26 padres (medido 2026-09-03). Es inherente a publicar stock —no se
+        puede publicar sin gestionar—, pero tiene que verse en el seco antes de
+        aplicarlo, porque cambia cómo se vende.
+        """
+        flips = [c for c in cambios if not c.gestiona_stock]
+        if not flips:
+            return
+        self.stdout.write(
+            f"⚠️  {len(flips)} destino(s) pasarían de ILIMITADO a limitado "
+            f"(hoy no gestionan stock):"
+        )
+        for cambio in flips:
+            self.stdout.write(
+                f"  woo {cambio.woo_id} (bims {cambio.bims_id}) -> "
+                f"{cambio.stock_nuevo:g}  {cambio.etiqueta[:45]}"
+            )
+
+    def _informar_ignoradas(self, ignoradas) -> None:
+        """
+        Variaciones que heredan el SKU del padre **y gestionan su propio stock**.
+
+        WooCommerce usa el contador de la variación, así que el número escrito en
+        el padre no limita su venta. Son 22 en 8 padres, todo merch (tazas,
+        remeras, posters). Decisión de Carlos (2026-09-03): **reportarlas y no
+        tocarlas**; arreglarlas es apagarles `manage_stock` en Woo, que es un
+        cambio de datos y no le toca a un barrido decidirlo.
+        """
+        if not ignoradas:
+            return
+        self.stdout.write(
+            f"{len(ignoradas)} variación(es) heredan el SKU del padre pero "
+            f"gestionan su propio stock: el número del padre NO limita su venta. "
+            f"No se tocan (hay que apagarles manage_stock en Woo):"
+        )
+        for ignorada in ignoradas:
+            self.stdout.write(
+                f"  woo {ignorada.woo_id} (padre {ignorada.padre_id}, "
+                f"bims {ignorada.bims_id}, stock {ignorada.stock_actual:g})  "
+                f"{ignorada.etiqueta[:40]}"
+            )
+
     def _informar_descartes(self, descartes: Counter) -> None:
         if not descartes:
             return
         etiquetas = {
-            SKU_AMBIGUO: (
-                "sin SKU y con hermanas sin SKU (heredar multiplicaría el stock)"
-            ),
-            SKU_SIN_VINCULO: "sin SKU ni en la variación ni en el padre",
+            SKU_SIN_VINCULO: "sin SKU propio y sin SKU en el padre",
             SKU_DADO_DE_BAJA: "SKU de producto dado de baja",
         }
         self.stdout.write("Descartados:")
