@@ -1,5 +1,14 @@
 # Sincronización de stock BIMS → WooCommerce — Plan de implementación
 
+> ⚠️ **Este plan se ejecutó completo el 2026-09-02, y su Tarea 2 quedó OBSOLETA el 2026-09-03.**
+> El barrido en seco sobre producción demostró que la regla de herencia padre → variación que
+> definían los pasos de la Tarea 2 **fabrica vínculos**: publicaba el stock de un producto de BIMS en
+> cada variación que heredaba su SKU, o sea inventario multiplicado. Se reemplazó por "un producto de
+> BIMS, un destino", con la resolución en `core.stock.destinos_de_producto`. La regla nueva, el
+> invariante que la sostiene y las tres cosas que el seco invalidó están en la spec, sección
+> **"El destino de escritura"** y **"Lo que encontró el barrido en seco"**. Los pasos de abajo se
+> dejan como registro de lo que se ejecutó, no como descripción del código actual.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Que WooCommerce publique el stock que BIMS tiene, para los productos que BIMS declara inventariables, sin poder apagar ventas por un error de lectura o de configuración.

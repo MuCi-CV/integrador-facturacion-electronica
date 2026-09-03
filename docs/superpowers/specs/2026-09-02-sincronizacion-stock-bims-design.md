@@ -106,38 +106,63 @@ con el camino de venta. Si cada camino la implementa, van a discrepar sobre qué
 cada producto de Woo, y eso se descubre facturando mal. (15 de los 350 SKU no son numéricos:
 `442-1`, `92-5`, `7-2`, con patrón `<id BIMS>-<sufijo>`.)
 
-### La regla de herencia padre → variación
+### El destino de escritura: un producto de BIMS, un destino
 
-El nivel del vínculo **no es uniforme**: en los juguetes el SKU está en la variación, y en el libro
-de colorear está en el padre. La regla, en orden:
+> ⚠️ **Revisado el 2026-09-03.** La versión anterior de esta sección definía una regla de
+> herencia **por variación** —"si es la única hermana sin SKU, hereda el del padre"— y el barrido en
+> seco demostró que **fabrica vínculos**. Se reemplaza por la regla de abajo. El detalle de lo que
+> salió mal está en "Lo que encontró el barrido en seco", al final.
 
-| caso | qué se hace | volumen |
+El catálogo se crea con **un producto de BIMS por producto simple o por variación** (Carlos,
+2026-09-03). De ahí la regla, que tiene un solo criterio:
+
+| caso | destino de escritura | volumen medido 2026-09-03 |
 |---|---|---|
-| la variación tiene SKU propio | se usa | 323 variaciones |
-| no tiene, el padre sí, y es la **única** hermana sin SKU | **hereda del padre** | **hasta 32** (ver nota) |
-| no tiene, y hay **varias** hermanas sin SKU | **se saltea y se reporta** | 59 variaciones en 12 padres |
-| ni la variación ni el padre tienen SKU | sin vínculo, nada que hacer | 16 padres |
+| producto simple con SKU propio | **él mismo** | 90 |
+| variación con SKU **propio** | **la variación** | 318 |
+| variación **sin** SKU propio (hereda) | **el padre, UNA sola vez** | 26 padres, 76 variaciones |
+| ni la variación ni el padre tienen SKU | sin vínculo, nada que hacer | — |
 
-**Nota sobre el "hasta 32":** hay 32 padres con exactamente una variación sin SKU, y de los 44
-padres con variaciones sin SKU, **28 tienen SKU** para heredar. La intersección exacta no se midió,
-así que el caso de herencia cubre **entre 16 y 32** variaciones. Es un rango, no un dato: la
-implementación lo va a contar de verdad en el barrido en seco.
+**434 destinos en total.** El punto de la regla es que **el número de destinos no depende de cuántas
+variaciones hereden**: si nueve diseños de `Taza pequeña` heredan el SKU 27, el destino sigue siendo
+uno —el padre— y las 16 unidades de BIMS se publican una vez.
 
-La herencia es la semántica de WooCommerce (`WC_Product_Variation::get_sku()` hereda del padre), así
-que no es un parche. **Pero se rompe con varias hermanas:** `Taza pequeña` tiene SKU 27 en el padre
-y **9 variaciones sin SKU** —nueve diseños de la misma taza—. En BIMS el producto 27 tiene *un*
-stock; heredar ahí escribiría el mismo número nueve veces, o sea **inventario multiplicado por 9**.
-Es detectable, así que el barrido no tiene por qué adivinar: se saltea y se informa.
+#### Cómo se distingue "SKU propio" de "SKU heredado"
 
-**Consecuencia aceptada (Carlos, 2026-09-02):** esas 59 variaciones siguen con el stock que Woo
-tenga hoy, igual que ahora — no hay regresión. Y la contabilidad no se rompe porque **la venta de
-esas variaciones se resta del padre en BIMS**. Lo que queda pendiente es corregirles el SKU en Woo;
-el barrido produce esa lista. Los tres casos grandes son `Libros Ttklab` (23), `Taza pequeña` (9) y
-`Pines` (4).
+⚠️ **La REST de WooCommerce no lo dice.** `WC_Product_Variation::get_sku()` devuelve el del padre
+cuando la variación no tiene propio, así que "tiene el 575" y "hereda el 575" llegan **idénticos** en
+el JSON. No hay campo que los separe y `postmeta` no se expone.
 
-Salvedad para esa conversación: puede que esos nueve diseños **legítimamente compartan una sola
-línea de stock en BIMS**. Si es así, el problema no es el SKU faltante sino que BIMS no los modela
-por separado, y Woo no debería fingir que sí. La sincronización no puede resolver eso; sólo mostrarlo.
+Se resuelve **comparando con el SKU del padre**, y eso es válido por un invariante del catálogo
+**medido el 2026-09-03**: no existe ningún SKU propio numérico repetido entre productos y
+variaciones (consulta sobre `wpzv_postmeta`, **0 filas**). Entonces `sku == sku_del_padre` implica
+heredado.
+
+El invariante es la base de la regla, así que si algún día se rompe hay que enterarse: para eso está
+la **guarda de colisión** (`core.stock.colisiones`), que aborta el barrido si dos destinos reclaman
+el mismo producto de BIMS. Con este modelo no debería dispararse nunca.
+
+#### Las 22 variaciones que heredan pero gestionan su propio stock
+
+De las 76 que heredan, **22 tienen `manage_stock=yes` propio** (8 padres, todo merch: tazas 27 y 28,
+`Tazas Pequeñas SC` 162, bolsas 8, remeras 24, posters 29, stickers 108). WooCommerce usa el
+contador de la variación, así que **el número escrito en el padre no limita su venta**.
+
+**Decisión (Carlos, 2026-09-03): el barrido las reporta y no las toca.** Arreglarlas es apagarles
+`manage_stock` en Woo, que es un cambio de datos y no le corresponde decidirlo a un barrido. La
+lista que produce cada corrida es el insumo para decidirlo aparte. Casi todas están hoy en stock 0;
+la excepción es `14124` (`Tazas Pequeñas SC`) con 88 unidades y venta el 30/08.
+
+### No se filtra por `status="publish"`
+
+**295 de las 318 variaciones con SKU propio cuelgan de padres `private`** (medido 2026-09-03), y no
+es un descuido del catálogo: así vive el **POS de FooEvents** (`fooeventspos_variation_show_in_pos =
+yes`). Un producto `private` **se vende** en boletería.
+
+Pedir sólo `publish` las dejaba afuera a todas, y **ésa era la causa real** de los "422 productos
+inventariables de BIMS sin contraparte en WooCommerce" que reportó el primer barrido en seco. El
+filtro por estado lo hace `core.stock.ESTADOS_VENDIBLES` = `("publish", "private")`, que sí deja
+afuera `draft` y `trash`.
 
 ## Escritura en WooCommerce
 
@@ -201,7 +226,9 @@ rotación el 2026-09-02 y ya es deuda.
 
 - **Página de BIMS que falla** → esos productos no se tocan, se cuenta y se sigue con las demás.
 - **Producto de BIMS sin correspondencia en Woo** → se reporta, no se crea.
-- **Variación ambigua** (varias hermanas sin SKU) → se saltea, se reporta.
+- **Variación sin SKU propio** → no es destino; el destino es el padre, una vez.
+- **Variación que hereda y gestiona su propio stock** → se reporta, no se toca.
+- **Dos destinos al mismo producto de BIMS** → aborta el barrido y avisa (no debería pasar).
 - **Escritura a Woo que falla** → se cuenta, se sigue con el resto del lote, se reintenta en el
   barrido siguiente. La escritura es idempotente.
 - **Todo el barrido falla** → avisa a Slack con la clave propia, reusando `core/alerts.py`, que ya
@@ -246,14 +273,42 @@ están mal**, y aplicar la mitad de un dato contaminado es peor que no aplicar n
 **Salón de Ventas (depósito 3): fuera de alcance.** Decidido por Carlos. Hoy tiene 0 unidades y no
 entra en el setting. Si alguna vez importa, se agrega el id y se reinicia.
 
-**Los 12 padres con variaciones ambiguas: no se tocan.** Decidido por Carlos. Esas 59 variaciones
-siguen con el stock que Woo tenga, igual que hoy, y la contabilidad no se rompe porque la venta se
-resta del padre en BIMS. El barrido igual las reporta en cada pasada, así que la lista está
+**Las 22 variaciones que gestionan su propio stock: no se tocan.** Decidido por Carlos el
+2026-09-03. Siguen con el stock que Woo tenga, igual que hoy, y la contabilidad no se rompe porque la
+venta se resta del padre en BIMS. El barrido las reporta en cada pasada, así que la lista está
 disponible el día que se quiera actuar — pero **no es un pendiente de esta spec**.
+
+**Publicar stock implica gestionarlo.** `update_product_stock` escribe `manage_stock: True`, así que
+un destino que hoy vende ilimitado queda gobernado por el número de BIMS. Son **14 de los 26
+padres**. Es inherente —no se puede publicar un stock sin que limite— y Carlos lo asumió
+explícitamente el 2026-09-03. El barrido **lista esos destinos aparte en cada corrida**, para que el
+cambio se vea en el seco antes de aplicarse.
+
+## Lo que encontró el barrido en seco (2026-09-03)
+
+La primera corrida en seco sobre producción invalidó tres cosas que esta spec daba por establecidas.
+Queda anotado porque el modo seco existía exactamente para esto:
+
+1. **La herencia por variación fabricaba vínculos.** `188079` y `188080` (`Ciencias de la tierra`,
+   Online y En puerta) no tienen SKU propio y cada una recibía las 16 unidades del `bims 575`: **32
+   publicadas donde hay 16**. La guarda de ambigüedad no lo frenó porque **nunca puede dispararse**:
+   contaba "hermanas sin SKU" leyendo el SKU de la REST, que ya viene heredado, así que `sin_sku`
+   daba 0. Era código muerto.
+2. **Los "422 inventariables sin contraparte" eran un artefacto** del filtro `status="publish"`, no
+   un hueco del catálogo.
+3. **La coincidencia de depósitos no estaba confirmada.** La lectura de "44 de 48 ya coinciden" era
+   un mal razonamiento: `calcular_cambios` saltea sin distinguirlo todo producto que BIMS no
+   devolvió, así que "no hay dato" y "coincide exacto" se ven iguales en esa cuenta. Los depósitos
+   `6,7` siguen siendo **plausibles** por la medición del 2026-09-02 (Casa Matriz en 0 sobre los 427
+   inventariables), pero **el seco no los confirmó**: hay que volver a mirarlo con el modelo nuevo.
 
 ## Preguntas abiertas
 
-Ninguna. Las tres que había quedaron cerradas arriba.
+**Los 176 productos de Woo sin SKU propio ni en la variación ni en el padre.** Se venden —`124861`
+lleva 2847 líneas, `192638` vendió el 01/09— y se facturan contra el producto de BIMS del padre por
+la herencia de la REST. Para el **stock** ya está resuelto (el padre es el destino). Lo que queda
+por decidir, y no es de esta spec, es si esa imputación contable es la deseada o si a esas
+variaciones les falta SKU propio.
 
 ## El veredicto de la comparación
 
