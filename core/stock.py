@@ -161,12 +161,17 @@ class Destino(NamedTuple):
 
 class VariacionIgnorada(NamedTuple):
     """
-    Una variación que hereda el SKU del padre **pero gestiona su propio stock**.
+    Una variación que hereda el SKU del padre y lleva su **propio** contador.
 
-    WooCommerce usa el contador de la variación, así que el número que se escriba
-    en el padre no limita su venta. Son 22 (8 padres, todo merch) medidas el
-    2026-09-03. Decisión de Carlos: reportarlas y **no tocarlas** — arreglarlas
-    implica apagarles `manage_stock` en Woo, que es un cambio de datos.
+    **No es un defecto** (Carlos, 2026-09-03): esos contadores los mantiene la
+    cajería. BIMS tiene un producto por tipo de taza, no por diseño —`bims 27` es
+    "TAZA PEQUEÑA - TTKLAB" y no conoce "Newton" ni "Pato"—, así que el detalle
+    por diseño sólo existe del lado de Woo y nadie más lo puede llevar. La regla
+    es: **se escribe el stock del padre y no se toca el de los hijos.**
+
+    Se informan porque WooCommerce usa el contador de la variación, o sea que
+    para éstas el número del padre **no gobierna la venta**. Sin la lista, ese
+    número se puede leer como si fuera lo vendible.
     """
 
     woo_id: int

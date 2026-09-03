@@ -312,20 +312,25 @@ class Command(BaseCommand):
 
     def _informar_ignoradas(self, ignoradas) -> None:
         """
-        Variaciones que heredan el SKU del padre **y gestionan su propio stock**.
+        Variaciones que heredan el SKU del padre y llevan su **propio** contador.
 
-        WooCommerce usa el contador de la variación, así que el número escrito en
-        el padre no limita su venta. Son 22 en 8 padres, todo merch (tazas,
-        remeras, posters). Decisión de Carlos (2026-09-03): **reportarlas y no
-        tocarlas**; arreglarlas es apagarles `manage_stock` en Woo, que es un
-        cambio de datos y no le toca a un barrido decidirlo.
+        **No es un defecto y no hay que arreglarlo** (Carlos, 2026-09-03): esos
+        contadores los mantiene la cajera, porque BIMS no modela el diseño —tiene
+        un producto por tipo de taza, no por diseño— y ese detalle sólo existe del
+        lado de Woo. La regla es: **el barrido escribe el stock del padre y no
+        toca el de los hijos.**
+
+        Se informan igual, por una razón: WooCommerce usa el contador de la
+        variación, así que el número del padre **no gobierna** esas ventas. Sin
+        esta lista, alguien podría leer el stock del padre como si fuera lo
+        vendible y planificar con un número que no manda.
         """
         if not ignoradas:
             return
         self.stdout.write(
-            f"{len(ignoradas)} variación(es) heredan el SKU del padre pero "
-            f"gestionan su propio stock: el número del padre NO limita su venta. "
-            f"No se tocan (hay que apagarles manage_stock en Woo):"
+            f"{len(ignoradas)} variación(es) llevan su propio contador de stock, "
+            f"que el barrido NO toca (lo mantiene la cajería). Para éstas, el "
+            f"número del padre no gobierna la venta:"
         )
         for ignorada in ignoradas:
             self.stdout.write(

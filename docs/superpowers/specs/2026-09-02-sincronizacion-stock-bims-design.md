@@ -142,16 +142,33 @@ El invariante es la base de la regla, así que si algún día se rompe hay que e
 la **guarda de colisión** (`core.stock.colisiones`), que aborta el barrido si dos destinos reclaman
 el mismo producto de BIMS. Con este modelo no debería dispararse nunca.
 
-#### Las 22 variaciones que heredan pero gestionan su propio stock
+#### Las variaciones que heredan pero llevan su propio contador
 
 De las 76 que heredan, **22 tienen `manage_stock=yes` propio** (8 padres, todo merch: tazas 27 y 28,
 `Tazas Pequeñas SC` 162, bolsas 8, remeras 24, posters 29, stickers 108). WooCommerce usa el
-contador de la variación, así que **el número escrito en el padre no limita su venta**.
+contador de la variación, así que **el número escrito en el padre no gobierna su venta**.
 
-**Decisión (Carlos, 2026-09-03): el barrido las reporta y no las toca.** Arreglarlas es apagarles
-`manage_stock` en Woo, que es un cambio de datos y no le corresponde decidirlo a un barrido. La
-lista que produce cada corrida es el insumo para decidirlo aparte. Casi todas están hoy en stock 0;
-la excepción es `14124` (`Tazas Pequeñas SC`) con 88 unidades y venta el 30/08.
+**Y eso está bien, no es un defecto (Carlos, 2026-09-03): esos contadores los mantiene la
+cajería.** BIMS tiene un producto por **tipo** de taza y no por diseño —`bims 27` es "TAZA PEQUEÑA -
+TTKLAB", y no conoce "Newton", "Pato" ni "Muci rosa"—, así que el detalle por diseño **sólo existe
+del lado de Woo** y nadie más lo puede llevar. De ahí la regla: **se escribe el stock del padre y no
+se toca el de los hijos**, y aplica sólo donde el padre tiene SKU y los hijos no.
+
+El barrido las lista igual, por una razón distinta de la que decía la versión anterior de esta
+sección: no es una lista de pendientes, es para que el stock del padre no se lea como si fuera lo
+vendible de esas variaciones. Casi todas están hoy en 0; la excepción es `14124` (`Tazas Pequeñas
+SC`) con 88 unidades y venta el 30/08.
+
+⚠️ **Consecuencia asumida:** para esos productos, publicar el stock del padre **no cambia lo que la
+web vende**. El número queda como referencia de BIMS, y lo vendible sigue siendo lo que la cajería
+mantiene por diseño.
+
+⚠️ **Riesgo latente, no vivo hoy:** si un padre-destino recibiera 0 de BIMS mientras sus hijos
+autogestionados tienen unidades, `update_product_stock` le escribiría `stock_status: outofstock`, y
+no está verificado si WooCommerce respeta ese estado en un producto variable —podría ocultar el
+producto entero. **Medido el 2026-09-03: no puede pasar ahora**, porque ninguno de los 5 destinos
+que van a 0 es un padre variable (4 son variaciones con SKU propio y 1 un producto simple, ninguno
+con variaciones colgando).
 
 ### No se filtra por `status="publish"`
 
@@ -273,10 +290,10 @@ están mal**, y aplicar la mitad de un dato contaminado es peor que no aplicar n
 **Salón de Ventas (depósito 3): fuera de alcance.** Decidido por Carlos. Hoy tiene 0 unidades y no
 entra en el setting. Si alguna vez importa, se agrega el id y se reinicia.
 
-**Las 22 variaciones que gestionan su propio stock: no se tocan.** Decidido por Carlos el
-2026-09-03. Siguen con el stock que Woo tenga, igual que hoy, y la contabilidad no se rompe porque la
-venta se resta del padre en BIMS. El barrido las reporta en cada pasada, así que la lista está
-disponible el día que se quiera actuar — pero **no es un pendiente de esta spec**.
+**Las variaciones que llevan su propio contador: no se tocan, y no hay nada que arreglar.**
+Decidido por Carlos el 2026-09-03: los mantiene la cajería, porque BIMS no modela el diseño. La
+contabilidad no se rompe, porque la venta se resta del producto del padre en BIMS. **No es un
+pendiente**: es cómo se opera.
 
 **Publicar stock implica gestionarlo.** `update_product_stock` escribe `manage_stock: True`, así que
 un destino que hoy vende ilimitado queda gobernado por el número de BIMS. Son **14 de los 26
