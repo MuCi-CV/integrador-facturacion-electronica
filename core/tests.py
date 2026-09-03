@@ -4611,6 +4611,43 @@ class ResolucionDeDestinosTest(TestCase):
         self.assertEqual(sorted(i.woo_id for i in ignoradas), [1739, 14124])
         self.assertEqual([i.bims_id for i in ignoradas], [27, 27])
 
+    def test_manage_stock_parent_NO_es_gestion_propia(self):
+        """
+        La REST devuelve **tres** valores en `manage_stock` de una variación:
+        `true`, `false` y el string `"parent"`. Ese string significa "no gestiono,
+        lo hace mi padre", y aparece justo cuando el padre sí gestiona — o sea el
+        caso en que escribir en el padre **sí** limita la venta.
+
+        Medido el 2026-09-03: `204800/01/02` tienen `_manage_stock='no'` con padre
+        en `yes`, y el barrido las reportó como problema. `bool("parent")` es
+        `True`, así que tomarlo crudo invierte el sentido y llena el reporte de
+        falsos positivos: 57 informadas contra 22 reales.
+        """
+        from core.stock import destinos_de_producto
+
+        _destinos, _descartes, ignoradas = destinos_de_producto(
+            self._padre(id=204799, sku="645", name="Misterios del Reino Fungi"),
+            [self._variacion(id=204800, sku="645", name="Online",
+                             manage_stock="parent")],
+        )
+
+        self.assertEqual(ignoradas, [])
+
+    def test_un_destino_con_manage_stock_parent_no_gestiona_su_stock(self):
+        """
+        El mismo string, del otro lado: una variación con SKU propio que hereda la
+        gestión del padre **no** lleva contador propio, así que publicarle stock
+        la pasa de ilimitada a limitada y hay que avisarlo.
+        """
+        from core.stock import destinos_de_producto
+
+        destinos, _descartes, _ignoradas = destinos_de_producto(
+            self._padre(id=199449, sku=None),
+            [self._variacion(id=199450, sku="639", manage_stock="parent")],
+        )
+
+        self.assertFalse(destinos[0].gestiona_stock)
+
     def test_las_variaciones_en_estado_no_vendible_quedan_afuera(self):
         """`private` sí entra: es el catálogo del POS de FooEvents."""
         from core.stock import destinos_de_producto

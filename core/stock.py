@@ -180,6 +180,25 @@ def _stock_actual(entrada: dict) -> float:
     return _a_float(entrada.get("stock_quantity"))
 
 
+def gestiona_su_stock(manage_stock) -> bool:
+    """
+    Si esa entrada de Woo lleva su **propio** contador de stock.
+
+    ⚠️ La REST devuelve **tres** valores en el `manage_stock` de una variación:
+    `true`, `false` y el string **`"parent"`**. Ese string significa "no
+    gestiono, lo hace mi padre", y aparece exactamente cuando el padre sí
+    gestiona — o sea el caso en que escribir en el padre **sí** limita la venta.
+
+    `bool("parent")` es `True`, así que tomar el valor crudo **invierte el
+    sentido**: marca como problema las variaciones que están bien. Medido el
+    2026-09-03 en el barrido en seco: 57 reportadas contra 22 reales, unos 35
+    falsos positivos, todos de eventos cuyo padre gestiona el stock.
+    """
+    if isinstance(manage_stock, str):
+        return manage_stock.strip().lower() not in ("parent", "no", "false", "")
+    return bool(manage_stock)
+
+
 def destinos_de_producto(
     producto: dict, variaciones: Optional[list]
 ) -> Tuple[List[Destino], "Counter", List[VariacionIgnorada]]:
@@ -220,7 +239,7 @@ def destinos_de_producto(
                     ruta_woo=str(producto["id"]),
                     bims_id=bims_id_padre,
                     stock_actual=_stock_actual(producto),
-                    gestiona_stock=bool(producto.get("manage_stock")),
+                    gestiona_stock=gestiona_su_stock(producto.get("manage_stock")),
                     etiqueta=producto.get("name") or "",
                 )
             )
@@ -248,7 +267,7 @@ def destinos_de_producto(
                     ruta_woo=f"{producto['id']}/variations/{variacion['id']}",
                     bims_id=propio,
                     stock_actual=_stock_actual(variacion),
-                    gestiona_stock=bool(variacion.get("manage_stock")),
+                    gestiona_stock=gestiona_su_stock(variacion.get("manage_stock")),
                     etiqueta=variacion.get("name") or "",
                 )
             )
@@ -260,7 +279,7 @@ def destinos_de_producto(
             continue
 
         hereda_alguien = True
-        if variacion.get("manage_stock"):
+        if gestiona_su_stock(variacion.get("manage_stock")):
             ignoradas.append(
                 VariacionIgnorada(
                     woo_id=variacion["id"],
@@ -278,7 +297,7 @@ def destinos_de_producto(
                 ruta_woo=str(producto["id"]),
                 bims_id=bims_id_padre,
                 stock_actual=_stock_actual(producto),
-                gestiona_stock=bool(producto.get("manage_stock")),
+                gestiona_stock=gestiona_su_stock(producto.get("manage_stock")),
                 etiqueta=producto.get("name") or "",
             )
         )
