@@ -84,6 +84,32 @@ class ParsePosPaymentsTest(TestCase):
             {"payment_method_id": 27, "amount": 65000.0},
         ])
 
+    def test_pago_dividido_con_amount_nan_usa_pa(self):
+        """
+        Regresión orden 211618 (18-oct-2026): FooEvents POS guardó "amount": "NaN"
+        en el segundo pago de un pago dividido. El monto real está en "pa"; sin
+        esto el NaN viaja a BIMS y el POST falla con "Out of range float values
+        are not JSON compliant".
+        """
+        meta_data = self._meta(
+            '[{"opmk": "fooeventspos_other", "pa": "80000", "amount": "80000"},'
+            ' {"opmk": "fooeventspos_cash", "pa": "75000", "amount": "NaN"}]'
+        )
+        result = _parse_pos_payments(meta_data, total=155000)
+        self.assertEqual(result, [
+            {"payment_method_id": 27, "amount": 80000.0},
+            {"payment_method_id": 21, "amount": 75000.0},
+        ])
+
+    def test_pago_dividido_sin_monto_valido_falla_con_mensaje_claro(self):
+        """Ni "amount" ni "pa" sirven: error legible en vez de un NaN hacia BIMS."""
+        meta_data = self._meta(
+            '[{"opmk": "fooeventspos_other", "amount": "80000"},'
+            ' {"opmk": "fooeventspos_cash", "pa": "", "amount": "NaN"}]'
+        )
+        with self.assertRaisesMessage(ValueError, "fooeventspos_cash"):
+            _parse_pos_payments(meta_data, total=155000)
+
     def test_metodo_desconocido_usa_default_online(self):
         meta_data = self._meta('[{"opmk": "fooeventspos_unknown", "amount": 0}]')
         result = _parse_pos_payments(meta_data, total=10000)

@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import re
 from typing import Optional
 
@@ -152,10 +153,31 @@ def _parse_pos_payments(meta_data: list, total: int) -> list:
     return [
         {
             "payment_method_id": _payment_method_id(p["opmk"]),
-            "amount": float(p["amount"]),
+            "amount": _monto_de_pago(p),
         }
         for p in payments
     ]
+
+
+def _monto_de_pago(pago: dict) -> float:
+    """
+    Monto de un pago de un pago dividido: "amount", o "pa" si "amount" no sirve.
+
+    FooEvents POS a veces guarda "amount": "NaN" (orden 211618, 18-oct-2026; hay
+    casos desde nov-2025) con el monto real en "pa". Un NaN o infinito no se
+    puede serializar a JSON, así que BIMS rechazaba la venta entera.
+    """
+    for campo in ("amount", "pa"):
+        try:
+            monto = float(pago.get(campo))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(monto):
+            return monto
+    raise ValueError(
+        f"Pago {pago.get('opmk')} sin monto válido: "
+        f"amount={pago.get('amount')!r}, pa={pago.get('pa')!r}"
+    )
 
 
 def _payment_method_id(opmk: str) -> int:
