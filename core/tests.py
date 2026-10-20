@@ -875,6 +875,52 @@ class ResolveContactPosNameTest(TestCase):
         _, kwargs = mock_bims.create_contact.call_args
         self.assertEqual(kwargs["name"], "Grecia Barreto")
 
+    @patch("core.services.bims")
+    @patch("core.services.get_razon_social")
+    def test_pos_nombre_en_mayusculas_no_se_espacia(self, mock_ruc, mock_bims):
+        from core.services import resolve_contact_id
+
+        mock_bims.find_contact.return_value = None
+        mock_bims.create_contact.return_value = 999
+
+        resolve_contact_id(
+            order_id=1,
+            meta_data=[],
+            billing={"first_name": "MILENA", "last_name": "MARTINEZ", "email": "m@x.com"},
+            shipping={"company": "5292120", "last_name": "MARTINEZ"},
+            is_pos=True,
+        )
+
+        _, kwargs = mock_bims.create_contact.call_args
+        self.assertEqual(kwargs["name"], "MILENA MARTINEZ")
+
+
+class CamelToSpacesTest(TestCase):
+    """Separa nombres pegados en camelCase sin romper los escritos en mayúsculas."""
+
+    def test_separa_camel_case(self):
+        from core.services import _camel_to_spaces
+
+        self.assertEqual(_camel_to_spaces("JuanPerez"), "Juan Perez")
+        self.assertEqual(_camel_to_spaces("MaríaJosé"), "María José")
+        self.assertEqual(_camel_to_spaces("PeñaÁlvarez"), "Peña Álvarez")
+
+    def test_mayusculas_quedan_intactas(self):
+        from core.services import _camel_to_spaces
+
+        # Antes salía "M I L E N A  M A R T I N E Z" en la factura.
+        self.assertEqual(_camel_to_spaces("MILENA MARTINEZ"), "MILENA MARTINEZ")
+        self.assertEqual(_camel_to_spaces("NÚÑEZ"), "NÚÑEZ")
+        self.assertEqual(_camel_to_spaces("SRL"), "SRL")
+
+    def test_texto_normal_y_vacio(self):
+        from core.services import _camel_to_spaces
+
+        self.assertEqual(_camel_to_spaces("Juan Bejarano"), "Juan Bejarano")
+        self.assertEqual(_camel_to_spaces("juan bejarano"), "juan bejarano")
+        self.assertEqual(_camel_to_spaces(""), "")
+        self.assertEqual(_camel_to_spaces(None), "")
+
 
 class ProcessOrderZeroTotalTest(TestCase):
     """Ninguna orden con total 0 debe llegar a BIMS (con o sin descuento)."""

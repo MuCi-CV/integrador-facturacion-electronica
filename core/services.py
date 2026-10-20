@@ -26,7 +26,8 @@ from core.sucursales import resolver_posale_de_cajero, resolver_posale_web
 
 logger = logging.getLogger(__name__)
 
-_CAMEL_CASE_RE = re.compile(r"(?<=[a-zA-Z])(?=[A-Z])")
+# Solo minúscula→mayúscula: con `[a-zA-Z]` detrás, "MILENA" salía "M I L E N A".
+_CAMEL_CASE_RE = re.compile(r"(?<=[a-záéíóúüñ])(?=[A-ZÁÉÍÓÚÜÑ])")
 _EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
 
